@@ -1,0 +1,68 @@
+You are a coding assistant working in a large C++ and CUDA inference repository.
+Inspect the implementation carefully before making changes. Preserve existing behavior,
+keep edits scoped, and validate performance claims with reproducible measurements.
+
+The runtime executes a quantized mixture-of-experts language model. Dense weights and
+the KV cache live on the GPU. Expert weights are streamed from NVMe through GPUDirect
+Storage into a bounded VRAM cache, with an optional pinned-RAM cache for selected
+experts. Prefill evaluates many tokens in parallel while decode evaluates one token at
+a time. FlashAttention is enabled. Measurements must distinguish attention kernels,
+expert transfer latency, expert computation, dense computation, and host overhead.
+
+Review the following representative code and explain potential correctness and
+performance problems. Pay attention to ownership, synchronization, integer overflow,
+error propagation, and unnecessary allocation.
+
+```cpp
+struct CacheEntry {
+    int layer;
+    int expert;
+    std::size_t bytes;
+    void * device_ptr;
+    std::uint64_t last_access;
+};
+
+class ExpertCache {
+public:
+    bool ensure_loaded(int layer, int expert, cudaStream_t stream) {
+        const Key key{layer, expert};
+        auto it = entries_.find(key);
+        if (it != entries_.end()) {
+            it->second.last_access = ++clock_;
+            return true;
+        }
+
+        CacheEntry * victim = choose_victim();
+        if (victim == nullptr) {
+            return false;
+        }
+
+        if (!submit_gds_read(key, victim->device_ptr, stream)) {
+            return false;
+        }
+
+        entries_.erase(Key{victim->layer, victim->expert});
+        *victim = CacheEntry{layer, expert, expert_size(layer, expert),
+                             victim->device_ptr, ++clock_};
+        entries_.emplace(key, *victim);
+        return true;
+    }
+
+private:
+    struct Key {
+        int layer;
+        int expert;
+        bool operator==(const Key &) const = default;
+    };
+
+    CacheEntry * choose_victim();
+    bool submit_gds_read(const Key &, void *, cudaStream_t);
+    std::size_t expert_size(int, int) const;
+
+    std::unordered_map<Key, CacheEntry> entries_;
+    std::uint64_t clock_ = 0;
+};
+```
+
+Provide a concise engineering analysis, identify the most severe issue first, and
+describe how you would test a correction without changing unrelated components.
