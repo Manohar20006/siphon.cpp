@@ -33,6 +33,11 @@ This is currently a **Linux-first CUDA project**. The tested path is Linux +
 NVIDIA GPU + CUDA + fast SSD. Windows support is not the primary target yet;
 work on a Windows-friendly path is planned/in progress.
 
+If you are currently on Windows and want to test this today, the simplest path
+is to install Linux as a dual-boot setup and run `qwen.cpp` there. That keeps
+your normal Windows install intact while giving this project the Linux CUDA/GDS
+environment it was built around.
+
 ## Requirements
 
 System requirements:
