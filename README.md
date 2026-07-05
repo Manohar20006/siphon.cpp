@@ -1,15 +1,46 @@
 # qwen.cpp
 
-`qwen.cpp` is a CUDA-focused `llama.cpp` fork for running Qwen3.6 MoE locally on
-constrained VRAM systems.
+Run **Qwen3.6 35B-A3B MoE locally on a 6 GB VRAM laptop**.
+
+`qwen.cpp` is a CUDA-focused `llama.cpp` fork built for one practical goal:
+make a serious MoE model usable on hardware that normally looks too small for
+it.
+
+Instead of loading every expert into VRAM or filling system RAM until the
+machine becomes unusable, `qwen.cpp` streams MoE experts from SSD on demand with
+NVIDIA GDS/cuFile, keeps hot experts cached, and uses compressed TQ3
+FlashAttention for long-context decode.
+
+On the tested RTX 4050 Laptop GPU with 6 GB VRAM, this setup has reached:
+
+| Workload | Observed local speed |
+| --- | ---: |
+| Prompt / prefill | 50+ tokens/s |
+| Decode / generation | around 20 tokens/s in favorable runs |
+
+The important part is not just the speed. The machine stays usable. You can
+keep a browser, editor, terminal, and other normal desktop work open because the
+project is designed around **SSD expert streaming** and bounded RAM pressure,
+not brute-force RAM residency.
+
+## Why This Exists
+
+Most local MoE setups fail on small GPUs for one of two reasons:
+
+- They need far more VRAM than a laptop GPU has.
+- They spill so much into system RAM that the whole machine becomes painful to
+  use.
+
+`qwen.cpp` takes a different path:
 
 The default setup is tuned for a single-GPU laptop/server workflow:
 
-- DirectStorage-style expert streaming for MoE weights
-- static pinned-RAM expert suites selected from routing traces
-- CUDA FlashAttention with fused TQ3 KV handling
-- OpenAI-compatible `llama-server`
-- built-in web chat UI
+- Stream MoE expert weights from SSD instead of permanently loading everything.
+- Keep a bounded VRAM expert cache for hot routed experts.
+- Use a static pinned-RAM expert suite selected from routing traces.
+- Avoid long-context KV dequant overhead with fused TQ3 CUDA FlashAttention.
+- Serve through the normal OpenAI-compatible `llama-server`.
+- Chat in the browser at `http://127.0.0.1:8090`.
 
 ## Tested Hardware
 
@@ -29,6 +60,18 @@ This repo was developed and tested on:
 The default launch keeps the GPU cache modest and uses pinned system RAM for a
 static expert suite. Larger GPUs can raise the cache sizes; smaller systems may
 need lower context or cache settings.
+
+## Practical Laptop Tips
+
+For best performance:
+
+- Keep the laptop plugged in.
+- Use the vendor/OS performance mode instead of silent or battery-saver mode.
+- Keep the model and expert files on a fast SSD.
+- Let the GPU stay cool; thermal throttling can reduce both prompt and decode
+  speed.
+- Leave some system RAM free for the OS and browser. The default settings are
+  meant to keep the machine usable, not consume every available GiB.
 
 ## Quick Start
 
