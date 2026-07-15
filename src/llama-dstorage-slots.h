@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -501,8 +502,14 @@ public:
         return std::min(n_slots / 4, requested);
     }
 
-    static bool slot_in_speculative_partition(int slot_idx, int n_slots, int speculative_slots) {
-        return speculative_slots > 0 && slot_idx >= n_slots - speculative_slots;
+    bool slot_in_speculative_partition(int slot_idx, int speculative_slots) const {
+        if (speculative_slots <= 0 || n_slots_ <= 0) {
+            return false;
+        }
+        const int group = slots_[slot_idx].pool_group;
+        int spec_slots_for_group = (speculative_slots * pool_group_slot_counts_[group]) / n_slots_;
+        spec_slots_for_group = std::max(1, spec_slots_for_group);
+        return slots_[slot_idx].pool_index >= pool_group_slot_counts_[group] - spec_slots_for_group;
     }
 
     static bool should_admit_prefetch(
@@ -628,6 +635,17 @@ public:
     // Get actual slot stride (in bytes) allocated for a given tensor type pool
     uint64_t get_slot_stride(const std::string & tensor_name);
     int get_slot_count(const std::string & tensor_name);
+    uint64_t get_prefill_workspace_slot_stride(const std::string & tensor_name);
+    int get_prefill_workspace_slot_count() const;
+
+    bool prefill_workspace_activate_layer(
+        int layer_idx,
+        const int32_t * expert_ids,
+        int n_selected,
+        std::unordered_map<std::string, uint64_t> & out_pool_ptrs,
+        std::vector<int32_t> & out_id_map
+    );
+    void prefill_workspace_preload_layers_async(int first_layer_idx, int n_layers);
 
     struct PinnedSlice {
         std::string tensor_name;
@@ -701,6 +719,8 @@ private:
             const ExpertSlot & current_best,
             int current_layer) const;
     int speculative_slot_count() const;
+    bool ensure_prefill_workspaces_allocated();
+    bool load_prefill_workspace_layer(int workspace_idx, int layer_idx, const std::vector<int32_t> & expert_ids);
 
     // Per-type VRAM pool: one allocation per tensor type (e.g. ffn_gate_up_exps.weight)
     struct TensorTypePool {
@@ -710,6 +730,14 @@ private:
         bool owns_alloc = true;
     };
 
+    struct PrefillWorkspace {
+        int layer_idx = -1;
+        bool ready = false;
+        bool loading = false;
+        bool failed = false;
+        std::unordered_map<std::string, TensorTypePool> pools;
+        std::future<bool> future;
+    };
 
     struct PinnedReadOp {
         std::wstring file_path;
@@ -748,6 +776,8 @@ private:
     DSLoaderHandle ds_loader_ = nullptr;
     std::mutex slots_mutex_;
     std::mutex async_prefetch_mutex_;
+    mutable std::mutex stats_mutex_;
+    std::mutex prefill_workspace_stream_mutex_;
 
     int n_slots_ = 0;
     uint64_t pool_budget_bytes_ = 0;
@@ -757,7 +787,7 @@ private:
     bool pools_allocated_ = false;
     bool phase_cache_policy_ = false;
     bool hybrid_arc_policy_ = false;
-    bool speculative_prefetch_enabled_ = false;
+    std::atomic<bool> speculative_prefetch_enabled_{false};
     uint64_t use_tick_ = 0;
     uint64_t pinned_budget_bytes_ = 0;
     uint64_t pinned_used_bytes_ = 0;
@@ -774,6 +804,10 @@ private:
     // Per-type VRAM pools keyed by type key (e.g. "ffn_gate_up_exps.weight")
     std::unordered_map<std::string, TensorTypePool> type_pools_;
     std::unordered_map<std::string, TensorTypePool> active_type_pools_;
+    std::vector<PrefillWorkspace> prefill_workspaces_;
+    int active_prefill_workspace_idx_ = -1;
+    int active_prefill_workspace_layer_ = -1;
+    bool prefill_workspaces_allocated_ = false;
     std::unordered_map<std::string, uint64_t> type_strides_;
     std::unordered_map<int, int> layer_pool_groups_;
     std::vector<uint64_t> layer_reload_bytes_;
@@ -975,4 +1009,5 @@ private:
     int n_layers_      = 0;
     int n_experts_     = 0;
     int n_expert_used_ = 0;
+
 };

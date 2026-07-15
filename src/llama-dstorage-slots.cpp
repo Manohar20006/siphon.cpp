@@ -603,6 +603,16 @@ int DStorageSlotManager::get_slot_count(const std::string & tensor_name) {
     return n_slots_;
 }
 
+uint64_t DStorageSlotManager::get_prefill_workspace_slot_stride(const std::string & tensor_name) {
+    std::lock_guard<std::mutex> slot_lock(slots_mutex_);
+    auto it = type_strides_.find(get_tensor_type_key(tensor_name));
+    return it != type_strides_.end() ? it->second : 0;
+}
+
+int DStorageSlotManager::get_prefill_workspace_slot_count() const {
+    return n_experts_;
+}
+
 static int llama_dstorage_max_coalesced_experts() {
     static const int value = [] {
         const char * env = std::getenv("LLAMA_DSTORAGE_COALESCE_EXPERTS");
@@ -763,7 +773,6 @@ bool DStorageSlotManager::static_pinned_entry(uint64_t expert_key) const {
 }
 
 void DStorageSlotManager::set_speculative_prefetch_enabled(bool enabled) {
-    std::lock_guard<std::mutex> slot_lock(slots_mutex_);
     speculative_prefetch_enabled_ = enabled;
 }
 
@@ -1072,26 +1081,46 @@ bool DStorageSlotManager::pinned_admission_pending(uint64_t expert_key) const {
 }
 
 void DStorageSlotManager::collect_async_prefetches(bool wait_all) {
-    std::lock_guard<std::mutex> lock(async_prefetch_mutex_);
-    for (size_t i = 0; i < async_prefetches_.size();) {
-        PendingAsyncPrefetch & pending = async_prefetches_[i];
-        const bool ready = wait_all ||
-                pending.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-        if (!ready) {
-            ++i;
-            continue;
+    std::vector<PendingAsyncPrefetch> to_wait;
+    {
+        std::lock_guard<std::mutex> lock(async_prefetch_mutex_);
+        if (wait_all) {
+            to_wait = std::move(async_prefetches_);
+            async_prefetches_.clear();
+        } else {
+            for (auto it = async_prefetches_.begin(); it != async_prefetches_.end();) {
+                if (it->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                    to_wait.push_back(std::move(*it));
+                    it = async_prefetches_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
         }
+    }
 
+    if (to_wait.empty()) {
+        return;
+    }
+
+    uint64_t ok_count = 0;
+    uint64_t fail_count = 0;
+    for (auto & pending : to_wait) {
         const bool ok = pending.future.get();
         if (ok) {
-            diagnostic_stats_.prefetch_completed_ok++;
+            ok_count++;
         } else {
-            diagnostic_stats_.prefetch_completed_failed++;
+            fail_count++;
         }
         LLAMA_DSTORAGE_DEBUG_LOG(
-                "DStorage DEBUG prefetch:async_complete layer=%d ids=%d layers=%zu ok=%d pending_before=%zu\n",
-                pending.layer_idx, pending.n_selected, pending.affected_layers.size(), ok ? 1 : 0, async_prefetches_.size());
-        async_prefetches_.erase(async_prefetches_.begin() + i);
+                "DStorage DEBUG prefetch:async_complete layer=%d ids=%d layers=%zu ok=%d\n",
+                pending.layer_idx, pending.n_selected, pending.affected_layers.size(), ok ? 1 : 0);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(async_prefetch_mutex_);
+        diagnostic_stats_.prefetch_completed_ok += ok_count;
+        diagnostic_stats_.prefetch_completed_failed += fail_count;
     }
 }
 
@@ -1718,7 +1747,7 @@ bool DStorageSlotManager::ensure_active_pools_allocated(int active_capacity) {
     return true;
 }
 
-#if 0
+#if 1
 bool DStorageSlotManager::ensure_prefill_workspaces_allocated() {
     if (prefill_workspaces_allocated_) {
         return true;
@@ -1730,7 +1759,7 @@ bool DStorageSlotManager::ensure_prefill_workspaces_allocated() {
         return false;
     }
 
-    const int workspace_count = 3;
+    const int workspace_count = 2;
     prefill_workspaces_.clear();
     prefill_workspaces_.resize(workspace_count);
 
@@ -1766,7 +1795,7 @@ bool DStorageSlotManager::ensure_prefill_workspaces_allocated() {
 #endif
         }
         LLAMA_LOG_INFO(
-                "%s: allocated prefill workspace %d for one full MoE layer: %.2f MiB (%d experts)\n",
+                "%s: allocated prefill workspace %d for one MoE layer batch: %.2f MiB (%d expert slots)\n",
                 __func__, workspace_idx, bytes_per_workspace / 1024.0 / 1024.0, n_experts_);
     }
 
@@ -1774,15 +1803,24 @@ bool DStorageSlotManager::ensure_prefill_workspaces_allocated() {
     return true;
 }
 
-bool DStorageSlotManager::load_prefill_workspace_layer(int workspace_idx, int layer_idx) {
+bool DStorageSlotManager::load_prefill_workspace_layer(
+        int workspace_idx,
+        int layer_idx,
+        const std::vector<int32_t> & expert_ids) {
     if (workspace_idx < 0 || workspace_idx >= int(prefill_workspaces_.size()) ||
             layer_idx < 0 || layer_idx >= n_layers_) {
         return false;
     }
 
+    // If no experts specified (async preload path), nothing to load — activation will load on demand
+    if (expert_ids.empty()) {
+        return true;
+    }
+
 #if !LLAMA_DSTORAGE_HAS_BACKEND
     GGML_UNUSED(workspace_idx);
     GGML_UNUSED(layer_idx);
+    GGML_UNUSED(expert_ids);
     return false;
 #else
     const int64_t t0 = llama_dstorage_now_us();
@@ -1798,7 +1836,7 @@ bool DStorageSlotManager::load_prefill_workspace_layer(int workspace_idx, int la
         }
 
         PrefillWorkspace & workspace = prefill_workspaces_[workspace_idx];
-        batch_requests.reserve(layer_it->second.size() * size_t(n_experts_));
+        batch_requests.reserve(layer_it->second.size() * expert_ids.size());
         for (const std::string & tname : layer_it->second) {
             const std::string tkey = make_tensor_key(layer_idx, tname.c_str());
             auto reg_it = tensor_registry_.find(tkey);
@@ -1817,28 +1855,23 @@ bool DStorageSlotManager::load_prefill_workspace_layer(int workspace_idx, int la
             }
             const TensorTypePool & pool = pool_it->second;
 
-            if (pool.slot_size == info.expert_stride && !info.sidecar_expert_major) {
+            // Load each requested expert individually into the workspace slot
+            for (size_t i = 0; i < expert_ids.size(); ++i) {
+                const int eid = expert_ids[i];
+                if (eid < 0 || eid >= n_experts_) {
+                    continue;
+                }
                 DSLoaderStreamRequest req;
                 req.file_path = info.file_path.c_str();
-                req.file_offset = info.file_offset;
-                req.size = uint64_t(n_experts_) * info.expert_stride;
-                req.cuda_dest_ptr = pool.cuda_ptr;
-                req.uncompressed_size = req.size;
+                req.file_offset = llama_dstorage_expert_file_offset(info, eid);
+                req.size = info.expert_stride;
+                req.cuda_dest_ptr = pool.cuda_ptr + uint64_t(i) * pool.slot_size;
+                req.uncompressed_size = info.expert_stride;
                 batch_requests.push_back(req);
-            } else {
-                for (int eid = 0; eid < n_experts_; ++eid) {
-                    DSLoaderStreamRequest req;
-                    req.file_path = info.file_path.c_str();
-                    req.file_offset = llama_dstorage_expert_file_offset(info, eid);
-                    req.size = info.expert_stride;
-                    req.cuda_dest_ptr = pool.cuda_ptr + uint64_t(eid) * pool.slot_size;
-                    req.uncompressed_size = info.expert_stride;
-                    batch_requests.push_back(req);
-                }
             }
         }
         possible_run_count = uint64_t(layer_it->second.size());
-        possible_run_expert_count = uint64_t(layer_it->second.size()) * uint64_t(n_experts_);
+        possible_run_expert_count = uint64_t(layer_it->second.size()) * uint64_t(expert_ids.size());
     }
 
     if (llama_dstorage_sort_batch_by_offset()) {
@@ -1905,10 +1938,10 @@ bool DStorageSlotManager::load_prefill_workspace_layer(int workspace_idx, int la
         std::lock_guard<std::mutex> slot_lock(slots_mutex_);
         prefetch_stats_.calls++;
         if (result == 0) {
-            prefetch_stats_.misses += uint64_t(n_experts_);
+            prefetch_stats_.misses += uint64_t(expert_ids.size());
             prefetch_stats_.miss_calls++;
             prefetch_stats_.stream_calls++;
-            prefetch_stats_.stream_cold_experts += uint64_t(n_experts_);
+            prefetch_stats_.stream_cold_experts += uint64_t(expert_ids.size());
             prefetch_stats_.stream_possible_runs += possible_run_count;
             prefetch_stats_.stream_possible_run_experts += possible_run_expert_count;
             prefetch_stats_.stream_runs += possible_run_count;
@@ -2020,7 +2053,7 @@ bool DStorageSlotManager::prefill_workspace_activate_layer(
             workspace.loading = false;
             workspace.failed = false;
         }
-        const bool ok = load_prefill_workspace_layer(workspace_idx, layer_idx);
+        const bool ok = load_prefill_workspace_layer(workspace_idx, layer_idx, std::vector<int32_t>(expert_ids, expert_ids + n_selected));
         std::lock_guard<std::mutex> slot_lock(slots_mutex_);
         PrefillWorkspace & workspace = prefill_workspaces_[workspace_idx];
         workspace.ready = ok;
@@ -2134,7 +2167,9 @@ void DStorageSlotManager::prefill_workspace_preload_layers_async(
                     std::launch::async,
                     [this, workspace_idx, layer_idx]() {
                         try {
-                            return this->load_prefill_workspace_layer(workspace_idx, layer_idx);
+                            // Async preload doesn't know which experts will be needed;
+                            // load will be done on-demand by prefill_workspace_activate_layer
+                            return this->load_prefill_workspace_layer(workspace_idx, layer_idx, {});
                         } catch (...) {
                             return false;
                         }
@@ -2694,7 +2729,7 @@ bool DStorageSlotManager::prefetch_global_batch(std::vector<QueuedGlobalPrefetch
     uint64_t possible_run_expert_count = 0;
 
     auto slot_allowed = [&](int slot_idx, int layer_idx) {
-        return slot_in_speculative_partition(slot_idx, n_slots_, speculative_slots) &&
+        return slot_in_speculative_partition(slot_idx, speculative_slots) &&
                slot_compatible_with_layer(slot_idx, layer_idx);
     };
     auto slot_already_reserved = [&](int slot_idx) {
@@ -2922,9 +2957,13 @@ bool DStorageSlotManager::prefetch_global_batch(std::vector<QueuedGlobalPrefetch
     }
 
     const uint64_t transfer_us = uint64_t(std::max<int64_t>(0, llama_dstorage_now_us() - t0));
-    transfer_ewma_us_ = transfer_ewma_us_ == 0.0
-            ? double(transfer_us)
-            : transfer_ewma_us_ * 0.8 + double(transfer_us) * 0.2;
+    const double transfer_val = double(transfer_us);
+    {
+        std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+        transfer_ewma_us_ = transfer_ewma_us_ == 0.0
+                ? transfer_val
+                : transfer_ewma_us_ * 0.8 + transfer_val * 0.2;
+    }
     prefetch_stats_.stream_calls++;
     prefetch_stats_.stream_cold_experts += uint64_t(load_plan.size());
     prefetch_stats_.stream_possible_runs += possible_run_count;
@@ -3006,7 +3045,7 @@ bool DStorageSlotManager::prefetch_experts_async(
         int64_t victim_retention_cost = std::numeric_limits<int64_t>::max();
         const int speculative_slots = speculative_slot_count();
         for (int slot_idx = 0; slot_idx < int(slots_.size()); ++slot_idx) {
-            if (!slot_in_speculative_partition(slot_idx, n_slots_, speculative_slots)) {
+            if (!slot_in_speculative_partition(slot_idx, speculative_slots)) {
                 continue;
             }
             const ExpertSlot & slot = slots_[slot_idx];
@@ -3231,7 +3270,7 @@ bool DStorageSlotManager::enqueue_global_prefetch(
         int64_t victim_retention_cost = std::numeric_limits<int64_t>::max();
         const int speculative_slots = speculative_slot_count();
         for (int slot_idx = 0; slot_idx < int(slots_.size()); ++slot_idx) {
-            if (!slot_in_speculative_partition(slot_idx, n_slots_, speculative_slots)) {
+            if (!slot_in_speculative_partition(slot_idx, speculative_slots)) {
                 continue;
             }
             const ExpertSlot & slot = slots_[slot_idx];
@@ -3475,7 +3514,7 @@ bool DStorageSlotManager::ensure_experts_loaded(
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "wait_layer_prefetch", t_step, llama_dstorage_now_us());
 
     t_step = llama_dstorage_now_us();
-    std::lock_guard<std::mutex> slot_lock(slots_mutex_);
+    std::unique_lock<std::mutex> slot_lock(slots_mutex_);
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "acquire_slot_lock", t_step, llama_dstorage_now_us());
 
     if (phase != dstorage_moe_phase::prefetch) {
@@ -3505,18 +3544,19 @@ bool DStorageSlotManager::ensure_experts_loaded(
     LLAMA_DSTORAGE_DEBUG_LOG("DStorage DEBUG slots:ensure_loaded enter layer=%d n_selected=%d phase=%s phase_policy=%d pools_allocated=%d\n",
             layer_idx, n_selected, llama_dstorage_phase_name(phase), phase_cache_policy_ ? 1 : 0, pools_allocated_ ? 1 : 0);
 
+    const bool is_async_prefetch = (phase == dstorage_moe_phase::prefetch);
     const dstorage_moe_phase target_phase =
             phase == dstorage_moe_phase::prefill
                     ? dstorage_moe_phase::prefill
                     : dstorage_moe_phase::decode;
-    const bool need_reallocate = should_reallocate_for_phase(
+    const bool need_reallocate = !is_async_prefetch && should_reallocate_for_phase(
             phase_cache_policy_,
             current_allocated_phase_,
             target_phase,
             pool_budget_bytes_prefill_,
             pool_budget_bytes_decode_);
 
-    if (current_allocated_phase_ != target_phase) {
+    if (!is_async_prefetch && current_allocated_phase_ != target_phase) {
         pool_budget_bytes_ = target_phase == dstorage_moe_phase::prefill
                 ? pool_budget_bytes_prefill_
                 : pool_budget_bytes_decode_;
@@ -3531,8 +3571,10 @@ bool DStorageSlotManager::ensure_experts_loaded(
 
     if (need_reallocate && pools_allocated_) {
         // Safely wait for all outstanding prefetches and admissions
+        slot_lock.unlock();
         collect_async_prefetches(true);
         collect_pinned_admissions(true);
+        slot_lock.lock();
 
 #if LLAMA_DSTORAGE_HAS_BACKEND
         for (auto & [key, pool] : type_pools_) {
@@ -3772,7 +3814,7 @@ bool DStorageSlotManager::ensure_experts_loaded(
     const int speculative_slots = speculative_slot_count();
     auto slot_allowed_for_phase = [&](int slot_idx) {
         const bool speculative_slot = slot_in_speculative_partition(
-                slot_idx, n_slots_, speculative_slots);
+                slot_idx, speculative_slots);
         if (!slot_compatible_with_layer(slot_idx, layer_idx)) {
             return false;
         }
@@ -3879,6 +3921,32 @@ bool DStorageSlotManager::ensure_experts_loaded(
             }
             if (target_slot < 0) {
                 target_slot = choose_eviction_slot();
+            }
+            if (target_slot < 0) {
+                // Try recovering stale transfer_pending slots from previous failed calls
+                int stale_cleared = 0;
+                for (int s = 0; s < n_slots_; s++) {
+                    if (slots_[s].transfer_pending && !slots_[s].occupied) {
+                        slots_[s].transfer_pending = false;
+                        stale_cleared++;
+                    }
+                }
+                if (stale_cleared > 0) {
+                    for (int s = 0; s < n_slots_; s++) {
+                        bool reserved = false;
+                        for (const LoadPlan & p : load_plan) {
+                            if (p.target_slot == s) { reserved = true; break; }
+                        }
+                        if (!reserved && slot_allowed_for_phase(s) && !slots_[s].occupied && !slots_[s].admission_pending) {
+                            target_slot = s;
+                            break;
+                        }
+                    }
+                    if (target_slot >= 0) {
+                        LLAMA_LOG_WARN("%s: recovered slot %d after clearing %d stale transfer_pending\n",
+                                __func__, target_slot, stale_cleared);
+                    }
+                }
             }
             if (target_slot < 0) {
                 LLAMA_LOG_ERROR("%s: no available slot for expert %d\n", __func__, eid);
@@ -4338,6 +4406,14 @@ bool DStorageSlotManager::ensure_experts_loaded(
         uint64_t stream_submit_us = 0;
         uint64_t stream_wait_us = 0;
         bool bundle_contiguous_reads = llama_dstorage_bundle_contiguous_reads();
+        if (bundle_contiguous_reads) {
+            for (const DSLoaderStreamRequest & req : batch_requests) {
+                if ((req.file_offset % 4096) != 0 || (req.size % 4096) != 0) {
+                    bundle_contiguous_reads = false;
+                    break;
+                }
+            }
+        }
         const uint64_t bundle_max_read_bytes =
                 bundle_contiguous_reads ? llama_dstorage_bundle_max_read_bytes() : 0;
         const uint64_t bundle_stripe_bytes =
@@ -4510,9 +4586,12 @@ bool DStorageSlotManager::ensure_experts_loaded(
         const double transfer_us = double(llama_dstorage_now_us() - t0);
         trace_stream_file_bytes = stream_file_bytes;
         trace_transfer_us = uint64_t(std::max<double>(0.0, transfer_us));
-        transfer_ewma_us_ = transfer_ewma_us_ == 0.0
-                ? transfer_us
-                : transfer_ewma_us_ * 0.8 + transfer_us * 0.2;
+        {
+            std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+            transfer_ewma_us_ = transfer_ewma_us_ == 0.0
+                    ? transfer_us
+                    : transfer_ewma_us_ * 0.8 + transfer_us * 0.2;
+        }
         phase_stats.stream_calls++;
         phase_stats.stream_cold_experts += uint64_t(cold_to_load.size());
         phase_stats.stream_pinned_experts += uint64_t(pinned_to_load.size());
@@ -5128,7 +5207,7 @@ void DStorageSlotManager::record_layer_compute_us(int64_t compute_us) {
     if (compute_us <= 0) {
         return;
     }
-    std::lock_guard<std::mutex> slot_lock(slots_mutex_);
+    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
     const double sample = double(compute_us);
     layer_compute_ewma_us_ = layer_compute_ewma_us_ == 0.0
             ? sample
@@ -5251,8 +5330,12 @@ int DStorageSlotManager::recommended_prefetch_distance(double confidence) {
     const double cache_pressure = n_slots_ > 0 ? double(occupied) / n_slots_ : 1.0;
     const uint64_t accesses = decode_stats_.hits + decode_stats_.misses;
     const double miss_rate = accesses > 0 ? double(decode_stats_.misses) / accesses : 1.0;
-    const double transfer_us = transfer_ewma_us_ > 0.0 ? transfer_ewma_us_ : 8000.0;
-    const double compute_us = layer_compute_ewma_us_ > 0.0 ? layer_compute_ewma_us_ : 4000.0;
+    double transfer_us, compute_us;
+    {
+        std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+        transfer_us = transfer_ewma_us_ > 0.0 ? transfer_ewma_us_ : 8000.0;
+        compute_us = layer_compute_ewma_us_ > 0.0 ? layer_compute_ewma_us_ : 4000.0;
+    }
     return select_prefetch_distance(
             transfer_us,
             compute_us,

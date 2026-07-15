@@ -26,6 +26,7 @@ CONFIG_VARS=(
   CACHE_REUSE
   CHAT_TEMPLATE_KWARGS
   METRICS
+  CACHE_RAM_MIB
 )
 
 declare -A USER_OVERRIDES=()
@@ -68,6 +69,7 @@ REASONING_FORMAT="${REASONING_FORMAT:-deepseek}"
 REASONING_BUDGET="${REASONING_BUDGET:-0}"
 CACHE_REUSE="${CACHE_REUSE:-0}"
 METRICS="${METRICS:-1}"
+CACHE_RAM_MIB="${CACHE_RAM_MIB:-8192}"
 
 if [[ "$MODEL" != /* ]]; then
   MODEL="$ROOT/$MODEL"
@@ -114,9 +116,11 @@ SERVER_ARGS=(
   --spec-draft-n-max "$SPEC_DRAFT_N_MAX"
   --spec-draft-p-min "$SPEC_DRAFT_P_MIN"
   --checkpoint-min-step "$CHECKPOINT_MIN_STEP"
+  --cache-ram "$CACHE_RAM_MIB"
   --reasoning "$REASONING"
   --reasoning-format "$REASONING_FORMAT"
   --reasoning-budget "$REASONING_BUDGET"
+  --jinja
   --cache-prompt
   --cache-reuse "$CACHE_REUSE"
   --alias "$ALIAS"

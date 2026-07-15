@@ -3634,6 +3634,9 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
             cparams.dstorage_moe_prefetch &&
             phase == dstorage_moe_phase::prefill &&
             llama_env_flag_enabled("LLAMA_DSTORAGE_PREFILL_LAYER_PRELOAD");
+    const bool dstorage_prefill_workspace =
+            phase == dstorage_moe_phase::prefill &&
+            llama_env_flag_enabled("LLAMA_DSTORAGE_PREFILL_WORKSPACE");
     slot_manager->set_speculative_prefetch_enabled(
             cparams.dstorage_moe_prefetch &&
             (phase == dstorage_moe_phase::decode || dstorage_prefill_layer_preload));
@@ -3647,13 +3650,20 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
         dstorage_prefill_last_layer = layer_idx;
     }
     t0 = llama_dstorage_debug_enabled() ? ggml_time_us() : 0;
-    const bool loaded_ok = slot_manager->ensure_experts_loaded(
-            layer_idx,
-            expert_ids.data(),
-            n_ids,
-            pool_ptrs,
-            remapped_ids,
-            phase);
+    const bool loaded_ok = dstorage_prefill_workspace
+            ? slot_manager->prefill_workspace_activate_layer(
+                    layer_idx,
+                    expert_ids.data(),
+                    n_ids,
+                    pool_ptrs,
+                    remapped_ids)
+            : slot_manager->ensure_experts_loaded(
+                    layer_idx,
+                    expert_ids.data(),
+                    n_ids,
+                    pool_ptrs,
+                    remapped_ids,
+                    phase);
     if (!loaded_ok) {
         LLAMA_LOG_ERROR("%s: failed to stream experts for layer %d\n", __func__, layer_idx);
         return false;
@@ -3676,7 +3686,9 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
             return true;
         }
 
-        const uint64_t slot_stride = slot_manager->get_slot_stride(tensor_name);
+        const uint64_t slot_stride = dstorage_prefill_workspace
+                ? slot_manager->get_prefill_workspace_slot_stride(tensor_name)
+                : slot_manager->get_slot_stride(tensor_name);
         if (slot_stride == 0) {
             LLAMA_LOG_ERROR("%s: DirectStorage has no slot stride for %s\n", __func__, tensor_name);
             return false;
@@ -3686,7 +3698,9 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
             dstorage_saves[w] = { w->data, w->ne[2], w->nb[2], w->nb[3] };
         }
 
-        const int execution_slots = slot_manager->get_slot_count(tensor_name);
+        const int execution_slots = dstorage_prefill_workspace
+                ? slot_manager->get_prefill_workspace_slot_count()
+                : slot_manager->get_slot_count(tensor_name);
         if (execution_slots <= 0) {
             LLAMA_LOG_ERROR("%s: DirectStorage has no persistent expert slots for %s\n", __func__, tensor_name);
             return false;
@@ -3773,6 +3787,21 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
                 dstorage_prefill_preloaded_pass[target_layer] = dstorage_prefill_pass;
             }
             trace_us("submit_prefill_layer_preload", target_layer, t0, llama_dstorage_debug_enabled() ? ggml_time_us() : 0);
+        }
+    }
+
+    if (dstorage_prefill_workspace) {
+        const int lookahead_layers = llama_env_int_clamped(
+                "LLAMA_DSTORAGE_PREFILL_WORKSPACE_LOOKAHEAD",
+                2,
+                0,
+                8);
+        if (lookahead_layers > 0) {
+            t0 = llama_dstorage_debug_enabled() ? ggml_time_us() : 0;
+            slot_manager->prefill_workspace_preload_layers_async(
+                    layer_idx + 1,
+                    lookahead_layers);
+            trace_us("submit_prefill_workspace_lookahead", layer_idx, t0, llama_dstorage_debug_enabled() ? ggml_time_us() : 0);
         }
     }
 

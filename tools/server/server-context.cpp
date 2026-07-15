@@ -5,6 +5,7 @@
 #include "server-http.h"
 #include "server-task.h"
 #include "server-queue.h"
+#include "llama-radix-cache.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -704,6 +705,7 @@ private:
     int n_empty_consecutive = 0;
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
+    std::unique_ptr<radix_checkpoint_tree> radix_cache;
 
     server_metrics metrics;
 
@@ -1121,6 +1123,8 @@ private:
             SRV_INF("%s", "use `--cache-ram 0` to disable the prompt cache\n");
 
             prompt_cache = std::make_unique<server_prompt_cache>(params_base.cache_ram_mib, n_ctx);
+            size_t max_size_bytes = params_base.cache_ram_mib < 0 ? 0 : (size_t)params_base.cache_ram_mib * 1024 * 1024;
+            radix_cache = std::make_unique<radix_checkpoint_tree>(max_size_bytes);
         } else {
             SRV_INF("%s", "prompt cache is disabled - use `--cache-ram N` to enable it\n");
         }
@@ -2048,6 +2052,16 @@ private:
         cur.update_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
         cur.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
+        // Add to global radix cache if enabled
+        if (radix_cache) {
+            const auto & full_tokens = slot.prompt.tokens.get_tokens();
+            if (cur.n_tokens <= (int64_t)full_tokens.size()) {
+                std::vector<llama_token> prefix_tokens(full_tokens.begin(), full_tokens.begin() + cur.n_tokens);
+                radix_cache->insert(prefix_tokens, cur);
+                SLT_INF(slot, "registered checkpoint of size %" PRId64 " tokens in global radix cache\n", cur.n_tokens);
+            }
+        }
+
         SLT_INF(slot,
                 "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                 (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, cur.pos_min,
@@ -2838,38 +2852,62 @@ private:
                                     SLT_WRN(slot, "%s\n", st1.str().c_str());
                                 }
 
-                                if (pos_min >= pos_min_thold) {
-                                    // search for a context checkpoint
-                                    const auto it = std::find_if(
-                                        slot.prompt.checkpoints.rbegin(),
-                                        slot.prompt.checkpoints.rend(),
-                                        [&, func_name = __func__](const auto & cur) {
-                                            // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
-                                            LOG_INF("slot %12.*s: id %2d | task %d | Checking checkpoint with [%d, %d] against %d...\n", 12,
-                                                func_name, (slot).id, ((slot).task ? (slot).task->id : -1), cur.pos_min, cur.pos_max, pos_min_thold);
-                                            return cur.pos_min < pos_min_thold || cur.pos_min == 0;
-                                        }
-                                    );
+                                 if (pos_min >= pos_min_thold) {
+                                     bool restored_from_radix = false;
+                                     if (radix_cache) {
+                                         size_t matched_len = 0;
+                                         auto matched_node = radix_cache->find_longest_prefix(slot.task->tokens.get_tokens(), matched_len);
+                                         if (matched_node && matched_node->checkpoint && (matched_len < (size_t)pos_min_thold || pos_min_thold <= 0)) {
+                                             const auto & ckpt = *(matched_node->checkpoint);
+                                             ckpt.load_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                                             ckpt.load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
-                                    bool do_reset = it == slot.prompt.checkpoints.rend();
+                                             slot.prompt.tokens.clear();
+                                             const auto & full_tokens = slot.task->tokens.get_tokens();
+                                             std::vector<llama_token> prefix_tokens(full_tokens.begin(), full_tokens.begin() + ckpt.n_tokens);
+                                             slot.prompt.tokens.insert(prefix_tokens);
 
-                                    if (!do_reset) {
-                                        // restore the context checkpoint
-                                        it->load_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                                        it->load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                                             pos_next = std::min(pos_next, std::max(ckpt.pos_min + 1, ckpt.pos_max));
+                                             n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) ckpt.n_tokens);
+                                             SLT_WRN(slot, "restored context checkpoint from GLOBAL RADIX CACHE (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB, matched_len = %zu)\n",
+                                                     ckpt.pos_min, ckpt.pos_max, ckpt.n_tokens, n_past, (float) ckpt.size() / 1024 / 1024, matched_len);
+                                             restored_from_radix = true;
+                                         }
+                                     }
 
-                                        pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
-                                        n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
-                                        SLT_WRN(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, n_past, (float) it->size() / 1024 / 1024);
-                                    }
+                                     if (!restored_from_radix) {
+                                         // search for a local context checkpoint
+                                         const auto it = std::find_if(
+                                             slot.prompt.checkpoints.rbegin(),
+                                             slot.prompt.checkpoints.rend(),
+                                             [&, func_name = __func__](const auto & cur) {
+                                                 // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
+                                                 LOG_INF("slot %12.*s: id %2d | task %d | Checking checkpoint with [%d, %d] against %d...\n", 12,
+                                                     func_name, (slot).id, ((slot).task ? (slot).task->id : -1), cur.pos_min, cur.pos_max, pos_min_thold);
+                                                 return cur.pos_min < pos_min_thold || cur.pos_min == 0;
+                                             }
+                                         );
 
-                                    if (do_reset) {
-                                        SLT_WRN(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
-                                                "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
-                                        pos_next = 0;
-                                        n_past = 0;
-                                    }
-                                }
+                                         bool do_reset = it == slot.prompt.checkpoints.rend();
+
+                                         if (!do_reset) {
+                                             // restore the context checkpoint
+                                             it->load_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                                             it->load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+
+                                             pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
+                                             n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
+                                             SLT_WRN(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, n_past, (float) it->size() / 1024 / 1024);
+                                         }
+
+                                         if (do_reset) {
+                                             SLT_WRN(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
+                                                     "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
+                                             pos_next = 0;
+                                             n_past = 0;
+                                         }
+                                     }
+                                 }
                             }
 
                             {
