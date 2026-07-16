@@ -191,7 +191,7 @@ Important directories and files:
 
 ```text
 moe.cpp/                 current main project
-qwen.cpp/                duplicate/snapshot of the GDS MoE tree
+siphon.cpp/               duplicate/snapshot of the GDS MoE tree
 mellum.cpp/              sibling snapshot with similar docs/artifacts
 gemma.cpp/               sibling snapshot with similar docs/artifacts
 llm_upper/               earlier Windows/Microsoft DirectStorage prototype notes

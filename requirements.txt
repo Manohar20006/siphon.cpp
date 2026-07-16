@@ -3,7 +3,7 @@
 #
 # Package versions must stay compatible across all top-level python scripts.
 #
-# qwen.cpp note: the normal build/run path also needs system packages such as
+# siphon.cpp note: the normal build/run path also needs system packages such as
 # a C++ compiler, CMake, NVIDIA driver, and CUDA toolkit. Those cannot be
 # installed through pip; see README.md for the terminal setup commands.
 #

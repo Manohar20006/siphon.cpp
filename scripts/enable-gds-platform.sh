@@ -60,4 +60,4 @@ echo
 echo "Next step: reboot, then run:"
 echo "  lsmod | grep nvidia_fs"
 echo "  /usr/local/cuda/gds/tools/gdscheck -p"
-echo "  CUFILE_ENV_PATH_JSON=/home/manohar/Desktop/inference/qwen.cpp/cufile-gds-p2p.json /usr/local/cuda/gds/tools/gdscheck -p"
+echo "  CUFILE_ENV_PATH_JSON=/home/manohar/Desktop/inference/siphon.cpp/cufile-gds-p2p.json /usr/local/cuda/gds/tools/gdscheck -p"

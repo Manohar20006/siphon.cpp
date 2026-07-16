@@ -1,4 +1,4 @@
-# qwen.cpp
+# siphon.cpp
 
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 ![CUDA](https://img.shields.io/badge/CUDA-required-green)
@@ -7,12 +7,12 @@
 
 Run **Qwen3.6 35B-A3B MoE locally on a 6 GB VRAM laptop**.
 
-`qwen.cpp` is a CUDA-focused `llama.cpp` fork built for one practical goal:
+`siphon.cpp` is a CUDA-focused `llama.cpp` fork built for one practical goal:
 make a serious MoE model usable on hardware that normally looks too small for
 it.
 
 Instead of loading every expert into VRAM or filling system RAM until the
-machine becomes unusable, `qwen.cpp` streams MoE experts from SSD on demand with
+machine becomes unusable, `siphon.cpp` streams MoE experts from SSD on demand with
 NVIDIA GDS/cuFile, keeps hot experts cached, and uses compressed TQ3
 FlashAttention for long-context decode.
 
@@ -44,7 +44,7 @@ work on a Windows-friendly path is planned/in progress.
 
 > [!TIP]
 > If you are currently on Windows and want to test this today, the simplest path
-> is to install Linux as a dual-boot setup and run `qwen.cpp` there. That keeps
+> is to install Linux as a dual-boot setup and run `siphon.cpp` there. That keeps
 > your normal Windows install intact while giving this project the Linux
 > CUDA/GDS environment it was built around.
 
@@ -94,8 +94,8 @@ python3 -m pip install -r requirements.txt
 Clone the repo:
 
 ```bash
-git clone https://github.com/Manohar20006/qwen.cpp.git
-cd qwen.cpp
+git clone https://github.com/Manohar20006/qwen.cpp.git siphon.cpp
+cd siphon.cpp
 ```
 
 Place the GGUF model in `models/`:
@@ -153,7 +153,7 @@ Most local MoE setups fail on small GPUs for one of two reasons:
 - They spill so much into system RAM that the whole machine becomes painful to
   use.
 
-`qwen.cpp` takes a different path:
+`siphon.cpp` takes a different path:
 
 The default setup is tuned for a single-GPU laptop/server workflow:
 
