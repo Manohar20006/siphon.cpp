@@ -1,5 +1,7 @@
 # siphon.cpp
 
+![siphon.cpp banner](media/siphon_final_banner.png)
+
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 ![CUDA](https://img.shields.io/badge/CUDA-required-green)
 ![VRAM](https://img.shields.io/badge/tested-6GB%20VRAM-orange)
