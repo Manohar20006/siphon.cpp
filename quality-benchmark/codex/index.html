@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Focus Board</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app" aria-labelledby="page-title">
+    <header>
+      <p class="eyebrow">A tiny, durable task board</p>
+      <h1 id="page-title">Focus Board</h1>
+      <p>Capture the next useful thing, then make it disappear.</p>
+    </header>
+
+    <form id="task-form" class="composer" novalidate>
+      <label for="task-input">New task</label>
+      <div class="input-row">
+        <input id="task-input" name="task" autocomplete="off" maxlength="120" placeholder="What needs doing?">
+        <button type="submit">Add task</button>
+      </div>
+      <p id="form-error" class="error" role="alert"></p>
+    </form>
+
+    <section class="board" aria-labelledby="tasks-title">
+      <div class="toolbar">
+        <h2 id="tasks-title">Tasks</h2>
+        <div class="filters" aria-label="Filter tasks">
+          <button type="button" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" data-filter="active" aria-pressed="false">Active</button>
+          <button type="button" data-filter="completed" aria-pressed="false">Completed</button>
+        </div>
+      </div>
+      <ul id="task-list"></ul>
+      <p id="empty-state">No tasks yet. Add one above.</p>
+      <footer>
+        <p><strong id="active-count">0</strong> remaining · <strong id="total-count">0</strong> total</p>
+        <button id="clear-completed" type="button" disabled>Clear completed</button>
+      </footer>
+    </section>
+    <p id="status" class="sr-only" aria-live="polite"></p>
+  </main>
+  <script src="script.js"></script>
+</body>
+</html>

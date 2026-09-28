@@ -1,0 +1,1 @@
+"""siphon.tui - Textual terminal dashboard (built on siphon.core)."""

@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>siphon — local LLM ops</title>
+<style>
+:root{
+  --bg:#0A0E14;
+  --surface:#0F1520;
+  --fg:#C5CBD6;
+  --dim:#5E6A7E;
+  --line:#232D3F;
+  --accent:#7C83F5;
+  --green:#3FB950;
+  --amber:#D29922;
+  --red:#F85149;
+  --sel-bg:#7C83F5;
+  --sel-fg:#0A0E14;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{
+  background:var(--bg);
+  color:var(--fg);
+  font-family:ui-monospace,SFMono-Regular,SF Mono,Menlo,Consolas,Liberation Mono,monospace;
+  font-size:13px;
+  line-height:1.45;
+  -webkit-font-smoothing:none;
+  height:100vh;height:100dvh;
+  overflow:hidden;
+  font-variant-numeric:tabular-nums;
+  font-feature-settings:"tnum" 1;
+}
+::selection{background:var(--accent);color:#0A0E14}
+.tui{
+  width:100%;
+  max-width:1330px;
+  margin:0 auto;
+  padding:8px 10px 10px;
+  height:100vh;height:100dvh;
+  max-height:100vh;max-height:100dvh;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  min-height:0;
+}
+/* fixed regions keep natural height, never shrink or scroll */
+.header,.sysstrip,#panel-metrics,#panel-log,.footer{flex:0 0 auto;flex-shrink:0;min-height:0}
+/* header */
+.header{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  border:1px solid var(--line);
+  padding:6px 12px;
+  background:var(--bg);
+  white-space:nowrap;
+}
+.header .left{font-weight:700;letter-spacing:.02em;min-width:0;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto}
+.header .left .dim{color:var(--dim);font-weight:400}
+.header .right{color:var(--dim);flex:0 0 auto;font-variant-numeric:tabular-nums}
+.header .right b{color:var(--fg);font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:.04em}
+/* system strip — 5 device blocks, identical 3-row sub-grid */
+.sysstrip{
+  border:1px solid var(--line);
+  padding:6px 12px;
+  display:grid;
+  grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;
+  align-items:stretch;
+  column-gap:10px;
+  white-space:nowrap;
+  overflow:hidden;
+}
+.sys{
+  display:grid;
+  grid-template-rows:auto auto auto;
+  align-content:start;
+  row-gap:1px;
+  min-width:0;
+  overflow:hidden;
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+.sys .sr{
+  display:flex;
+  align-items:baseline;
+  gap:8px;
+  min-width:0;
+  overflow:hidden;
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+.sys .sr1 .k{color:var(--dim);font-size:11px;letter-spacing:.08em;font-weight:400}
+.sys .sr1 .tr{margin-left:auto;display:flex;align-items:baseline;gap:6px;flex:0 0 auto;font-variant-numeric:tabular-nums}
+.sys .sr2 .v{flex:0 0 auto}
+.sys .sr2 .mbar{margin-left:auto;flex:0 0 auto}
+.sys .sr3 .cap{
+  flex:1 1 auto;
+  min-width:0;
+  overflow:hidden;
+  white-space:nowrap;
+  text-overflow:ellipsis;
+  display:flex;
+  align-items:baseline;
+  gap:6px;
+  font-variant-numeric:tabular-nums;
+}
+.sys .sr3 .cap .t{
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  min-width:0;
+}
+.sys .sr3 .spark{margin-left:auto;flex:0 0 auto;padding-left:8px}
+.sys .k{color:var(--dim);font-size:11px;letter-spacing:.08em;font-weight:400}
+.sys .v{color:var(--fg);font-variant-numeric:tabular-nums}
+.sys .free{color:var(--dim);font-variant-numeric:tabular-nums;flex:0 0 auto}
+.sys .d{color:#2A3550;flex:0 0 auto}
+.sys .extra{color:var(--fg);flex:0 0 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}
+.sys-div{color:#2A3550;user-select:none;flex:0 0 auto;align-self:center}
+.sys .mbar{letter-spacing:0;color:var(--green);flex:0 0 auto;font-variant-numeric:tabular-nums}
+.sys .mbar .off{color:#2A3550}
+.sys .v.dim{color:var(--dim);font-weight:400}
+.sys .mbar.warn{color:var(--amber)}
+.sys .v.warn{color:var(--amber);font-weight:700}
+.sys .v.hot{color:var(--red);font-weight:700}
+.sys .hot-tag{background:var(--red);color:#0A0E14;font-weight:700;font-size:10px;letter-spacing:.08em;padding:0 4px;flex:0 0 auto}
+.sys .spark{color:var(--dim);letter-spacing:0;flex:0 0 auto;font-variant-numeric:tabular-nums}
+/* main split */
+.main{
+  display:grid;
+  grid-template-columns:55% 1fr;
+  gap:6px;
+  flex:1 1 auto;
+  min-height:0;
+  overflow:hidden;
+}
+#panel-table,#panel-detail{min-height:0;overflow:hidden;display:flex;flex-direction:column}
+#panel-table .panel-body,#panel-detail .panel-body{flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+#panel-table .panel-body{overflow:hidden}
+#panel-table table.models{flex:0 0 auto}
+#table-hint{flex:0 0 auto}
+.panel{
+  border:1px solid var(--line);
+  background:var(--bg);
+  position:relative;
+  outline:1px solid transparent;
+  outline-offset:2px;
+}
+.panel.focused{
+  border:1px solid var(--accent);
+  outline:1px solid var(--accent);
+  outline-offset:2px;
+  box-shadow:0 0 0 1px var(--bg), 0 0 12px oklch(62% 0.18 280 / 0.25);
+}
+.panel-title{
+  position:absolute;
+  top:-9px;
+  left:10px;
+  background:var(--bg);
+  padding:0 8px;
+  color:var(--dim);
+  font-weight:700;
+  letter-spacing:.08em;
+  font-size:11px;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+.panel-title::before{content:"── ";color:#2A3550;letter-spacing:0}
+.panel-title::after{content:" ──";color:#2A3550;letter-spacing:0}
+.panel.focused .panel-title{color:var(--accent)}
+.panel.focused .panel-title::before,.panel.focused .panel-title::after{color:var(--accent)}
+.panel-body{padding:12px 10px 10px}
+/* table */
+table.models{width:100%;border-collapse:collapse;table-layout:fixed}
+table.models th{
+  text-align:left;
+  color:var(--dim);
+  font-weight:400;
+  font-size:11px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  padding:2px 8px 6px;
+  border-bottom:1px solid var(--line);
+  white-space:nowrap;
+}
+table.models th.num{text-align:right}
+table.models td{
+  padding:5px 8px;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  border-bottom:1px dotted #1A2333;
+  cursor:pointer;
+  font-variant-numeric:tabular-nums;
+}
+table.models td.num{text-align:right}
+table.models tr:last-child td{border-bottom:0}
+table.models tr.row{cursor:pointer}
+table.models tr.row.selected td{
+  background:var(--accent);
+  color:#0A0E14;
+  box-shadow:inset 0 1px 0 oklch(78% 0.12 280), inset 0 -1px 0 oklch(52% 0.16 280);
+}
+table.models tr.row.selected td:first-child{font-weight:700}
+table.models tr.row.selected td .st,
+table.models tr.row.selected td .dim,
+table.models tr.row.selected td .fitbar{color:#0A0E14 !important}
+table.models tr.row.selected td .fitbar .off{color:oklch(30% 0.06 280) !important}
+/* status: compact fixed-width words so the table never shifts */
+.st{display:inline-block;min-width:7ch;letter-spacing:.04em;font-variant-numeric:tabular-nums}
+.st-RUNNING{color:var(--green);font-weight:700}
+.st-IDLE{color:var(--dim);font-weight:400}
+.st-STOPPED{color:var(--red);font-weight:700}
+.st-LOADING{color:var(--amber);font-weight:700}
+.st-LOADING .ell{display:inline-block;min-width:3ch;animation:ell-blink 1.2s steps(1) infinite}
+@keyframes ell-blink{0%{opacity:1}50%{opacity:.25}100%{opacity:1}}
+.dim{color:var(--dim)}
+.fitbar{color:var(--dim);letter-spacing:0;display:inline-block;min-width:10ch;font-variant-numeric:tabular-nums}
+.fitbar .off{color:#2A3550}
+/* detail */
+.dl{display:flex;flex-direction:column;gap:1px;margin-bottom:8px}
+.dl-row{
+  display:flex;
+  align-items:baseline;
+  gap:6px;
+  white-space:nowrap;
+}
+.dl-row .lab{color:var(--dim);min-width:92px;flex:0 0 92px}
+.dl-row .dots{flex:1 1 auto;color:#26314a;overflow:hidden;letter-spacing:2px;min-width:12px}
+.dl-row .val{color:var(--fg);text-align:right;flex:0 0 auto;min-width:150px;font-variant-numeric:tabular-nums}
+.dl-row .val.green{color:var(--green)}
+.dl-row .val.amber{color:var(--amber)}
+.cfg-head{
+  color:var(--dim);
+  font-size:11px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  border-top:1px solid var(--line);
+  padding-top:8px;
+  margin:8px 0 6px;
+}
+.cfg-row{
+  display:grid;
+  grid-template-columns:92px 1fr;
+  align-items:center;
+  gap:8px;
+  padding:2px 0;
+}
+.cfg-row label{color:var(--dim);white-space:nowrap}
+.bracket{
+  display:flex;
+  align-items:center;
+  gap:0;
+  color:var(--dim);
+}
+.bracket .br{color:var(--dim)}
+.bracket input{
+  background:var(--surface);
+  border:0;
+  border-bottom:1px solid #2b3650;
+  color:var(--fg);
+  font:inherit;
+  font-size:12px;
+  padding:1px 6px;
+  width:100%;
+  min-width:0;
+  outline:none;
+  font-variant-numeric:tabular-nums;
+}
+.bracket input:focus{
+  background:#151d2e;
+  border-bottom-color:var(--accent);
+  color:#fff;
+}
+.bracket .dirty-flag{display:none;color:var(--amber);font-weight:700;margin-left:4px}
+.bracket.dirty .br{color:var(--amber)}
+.bracket.dirty input{border-bottom-color:var(--amber)}
+.bracket.dirty .dirty-flag{display:inline}
+.bracket input::placeholder{color:var(--dim);opacity:.55}
+/* detail config: scroll + pinned foot — middle body only scrolls */
+#panel-detail .panel-body{display:flex;flex-direction:column;overflow:hidden;max-height:none;flex:1 1 auto;min-height:0}
+#panel-detail .dl{flex:0 0 auto}
+#panel-detail .cfg-head{flex:0 0 auto}
+#cfg-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:2px;scrollbar-width:thin;scrollbar-color:#2b3650 transparent}
+.detail-foot{flex:0 0 auto;background:var(--bg);border-top:1px solid var(--line);margin-top:8px;padding-top:8px}
+#panel-metrics,#panel-log{overflow:hidden}
+#panel-metrics .panel-body,#panel-log .panel-body{flex:0 0 auto;overflow:hidden}
+/* collapsible cfg sections */
+.cfg-sec{border-top:1px dotted #1A2333;margin-top:6px;padding-top:2px}
+.cfg-sec-head{display:block;width:100%;background:transparent;border:0;color:var(--dim);font:inherit;font-size:12px;text-align:left;cursor:pointer;padding:5px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cfg-sec-head:hover{color:var(--fg);background:#151d2e}
+.cfg-sec-head .dirty-n{color:var(--amber);font-weight:700}
+.cfg-sec-body{display:flex;flex-direction:column}
+.cfg-sec .cfg-row{grid-template-columns:132px 1fr}
+.cfg-sec .cfg-row label{overflow:hidden;text-overflow:ellipsis}
+.cfg-field{display:flex;align-items:center;gap:6px;min-width:0}
+.cfg-field .bracket{flex:1 1 auto;min-width:0}
+.unused-tag{flex:0 0 auto;color:var(--dim);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--line);padding:0 4px;white-space:nowrap}
+/* [0/1] + [off/on] toggles, terminal-native */
+.tgl-opt{background:transparent;border:0;font:inherit;font-size:12px;color:var(--dim);cursor:pointer;padding:1px 5px;min-height:24px;white-space:nowrap}
+.tgl-opt:hover{color:var(--fg)}
+.tgl-opt.sel{color:var(--fg);font-weight:700;background:#1a2338;text-decoration:underline;text-underline-offset:2px}
+.tgl-opt:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
+.tgl-sep{color:var(--dim)}
+.actions{
+  display:flex;
+  gap:8px;
+  margin-top:10px;
+  flex-wrap:wrap;
+}
+.btn{
+  font:inherit;
+  font-weight:700;
+  letter-spacing:.02em;
+  cursor:pointer;
+  padding:6px 12px;
+  min-height:32px;
+  border:1px solid transparent;
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+.btn .k{font-weight:700;text-decoration:underline;text-underline-offset:2px}
+.btn:focus-visible{outline:1px solid var(--accent);outline-offset:2px;box-shadow:0 0 0 1px var(--bg), 0 0 12px oklch(62% 0.18 280 / 0.25)}
+/* solid terminal blocks */
+.btn-start{background:var(--green);border-color:var(--green);color:#0A0E14;box-shadow:inset 0 1px 0 oklch(78% 0.12 140), inset 0 -1px 0 oklch(42% 0.1 140)}
+.btn-start .k{color:#0A0E14}
+.btn-start:hover{filter:brightness(1.12)}
+.btn-stop{background:var(--red);border-color:var(--red);color:#0A0E14;box-shadow:inset 0 1px 0 oklch(78% 0.1 25), inset 0 -1px 0 oklch(42% 0.1 25)}
+.btn-stop .k{color:#0A0E14}
+.btn-stop:hover{filter:brightness(1.12)}
+.btn-stop.armed{background:#0A0E14;border-color:var(--red);color:var(--red);box-shadow:none}
+.btn-stop.armed .k{color:var(--red)}
+.btn-apply{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:inset 0 1px 0 oklch(78% 0.12 280), inset 0 -1px 0 oklch(52% 0.16 280)}
+.btn-apply .k{color:#fff}
+.btn-apply:hover{filter:brightness(1.12)}
+/* hollow terminal blocks */
+.btn-revert{background:transparent;border-color:#3a4a68;color:var(--dim)}
+.btn-revert .k{color:var(--dim)}
+.btn-revert:hover{border-color:var(--fg);color:var(--fg);background:#151d2e}
+.btn-revert:hover .k{color:var(--fg)}
+.btn-reset{background:transparent;border-color:var(--amber);color:var(--amber)}
+.btn-reset .k{color:var(--amber)}
+.btn-reset:hover{background:oklch(66% 0.15 80 / 0.14)}
+.btn:active{transform:translateY(1px);filter:brightness(1.25)}
+/* metrics */
+.metrics-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  column-gap:22px;
+}
+.metric{
+  display:grid;
+  grid-template-columns:86px 86px 1fr;
+  align-items:center;
+  gap:8px;
+  padding:3px 0;
+  border-bottom:1px dotted #1A2333;
+  white-space:nowrap;
+}
+.metric .mlab{color:var(--dim);min-width:86px}
+.metric .mval{color:var(--fg);text-align:right;min-width:86px;font-variant-numeric:tabular-nums}
+.metric .mbar{color:var(--accent);letter-spacing:0;overflow:hidden;min-width:12ch;font-variant-numeric:tabular-nums;white-space:nowrap}
+.metric .mbar .off{color:#232d44}
+.metric .mspark{color:var(--accent);letter-spacing:0;overflow:hidden;min-width:12ch;font-variant-numeric:tabular-nums;white-space:nowrap;display:flex;align-items:baseline;gap:8px;min-width:0}
+.metric .mspark .spark{color:var(--accent);letter-spacing:0;flex:0 0 auto}
+.metric .mspark .sub{color:var(--dim);font-size:11px;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;font-variant-numeric:tabular-nums}
+.metric.dimmed .mval{color:var(--dim)}
+.metric.dimmed .mbar{color:#2c3650}
+.metric.dimmed .mspark{color:#2c3650}
+.metric.dimmed .mspark .spark{color:#2c3650}
+.metric.dimmed .mspark .sub{color:#2c3650}
+/* log */
+#panel-log{position:relative}
+.log-scroll{
+  position:absolute;
+  top:8px;
+  right:10px;
+  color:var(--dim);
+  font-size:11px;
+  letter-spacing:2px;
+  background:var(--bg);
+  padding:0 4px;
+  user-select:none;
+}
+.log-lines{
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  min-height:86px;
+}
+.log-line{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.log-line .ts{color:var(--dim)}
+.log-line .lvl-ok{color:var(--green)}
+.log-line .lvl-warn{color:var(--amber)}
+.log-line .lvl-err{color:var(--red)}
+.log-line .lvl-inf{color:var(--dim)}
+/* footer */
+.footer{
+  border:1px solid var(--line);
+  padding:7px 12px;
+  color:var(--dim);
+  white-space:nowrap;
+  overflow:hidden;
+}
+.footer b{color:var(--accent);font-weight:700}
+.footer .sep{margin:0 6px;color:#2a3550}
+.footer .f-primary{background:var(--accent);color:#0A0E14;padding:1px 7px;margin-right:2px;font-weight:700;white-space:nowrap}
+.footer .f-primary b{color:#0A0E14}
+:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
+/* tight 48-row viewport: compact gaps/paddings first, never clip or add scrollers */
+@media (max-height:900px){
+  .tui{gap:4px;padding:6px 10px 8px}
+  .panel-body{padding:10px 10px 8px}
+  table.models td{padding:4px 8px}
+  table.models th{padding:2px 8px 4px}
+  .metric{padding:2px 0}
+  .header,.sysstrip,.footer{padding-top:5px;padding-bottom:5px}
+  .dl{margin-bottom:6px}
+  .cfg-head{margin:6px 0 4px;padding-top:6px}
+  .detail-foot{margin-top:6px;padding-top:6px}
+  .actions{margin-top:8px}
+  .log-lines{gap:1px}
+}
+/* short-viewport adaptivity (1366x768 / 1280x720): compact only, no content changes.
+   Scoped to max-height:800px so 1600x900 rendering stays identical.
+   Internal scroll (#cfg-scroll) remains as overflow fallback only. */
+@media (max-height:800px){
+  .tui{gap:4px}
+  #panel-detail .panel-body{padding:8px 10px 6px}
+  /* (1) compact essentials so speculator + first two cfg section headers
+     stay above the internal scroll fold at 768px height */
+  #panel-detail .dl{gap:0;margin-bottom:5px}
+  .dl-row .lab{min-width:88px;flex:0 0 88px}
+  .dl-row .val{min-width:140px}
+  .cfg-head{margin:5px 0 3px;padding-top:5px}
+  .cfg-row{padding:1px 0;gap:6px}
+  .cfg-sec{margin-top:4px;padding-top:1px}
+  .cfg-sec-head{padding:3px 2px}
+  .bracket input{padding:0 6px;line-height:1.35}
+  .tgl-opt{min-height:22px;padding-top:0;padding-bottom:0}
+  .detail-foot{margin-top:6px;padding-top:6px}
+  .actions{margin-top:6px;gap:6px}
+  .btn{min-height:30px;padding-top:5px;padding-bottom:5px}
+  #cfg-status{margin-top:4px !important}
+  /* (2) roster hugs content instead of stretching to the tall config column */
+  .main{align-items:start;flex:0 1 auto}
+  #panel-table{align-self:start;width:100%}
+  #panel-detail{align-self:start;width:100%;max-height:100%}
+  /* (3) guaranteed breathing room: metrics bottom border -> log top border */
+  #panel-metrics{margin-bottom:4px}
+  #panel-log{margin-top:0}
+}
+/* narrow-width adaptivity (1366px): slimmer paddings/gaps so full values
+   ('Fits 68%', '3.5/15.4GiB') render without ellipsis. Scoped to
+   max-width:1400px so wider viewports stay identical. Ellipsis remains only
+   as last resort; full text is in the title attribute. */
+@media (max-width:1400px){
+  table.models th{padding-left:6px;padding-right:6px}
+  table.models td{padding-left:6px;padding-right:6px}
+  .sysstrip{column-gap:8px;padding-left:10px;padding-right:10px}
+  .sys .sr{gap:6px}
+  .sys .sr3 .spark{padding-left:6px}
+  .metrics-grid{column-gap:16px}
+}
+/* v3.2 operator-verified fixes (screenshots at 1366x768): FIT/RAM truncation
+   + short-viewport section visibility. Scoped so 1600x900 stays identical. */
+@media (max-width:1400px){
+  /* FIT column is sized by the inline 182px width on the 4th header cell
+     (inline beats any stylesheet rule; NAME absorbs squeeze via ellipsis) */
+  table.models th,table.models td{padding-left:4px;padding-right:4px}
+  /* strip: tighter rhythm + crop trend sparks to 6 visible cells */
+  .sysstrip{column-gap:6px;padding-left:8px;padding-right:8px}
+  .sys .sr{gap:5px}
+  .sys .sr3 .cap{gap:4px}
+  .sys .sr3 .spark{max-width:6.2ch;overflow:hidden;padding-left:4px}
+}
+@media (max-height:800px){
+  /* status definition list -> 2x2 grid (frees ~2 rows) */
+  #panel-detail .dl{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px}
+  #panel-detail .dl-row .dots{display:none}
+  #panel-detail .dl-row .lab{min-width:0;flex:0 0 auto}
+  #panel-detail .dl-row .val{min-width:0;text-align:left}
+  /* tighter essentials */
+  .cfg-row{grid-template-columns:70px 1fr;gap:6px;padding:0}
+  .bracket input{height:24px;font-size:12px}
+  .cfg-sec-head{padding:2px}
+  /* metrics compact (still 10 tiles, 5 rows) */
+  .metric{padding:1px 0;gap:6px}
+  .metric .mspark .sub{font-size:10px}
+  /* log compact, still 4 lines */
+  .log-lines{gap:0;min-height:0}
+  .log-line{line-height:1.35}
+  /* buttons */
+  .btn{min-height:28px}
+  .actions{gap:6px;margin-top:4px}
+}
+@media (max-width:900px){
+  .main{grid-template-columns:1fr}
+  .metrics-grid{grid-template-columns:1fr}
+  .tui{max-width:100%}
+  .footer{white-space:normal}
+  .sysstrip{white-space:nowrap}
+}
+</style>
+</head>
+<body>
+<div class="tui" id="tui">
+
+  <div class="header" data-od-id="header-bar">
+    <div class="left">siphon <span class="dim">— local LLM ops</span></div>
+    <div class="right" data-od-id="clock"><span class="dim">local</span> <b id="clock">00:00:00</b> <span class="dim" id="date">—</span></div>
+  </div>
+
+  <div class="sysstrip" data-od-id="system-strip">
+    <span class="sys" data-od-id="sys-block-gpu" data-util="47" data-temp="53"><span class="sr sr1"><span class="k">GPU</span><span class="tr"><span class="v" data-t="temp">53C</span></span></span><span class="sr sr2"><span class="v" data-t="util">47%</span><span class="mbar" aria-hidden="true">████<span class="off">░░░░</span></span></span><span class="sr sr3"><span class="cap"><span class="extra">59W</span></span><span class="spark" id="spark-gpu">▁▂▃▄▅▃▆▄</span></span></span>
+    <span class="sys-div" aria-hidden="true">│</span>
+    <span class="sys" data-od-id="sys-block-vram" data-util="65" data-used="3.9" data-total="6.0"><span class="sr sr1"><span class="k">VRAM</span><span class="tr"><span class="v" data-t="util">65%</span></span></span><span class="sr sr2"><span class="mbar" style="margin-left:0" aria-hidden="true">█████<span class="off">░░░</span></span><span class="spark" id="spark-vram" style="margin-left:auto;padding-left:8px">▃▅▃▄▅▄▆▅</span></span><span class="sr sr3"><span class="cap" title="3.9/6.0GiB (2.1 free)"><span class="v t" title="3.9/6.0GiB">3.9/6.0GiB</span><span class="free">(2.1 free)</span></span></span></span>
+    <span class="sys-div" aria-hidden="true">│</span>
+    <span class="sys" data-od-id="sys-block-cpu" data-util="8" data-temp="97"><span class="sr sr1"><span class="k">CPU</span><span class="tr"><span class="v hot" data-t="temp">97C</span><span class="hot-tag" data-od-id="sys-cpu-hot">HOT</span></span></span><span class="sr sr2"><span class="v" data-t="util">8%</span><span class="mbar" aria-hidden="true">█<span class="off">░░░░░░░</span></span></span><span class="sr sr3"><span class="cap"><span class="v t">—/—</span><span class="d">·</span><span class="extra">2.1GHz</span></span><span class="spark" id="spark-cpu">▂▃▂▄▅▆▇█</span></span></span>
+    <span class="sys-div" aria-hidden="true">│</span>
+    <span class="sys" data-od-id="sys-block-ram" data-util="23" data-used="3.5" data-total="15.4"><span class="sr sr1"><span class="k">RAM</span><span class="tr"><span class="v dim" data-t="temp">—</span></span></span><span class="sr sr2"><span class="v" data-t="util">23%</span><span class="mbar" aria-hidden="true">██<span class="off">░░░░░░</span></span></span><span class="sr sr3"><span class="cap" title="3.5/15.4GiB (11.9 free)"><span class="v t" title="3.5/15.4GiB">3.5/15.4GiB</span><span class="free">(11.9 free)</span></span><span class="spark" id="spark-ram">▁▁▂▃▄▃▂▃</span></span></span>
+    <span class="sys-div" aria-hidden="true">│</span>
+    <span class="sys" data-od-id="sys-block-nvme" data-temp="37"><span class="sr sr1"><span class="k">NVMe</span><span class="tr"><span class="v" data-t="temp">37C</span></span></span><span class="sr sr2"><span class="v dim" data-t="util">—</span><span class="mbar" aria-hidden="true">█<span class="off">░░░░░░░</span></span></span><span class="sr sr3"><span class="cap"><span class="v t">—/—</span><span class="d">·</span><span class="extra">load 1.2</span></span><span class="spark" id="spark-nvme">▃▂▃▂▃▄▃▂</span></span></span>
+  </div>
+
+  <div class="main">
+    <section class="panel focused" id="panel-table" data-od-id="model-table-panel" tabindex="-1" aria-label="Model table">
+      <div class="panel-title">models · 4</div>
+      <div class="panel-body">
+        <table class="models" data-od-id="model-table">
+          <thead><tr><th style="width:40%">NAME</th><th style="width:17%">STATE</th><th class="num" style="width:17%">RATE</th><th class="num" style="width:182px">VRAM-FIT</th></tr></thead>
+          <tbody id="model-rows"></tbody>
+        </table>
+        <div class="dim" style="margin-top:8px" id="table-hint">↑↓ move · enter select · s start · x stop</div>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-detail" data-od-id="detail-panel" tabindex="-1" aria-label="Detail">
+      <div class="panel-title" id="detail-title">detail · qwen3.6-moe-tq3</div>
+      <div class="panel-body">
+        <div class="dl" id="detail-dl" data-od-id="detail-list"></div>
+        <div id="cfg-scroll">
+          <div class="cfg-head">config — [edit]</div>
+          <div id="cfg-rows" data-od-id="config-fields"></div>
+        </div>
+        <div class="detail-foot">
+          <div class="actions" data-od-id="model-actions">
+            <button class="btn btn-start" data-od-id="btn-start" id="btn-start">[<span class="k">S</span>tart]</button>
+            <button class="btn btn-stop" data-od-id="btn-stop" id="btn-stop">[<span class="k">x</span> stop]</button>
+            <button class="btn btn-apply" data-od-id="btn-apply" id="btn-apply">[<span class="k">a</span>pply]</button>
+            <button class="btn btn-revert" data-od-id="btn-revert" id="btn-revert">[<span class="k">u</span> revert]</button>
+            <button class="btn btn-reset" data-od-id="btn-reset" id="btn-reset">[<span class="k">0</span> reset]</button>
+          </div>
+          <div class="dim" id="cfg-status" style="margin-top:6px" role="status">· clean — no pending edits</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel" id="panel-metrics" data-od-id="metrics-panel" tabindex="-1" aria-label="Metrics">
+    <div class="panel-title">metrics · live</div>
+    <div class="panel-body">
+      <div class="metrics-grid" id="metrics-grid" data-od-id="metrics-grid"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-log" data-od-id="log-panel" tabindex="-1" aria-label="Log">
+    <div class="panel-title">log · siphond</div>
+    <span class="log-scroll" aria-hidden="true">▲▼</span>
+    <div class="panel-body">
+      <div class="log-lines" id="log-lines" data-od-id="log-lines" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <div class="footer" data-od-id="footer-keys">
+    <span class="f-primary"><b>s</b> start</span> <span class="sep">·</span> <b>x</b> stop <span class="sep">·</span> <b>r</b> refresh <span class="sep">·</span> <b>a</b> apply <span class="sep">·</span> <b>u</b> revert <span class="sep">·</span> <b>0</b> reset <span class="sep">·</span> <b>↑↓</b> navigate <span class="sep">·</span> <b>enter</b> select <span class="sep">·</span> <b>tab</b> focus <span class="sep">·</span> <b>q</b> quit
+  </div>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var MODELS = [
+    {name:"qwen3.6-moe-tq3", state:"RUNNING", rate:"20.3t/s", fit:57, fitLabel:"Fits 57%",
+     latency:"38ms", endpoint:":8090/v1", suite:"moe-static-experts-suite-8192",
+     cfg:{path:"models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", ctx:"65536", batch:"512", port:"8090", l1:"2800MiB", l2:"8192MiB", spec:"mtp", alias:"qwen3.6-moe-tq3", host:"127.0.0.1", metrics:"1", n_parallel:"", ckpt_step:"0", ctx_ckpt:"12", cache_ram:"4096MiB", experts:"expert-suites/moe-static-experts-suite-8192.txt", evict_ram:"1", cache_prompt:"", cache_reuse:"0", draft_nmax:"3", draft_pmin:"0", draft_layers:"", draft_model:"", reasoning:"off", reason_fmt:"deepseek", reason_budget:"-1", chat_tmpl:"", chat_kwargs:"{\"preserve_thinking\": true}", gds_threads:"20", pref_ws:"0", pref_lookahead:"2", mmproj:""},
+     metrics:{decode:"20.3t/s", prefill:"29.4t/s", l1_hit:"84%", l2_hit:"55%", draft_acc:"84%", nvme:"5743MiB/s", ram2vram:"1915MiB/s", streamed:"1715MiB", dec_calls:"36", pre_calls:"655"},
+     spark:{decode:[19.2,19.8,20.1,19.6,20.5,20.0,20.7,20.1,19.9,20.3], prefill:[28.1,28.9,29.5,29.0,29.8,29.2,28.7,29.6,29.0,29.4], streamed:[1520,1548,1580,1612,1640,1655,1678,1690,1705,1715], dec_calls:[2,4,3,5,2,4,3,4,3,2], pre_calls:[48,62,55,70,58,64,52,68,60,57], dec_total:36, pre_total:655}},
+    {name:"kat-coder-mtp", state:"IDLE", rate:"standby", fit:68, fitLabel:"Fits 68%",
+     latency:"—", endpoint:":8090/v1", suite:"moe-static-experts-suite-8192",
+     cfg:{path:"/home/manohar/Downloads/Kwaipilot_KAT-Coder-V2.5-Dev-MTP-UD-IQ4_XS.gguf", ctx:"86016", batch:"512", port:"8090", l1:"2500MiB", l2:"8192MiB", spec:"mtp", alias:"kat-coder-mtp", host:"127.0.0.1", metrics:"1", n_parallel:"", ckpt_step:"0", ctx_ckpt:"12", cache_ram:"4096MiB", experts:"expert-suites/moe-static-experts-suite-8192.txt", evict_ram:"1", cache_prompt:"0", cache_reuse:"0", draft_nmax:"", draft_pmin:"", draft_layers:"", draft_model:"", reasoning:"off", reason_fmt:"deepseek", reason_budget:"0", chat_tmpl:"", chat_kwargs:"{\"preserve_thinking\": true}", gds_threads:"20", pref_ws:"0", pref_lookahead:"2", mmproj:""},
+     metrics:null},
+    {name:"qwen3-coder-next", state:"IDLE", rate:"standby", fit:47, fitLabel:"Fits 47%",
+     latency:"—", endpoint:":8090/v1", suite:"—",
+     cfg:{path:"/home/manohar/Downloads/Qwen3-Coder-Next-Q4_K_M.gguf", ctx:"65536", batch:"512", port:"8090", l1:"2816MiB", l2:"4096MiB", spec:"", alias:"qwen3-coder-next", host:"127.0.0.1", metrics:"1", n_parallel:"", ckpt_step:"0", ctx_ckpt:"12", cache_ram:"2048MiB", experts:"", evict_ram:"1", cache_prompt:"", cache_reuse:"0", draft_nmax:"0", draft_pmin:"", draft_layers:"", draft_model:"", reasoning:"off", reason_fmt:"deepseek", reason_budget:"0", chat_tmpl:"", chat_kwargs:"{\"preserve_thinking\": true}", gds_threads:"20", pref_ws:"0", pref_lookahead:"2", mmproj:""},
+     metrics:null},
+    {name:"qwen3.6-dflash", state:"IDLE", rate:"standby", fit:32, fitLabel:"Fits 32%",
+     latency:"—", endpoint:"—", suite:"code-assist",
+     cfg:{path:"~/.siphon/qwen3.6-dflash.gguf", ctx:"16384", batch:"64", port:"8093", l1:"1200MiB", l2:"2048MiB", spec:"off"},
+     metrics:null}
+  ];
+  var LIVE = {decode:"20.3t/s", prefill:"29.4t/s", l1_hit:"84%", l2_hit:"55%", draft_acc:"84%", nvme:"5743MiB/s", ram2vram:"1915MiB/s", streamed:"1715MiB", dec_calls:"36", pre_calls:"655"};
+  var DEFAULTS = MODELS.map(function(m){ return JSON.parse(JSON.stringify(m.cfg)); });
+  var sel = 0;
+  var focusIdx = 0;
+  var panels = ["panel-table","panel-detail","panel-metrics","panel-log"];
+  var rowsEl = document.getElementById("model-rows");
+  var dlEl = document.getElementById("detail-dl");
+  var cfgEl = document.getElementById("cfg-rows");
+  var metEl = document.getElementById("metrics-grid");
+  var logEl = document.getElementById("log-lines");
+  var titleEl = document.getElementById("detail-title");
+  var statusEl = document.getElementById("cfg-status");
+
+  function bar(pct, w){
+    w = w || 10;
+    var f = Math.round(pct/100*w);
+    var s = "";
+    for(var i=0;i<w;i++){ s += (i<f) ? "█" : "░"; }
+    return s;
+  }
+  function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+  function renderTable(){
+    var h = "";
+    for(var i=0;i<MODELS.length;i++){
+      var m = MODELS[i];
+      var cls = (i===sel) ? "row selected" : "row";
+      var stc = "st-"+m.state;
+      var stHtml = (m.state==="LOADING")
+        ? '<span class="st '+stc+'">LOADING<span class="ell">…</span></span>'
+        : '<span class="st '+stc+'">'+m.state+'</span>';
+      h += '<tr class="'+cls+'" data-i="'+i+'" tabindex="0">'
+        + '<td title="'+escAttr(m.name)+'">'+esc(m.name)+'</td>'
+        + '<td>'+stHtml+'</td>'
+        + '<td class="num">'+(m.state==="RUNNING"?esc(m.rate):'<span class="dim">standby</span>')+'</td>'
+        + '<td class="num" title="'+escAttr(m.fitLabel)+'"><span class="fitbar">'+bar(m.fit,10)+'</span> <span class="'+(i===sel?"":"dim")+'" title="'+escAttr(m.fitLabel)+'">'+esc(m.fitLabel)+'</span></td>'
+        + '</tr>';
+    }
+    rowsEl.innerHTML = h;
+    var trs = rowsEl.querySelectorAll("tr");
+    for(var j=0;j<trs.length;j++){
+      (function(tr){
+        tr.addEventListener("click", function(){ sel = parseInt(tr.getAttribute("data-i"),10); pendingStop=null; setStopIdle(document.getElementById("btn-stop")); renderAll(); });
+        tr.addEventListener("keydown", function(e){
+          if(e.key==="Enter"){ sel = parseInt(tr.getAttribute("data-i"),10); renderAll(); pushLog("inf","select "+MODELS[sel].name); }
+        });
+      })(trs[j]);
+    }
+  }
+
+  function dotRow(lab, val, valCls){
+    return '<div class="dl-row"><span class="lab">'+esc(lab)+'</span><span class="dots" aria-hidden="true"> . . . . . . . . . . . . . .</span><span class="val '+(valCls||"")+'">'+esc(val)+'</span></div>';
+  }
+
+  var CFG_SECTIONS = [
+    {id:"IDENTITY", keys:["alias","host","metrics"]},
+    {id:"CONTEXT", keys:["n_parallel","ckpt_step","ctx_ckpt"]},
+    {id:"CACHE", keys:["cache_ram","experts","evict_ram","cache_prompt","cache_reuse"]},
+    {id:"SPECULATION", keys:["draft_nmax","draft_pmin","draft_layers","draft_model"]},
+    {id:"REASONING", keys:["reasoning","reason_fmt","reason_budget","chat_tmpl","chat_kwargs"]},
+    {id:"IO", keys:["gds_threads","pref_ws","pref_lookahead","mmproj"]}
+  ];
+  var CFG_LABELS = {alias:"alias", host:"host", metrics:"metrics", n_parallel:"parallel slots", ckpt_step:"checkpoint step", ctx_ckpt:"ctx checkpoints", cache_ram:"prompt cache", experts:"expert suite", evict_ram:"evict to ram", cache_prompt:"prompt cache on", cache_reuse:"cache reuse", draft_nmax:"draft n_max", draft_pmin:"draft p_min", draft_layers:"draft gpu layers", draft_model:"draft model", reasoning:"reasoning", reason_fmt:"reason format", reason_budget:"reason budget", chat_tmpl:"chat template", chat_kwargs:"template kwargs", gds_threads:"gds threads", pref_ws:"prefill workspace", pref_lookahead:"prefill lookahead", mmproj:"vision mmproj"};
+  var CFG_T01 = {metrics:1, cache_prompt:1, cache_reuse:1, evict_ram:1, pref_ws:1};
+  var CFG_UNUSED = {n_parallel:1, mmproj:1};
+  var CFG_ALIAS = {"l1_cache":"l1", "l2_pinned":"l2", "speculator":"spec"};
+  var collapsed = {IDENTITY:true, CONTEXT:true, CACHE:true, SPECULATION:true, REASONING:true, IO:true};
+  var lastCfgSel = -1;
+  function escAttr(s){ return esc(s).replace(/"/g,"&quot;"); }
+  function cfgVal(m, k){ var v = m.cfg[k]; return (v===undefined||v===null) ? "" : String(v); }
+
+  function textFieldRow(key, label, val){
+    var tag = CFG_UNUSED[key] ? '<span class="unused-tag">unused</span>' : '';
+    return '<div class="cfg-row"><label for="cfg-'+key+'">'+esc(label)+'</label>'
+      + '<div class="cfg-field"><span class="bracket"><span class="br">[</span><input id="cfg-'+key+'" data-k="'+key+'" value="'+escAttr(val)+'" placeholder="—" spellcheck="false" autocomplete="off"><span class="br">]</span><span class="dirty-flag" aria-hidden="true">*</span></span>'+tag+'</div></div>';
+  }
+  function toggleRow(key, label, val, opts){
+    var tag = CFG_UNUSED[key] ? '<span class="unused-tag">unused</span>' : '';
+    var btns = '';
+    for(var i=0;i<opts.length;i++){
+      var selCls = (val===opts[i]) ? ' sel' : '';
+      btns += '<button type="button" class="tgl-opt'+selCls+'" data-v="'+escAttr(opts[i])+'">'+esc(opts[i])+'</button>';
+      if(i<opts.length-1) btns += '<span class="tgl-sep">/</span>';
+    }
+    return '<div class="cfg-row"><label id="cfg-lab-'+key+'">'+esc(label)+'</label>'
+      + '<div class="cfg-field"><span class="bracket" data-k="'+key+'" data-val="'+escAttr(val)+'" role="group" aria-labelledby="cfg-lab-'+key+'"><span class="br">[</span>'+btns+'<span class="br">]</span><span class="dirty-flag" aria-hidden="true">*</span></span>'+tag+'</div></div>';
+  }
+  function sectionFieldRow(m, key){
+    var label = CFG_LABELS[key] || key;
+    var val = cfgVal(m, key);
+    if(CFG_T01[key]) return toggleRow(key, label, val, ["0","1"]);
+    if(key==="reasoning") return toggleRow(key, label, val, ["off","on"]);
+    return textFieldRow(key, label, val);
+  }
+  function secDirtyCount(secId){
+    var sec = null;
+    for(var i=0;i<CFG_SECTIONS.length;i++){ if(CFG_SECTIONS[i].id===secId) sec = CFG_SECTIONS[i]; }
+    if(!sec) return 0;
+    var n = 0;
+    for(var j=0;j<sec.keys.length;j++){
+      var b = cfgEl.querySelector('.bracket[data-k="'+sec.keys[j]+'"]');
+      if(b && b.classList.contains("dirty")) n++;
+    }
+    return n;
+  }
+  function refreshSecHeaders(){
+    var heads = cfgEl.querySelectorAll(".cfg-sec-head");
+    for(var i=0;i<heads.length;i++){
+      var id = heads[i].getAttribute("data-sec");
+      var open = heads[i].getAttribute("data-open")==="1";
+      var n = secDirtyCount(id);
+      var badge = n>0 ? ' ('+n+'*)' : '';
+      var arrow = open ? "▼" : "▶";
+      heads[i].innerHTML = '[<span aria-hidden="true">'+arrow+'</span> '+esc(id)+'<span class="dirty-n">'+esc(badge)+'</span>]';
+    }
+  }
+  function refreshStatus(){
+    var all = cfgEl.querySelectorAll(".bracket");
+    var n = 0;
+    for(var i=0;i<all.length;i++){ if(all[i].classList.contains("dirty")) n++; }
+    if(n===0) statusEl.textContent = "· clean — no pending edits";
+    else statusEl.textContent = "· "+n+" edited — press a to apply, u to revert";
+    refreshSecHeaders();
+  }
+  function markClean(){
+    var all = cfgEl.querySelectorAll(".bracket.dirty");
+    for(var i=0;i<all.length;i++){ all[i].classList.remove("dirty"); }
+  }
+  function bindCfgInputs(m){
+    var inputs = cfgEl.querySelectorAll("input[data-k]");
+    for(var k=0;k<inputs.length;k++){
+      inputs[k].addEventListener("input", function(){
+        var key = this.getAttribute("data-k");
+        var ck = CFG_ALIAS[key] || key;
+        var orig = cfgVal(m, ck);
+        var b = this.closest(".bracket");
+        if(b) b.classList.toggle("dirty", this.value !== orig);
+        refreshStatus();
+      });
+    }
+    var tgls = cfgEl.querySelectorAll(".bracket[data-val]");
+    for(var t=0;t<tgls.length;t++){
+      (function(wrap){
+        var opts = wrap.querySelectorAll(".tgl-opt");
+        for(var o=0;o<opts.length;o++){
+          opts[o].addEventListener("click", function(){
+            var key = wrap.getAttribute("data-k");
+            var orig = cfgVal(m, key);
+            wrap.setAttribute("data-val", this.getAttribute("data-v"));
+            var all2 = wrap.querySelectorAll(".tgl-opt");
+            for(var q=0;q<all2.length;q++){ all2[q].classList.toggle("sel", all2[q]===this); }
+            wrap.classList.toggle("dirty", wrap.getAttribute("data-val") !== orig);
+            refreshStatus();
+          });
+        }
+      })(tgls[t]);
+    }
+    var heads = cfgEl.querySelectorAll(".cfg-sec-head");
+    for(var s=0;s<heads.length;s++){
+      (function(btn){
+        function toggle(){
+          var id = btn.getAttribute("data-sec");
+          collapsed[id] = !collapsed[id];
+          var open = !collapsed[id];
+          btn.setAttribute("data-open", open ? "1" : "0");
+          btn.setAttribute("aria-expanded", open ? "true" : "false");
+          var body = cfgEl.querySelector('.cfg-sec-body[data-sec="'+id+'"]');
+          if(body) body.style.display = open ? "" : "none";
+          refreshSecHeaders();
+        }
+        btn.addEventListener("click", toggle);
+        btn.addEventListener("keydown", function(e){
+          if(e.key==="Enter" || e.key===" "){ e.preventDefault(); toggle(); }
+        });
+      })(heads[s]);
+    }
+  }
+
+  function renderDetail(){
+    var m = MODELS[sel];
+    if(sel !== lastCfgSel){ for(var c0=0;c0<CFG_SECTIONS.length;c0++){ collapsed[CFG_SECTIONS[c0].id] = true; } lastCfgSel = sel; }
+    titleEl.textContent = "detail · " + m.name;
+    var stateCls = m.state==="RUNNING" ? "green" : "";
+    dlEl.innerHTML =
+      dotRow("state", m.state, stateCls) +
+      dotRow("latency", m.state==="RUNNING" ? m.latency : "—") +
+      dotRow("endpoint", m.state==="RUNNING" ? m.endpoint : "—") +
+      dotRow("suite", m.suite);
+    var c = m.cfg;
+    var fields = [["path",c.path],["ctx",c.ctx],["batch",c.batch],["port",c.port],["l1_cache",c.l1],["l2_pinned",c.l2],["speculator",c.spec]];
+    var h = "";
+    for(var i=0;i<fields.length;i++){
+      var fv = (fields[i][1]===undefined||fields[i][1]===null) ? "" : String(fields[i][1]);
+      h += '<div class="cfg-row"><label for="cfg-'+fields[i][0]+'">'+esc(fields[i][0])+'</label>'
+        + '<div class="cfg-field"><span class="bracket"><span class="br">[</span><input id="cfg-'+fields[i][0]+'" data-k="'+fields[i][0]+'" value="'+escAttr(fv)+'" placeholder="—" spellcheck="false" autocomplete="off"><span class="br">]</span><span class="dirty-flag" aria-hidden="true">*</span></span></div></div>';
+    }
+    for(var s2=0;s2<CFG_SECTIONS.length;s2++){
+      var sec = CFG_SECTIONS[s2];
+      var open = !collapsed[sec.id];
+      h += '<div class="cfg-sec" data-sec="'+sec.id+'">'
+        + '<button type="button" class="cfg-sec-head" data-sec="'+sec.id+'" data-open="'+(open?"1":"0")+'" aria-expanded="'+(open?"true":"false")+'">[▶ '+esc(sec.id)+']</button>'
+        + '<div class="cfg-sec-body" data-sec="'+sec.id+'"'+(open?"":' style="display:none"')+'>';
+      for(var f=0;f<sec.keys.length;f++){ h += sectionFieldRow(m, sec.keys[f]); }
+      h += '</div></div>';
+    }
+    cfgEl.innerHTML = h;
+    bindCfgInputs(m);
+    statusEl.textContent = "· clean — no pending edits";
+    refreshSecHeaders();
+  }
+
+  function metricRow(lab, val, pct, dimmed){
+    return '<div class="metric'+(dimmed?" dimmed":"")+'"><span class="mlab">'+esc(lab)+'</span><span class="mval">'+esc(val)+'</span><span class="mbar" aria-hidden="true">'+bar(pct,12)+'</span></div>';
+  }
+  function pctOf(v){
+    var n = parseFloat(v);
+    if(isNaN(n)) return 0;
+    if(v.indexOf("%")>=0) return Math.min(100,n);
+    if(v.indexOf("t/s")>=0) return Math.min(100, n/30*100);
+    if(v.indexOf("MiB/s")>=0) return Math.min(100, n/6000*100);
+    if(v.indexOf("MiB")>=0) return Math.min(100, n/2000*100);
+    return Math.min(100, n/700*100);
+  }
+  function metricSparkRow(lab, val, spark, sub, dimmed){
+    return '<div class="metric'+(dimmed?" dimmed":"")+'"><span class="mlab">'+esc(lab)+'</span><span class="mval">'+esc(val)+'</span><span class="mspark" aria-hidden="true"><span class="spark">'+esc(spark)+'</span><span class="sub">'+esc(sub)+'</span></span></div>';
+  }
+  function sparkStr(vals){
+    var gl = "▁▂▃▄▅▆▇█";
+    if(!vals || !vals.length) return "▁▁▁▁▁▁▁▁▁▁";
+    var mn = Math.min.apply(null, vals), mx = Math.max.apply(null, vals);
+    var s = "";
+    for(var i=0;i<vals.length;i++){
+      var lv = (mx > mn) ? Math.round((vals[i]-mn)/(mx-mn)*7) : 3;
+      s += gl.charAt(Math.max(0, Math.min(7, lv)));
+    }
+    return s;
+  }
+  function rateSub(hist){
+    if(!hist || hist.length < 2) return "— standby";
+    var diff = hist[hist.length-1] - hist[hist.length-2];
+    var arrow = diff >= 0 ? "▲" : "▼";
+    var sign = diff >= 0 ? "+" : "";
+    return arrow + " " + sign + diff.toFixed(1) + " vs last req";
+  }
+  function callsRateSub(hist){
+    if(!hist || !hist.length) return "— standby";
+    var n = Math.min(3, hist.length), sum = 0;
+    for(var i=hist.length-n;i<hist.length;i++){ sum += hist[i]; }
+    return Math.round(sum/n) + "/min";
+  }
+  function renderMetrics(){
+    var m = MODELS[sel];
+    var live = (m.state==="RUNNING");
+    var d = live ? LIVE : {decode:"0.0t/s", prefill:"0.0t/s", l1_hit:"—", l2_hit:"—", draft_acc:"—", nvme:"0MiB/s", ram2vram:"0MiB/s", streamed:"0MiB", dec_calls:"0", pre_calls:"0"};
+    var h = "";
+    var hist = m.spark || MODELS[0].spark;
+    var flat = "▁▁▁▁▁▁▁▁▁▁";
+    var idleSub = "— standby";
+    if(live && hist){
+      h += metricSparkRow("decode", d.decode, sparkStr(hist.decode), rateSub(hist.decode), false);
+      h += metricSparkRow("prefill", d.prefill, sparkStr(hist.prefill), rateSub(hist.prefill), false);
+    } else {
+      h += metricSparkRow("decode", d.decode, flat, idleSub, true);
+      h += metricSparkRow("prefill", d.prefill, flat, idleSub, true);
+    }
+    h += metricRow("l1_hit", d.l1_hit, (d.l1_hit==="—") ? 0 : pctOf(d.l1_hit), !live);
+    h += metricRow("l2_hit", d.l2_hit, (d.l2_hit==="—") ? 0 : pctOf(d.l2_hit), !live);
+    h += metricRow("draft_acc", d.draft_acc, (d.draft_acc==="—") ? 0 : pctOf(d.draft_acc), !live);
+    h += metricRow("nvme", d.nvme, pctOf(d.nvme), !live);
+    h += metricRow("ram2vram", d.ram2vram, pctOf(d.ram2vram), !live);
+    if(live && hist){
+      var sLast = hist.streamed[hist.streamed.length-1], sPrev = hist.streamed[hist.streamed.length-2];
+      h += metricSparkRow("streamed", d.streamed, sparkStr(hist.streamed), "+" + Math.round(sLast-sPrev) + " MiB last request", false);
+      h += metricSparkRow("dec_calls", d.dec_calls, sparkStr(hist.dec_calls), callsRateSub(hist.dec_calls), false);
+      h += metricSparkRow("pre_calls", d.pre_calls, sparkStr(hist.pre_calls), callsRateSub(hist.pre_calls), false);
+    } else {
+      h += metricSparkRow("streamed", d.streamed, flat, idleSub, true);
+      h += metricSparkRow("dec_calls", d.dec_calls, flat, idleSub, true);
+      h += metricSparkRow("pre_calls", d.pre_calls, flat, idleSub, true);
+    }
+    metEl.innerHTML = h;
+  }
+
+  var LOGS = [
+    {ts:"09:41:02", lv:"lvl-ok", lvT:"OK  ", msg:"qwen3.6-moe-tq3 listening on :8090/v1 · ctx 32768"},
+    {ts:"09:41:03", lv:"lvl-inf", lvT:"INFO", msg:"decode 20.3t/s · prefill 29.4t/s · l1_hit 84% · l2_hit 55%"},
+    {ts:"09:41:05", lv:"lvl-inf", lvT:"INFO", msg:"nvme 5743MiB/s · ram2vram 1915MiB/s · streamed 1715MiB"},
+    {ts:"09:41:07", lv:"lvl-warn", lvT:"WARN", msg:"l2_pinned 8192MiB near cap · draft_acc 84% stable"}
+  ];
+  var logN = 0;
+  function fmtTs(d){
+    function p(n){ return (n<10?"0":"")+n; }
+    return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+  }
+  function renderLogs(){
+    var h = "";
+    var tail = LOGS.slice(-4);
+    for(var i=0;i<tail.length;i++){
+      h += '<div class="log-line"><span class="ts">'+esc(tail[i].ts)+'</span> <span class="'+tail[i].lv+'">'+tail[i].lvT+'</span> <span>siphond · '+esc(tail[i].msg)+'</span></div>';
+    }
+    logEl.innerHTML = h;
+  }
+  function pushLog(lv, msg){
+    var d = new Date();
+    var m = {OK:"lvl-ok", INFO:"lvl-inf", WARN:"lvl-warn", ERR:"lvl-err"};
+    var t = {OK:"OK  ", INFO:"INFO", WARN:"WARN", ERR:"ERR "};
+    var k = lv.toUpperCase();
+    if(k==="INF") k="INFO";
+    LOGS.push({ts:fmtTs(d), lv:m[k]||"lvl-inf", lvT:t[k]||"INFO", msg:msg});
+    renderLogs();
+  }
+  var FAKE = [
+    "decode 20.4t/s · prefill 29.1t/s · l1_hit 84% · dec_calls 37",
+    "l1_cache 2800MiB ok · l2_pinned 8192MiB · spec mtp verified",
+    "streamed 1716MiB · pre_calls 656 · ram2vram 1914MiB/s",
+    "heartbeat :8090/v1 · p50 38ms · draft_acc 84%",
+    "nvme 5741MiB/s · temp 53C · vram 3.9/6.0GiB steady"
+  ];
+  setInterval(function(){
+    var m = MODELS[sel];
+    if(m.state==="RUNNING"){ pushLog("info", FAKE[logN % FAKE.length]); logN++; }
+    else { pushLog("info", m.name + " standby · zero tokens · awaiting start"); }
+  }, 3000);
+
+  function setFocus(i){
+    focusIdx = (i+panels.length)%panels.length;
+    for(var k=0;k<panels.length;k++){
+      document.getElementById(panels[k]).classList.toggle("focused", k===focusIdx);
+    }
+  }
+
+  function renderAll(){ renderTable(); renderDetail(); renderMetrics(); renderLogs(); }
+
+  document.getElementById("btn-start").addEventListener("click", doStart);
+  document.getElementById("btn-stop").addEventListener("click", doStop);
+  document.getElementById("btn-apply").addEventListener("click", doApply);
+  document.getElementById("btn-revert").addEventListener("click", doRevert);
+  document.getElementById("btn-reset").addEventListener("click", doReset);
+
+  function setStopIdle(b){ if(!b) return; b.classList.remove("armed"); b.innerHTML='[<span class="k">x</span> stop]'; }
+  function setStopArmed(b){ if(!b) return; b.classList.add("armed"); b.innerHTML='[<span class="k">x</span> confirm?]'; }
+
+  function doStart(){
+    var m = MODELS[sel];
+    pendingStop = null;
+    setStopIdle(document.getElementById("btn-stop"));
+    if(m.state!=="RUNNING"){
+      m.state = m.state==="STOPPED" ? "LOADING" : "RUNNING";
+      if(m.state==="LOADING"){
+        renderAll();
+        pushLog("warn", m.name+" loading weights → vram …");
+        setTimeout(function(){ m.state="RUNNING"; m.rate = m.name==="qwen3.6-moe-tq3" ? "20.3t/s" : "11.7t/s"; renderAll(); pushLog("ok", m.name+" running · "+m.rate+" · "+m.cfg.port); }, 900);
+      } else {
+        m.rate = m.name==="qwen3.6-moe-tq3" ? "20.3t/s" : "11.7t/s";
+        renderAll(); pushLog("ok", m.name+" started · "+m.rate+" on :"+m.cfg.port+"/v1");
+      }
+    }
+  }
+  var pendingStop = null;
+  function doStop(){
+    var m = MODELS[sel];
+    if(m.state==="STOPPED" || m.state==="IDLE"){
+      pushLog("info", m.name+" already stopped · nothing to confirm");
+      return;
+    }
+    if(pendingStop !== sel){
+      pendingStop = sel;
+      renderAll();
+      pushLog("warn", m.name+" · press x again to confirm stop");
+      setStopArmed(document.getElementById("btn-stop"));
+      setTimeout(function(){
+        if(pendingStop === sel){
+          pendingStop = null;
+          setStopIdle(document.getElementById("btn-stop"));
+        }
+      }, 3000);
+      return;
+    }
+    pendingStop = null;
+    setStopIdle(document.getElementById("btn-stop"));
+    m.state = "STOPPED"; m.rate = "—";
+    renderAll(); pushLog("err", m.name+" stopped · vram released");
+    setTimeout(function(){ if(MODELS[sel]===m && m.state==="STOPPED"){ m.state="IDLE"; renderAll(); } }, 2500);
+  }
+  function doApply(){
+    var m = MODELS[sel];
+    var inputs = cfgEl.querySelectorAll("input[data-k]");
+    for(var i=0;i<inputs.length;i++){
+      var k = inputs[i].getAttribute("data-k");
+      var ck = CFG_ALIAS[k] || k;
+      m.cfg[ck] = inputs[i].value;
+    }
+    var tgls = cfgEl.querySelectorAll('.bracket[data-val]');
+    for(var t=0;t<tgls.length;t++){
+      var tk = tgls[t].getAttribute("data-k");
+      m.cfg[tk] = tgls[t].getAttribute("data-val");
+    }
+    m.endpoint = ":" + m.cfg.port + "/v1";
+    statusEl.textContent = "· applied — "+m.name+" :"+m.cfg.port+" · ctx "+m.cfg.ctx;
+    pushLog("info","config applied · "+m.name+" port "+m.cfg.port+" ctx "+m.cfg.ctx+" batch "+m.cfg.batch);
+    markClean();
+    refreshStatus();
+    statusEl.textContent = "· applied — "+m.name+" :"+m.cfg.port+" · ctx "+m.cfg.ctx;
+    refreshSecHeaders();
+    renderMetrics();
+  }
+  function doRevert(){ pendingStop = null; setStopIdle(document.getElementById("btn-stop")); renderDetail(); statusEl.textContent = "· reverted — no pending edits"; pushLog("info","config reverted · "+MODELS[sel].name); }
+  function doReset(){
+    pendingStop = null;
+    setStopIdle(document.getElementById("btn-stop"));
+    var m = MODELS[sel];
+    var d = DEFAULTS[sel] || {};
+    var inputs = cfgEl.querySelectorAll("input[data-k]");
+    for(var i=0;i<inputs.length;i++){
+      var k = inputs[i].getAttribute("data-k");
+      var ck = CFG_ALIAS[k] || k;
+      var v = d[ck];
+      inputs[i].value = (v===undefined||v===null) ? "" : String(v);
+      var b = inputs[i].closest(".bracket");
+      if(b) b.classList.toggle("dirty", inputs[i].value !== cfgVal(m, ck));
+    }
+    var tgls = cfgEl.querySelectorAll('.bracket[data-val]');
+    for(var t=0;t<tgls.length;t++){
+      var tk = tgls[t].getAttribute("data-k");
+      var dv = d[tk];
+      var ds = (dv===undefined||dv===null) ? "" : String(dv);
+      tgls[t].setAttribute("data-val", ds);
+      var opts = tgls[t].querySelectorAll(".tgl-opt");
+      for(var o=0;o<opts.length;o++){ opts[o].classList.toggle("sel", opts[o].getAttribute("data-v")===ds); }
+      tgls[t].classList.toggle("dirty", ds !== cfgVal(m, tk));
+    }
+    refreshStatus();
+    statusEl.textContent = "· reset to defaults — press a to apply, u to revert";
+    pushLog("info","reset to defaults — press Apply to save · "+m.name);
+  }
+
+  document.addEventListener("keydown", function(e){
+    var tag = (document.activeElement && document.activeElement.tagName) || "";
+    var typing = (tag==="INPUT" || tag==="TEXTAREA");
+    if(e.key==="Tab"){ e.preventDefault(); setFocus(focusIdx+1); return; }
+    if(typing){ if(e.key==="Escape") document.activeElement.blur(); return; }
+    if(e.key==="ArrowDown"){ e.preventDefault(); sel=(sel+1)%MODELS.length; pendingStop=null; setStopIdle(document.getElementById("btn-stop")); renderAll(); }
+    else if(e.key==="ArrowUp"){ e.preventDefault(); sel=(sel-1+MODELS.length)%MODELS.length; pendingStop=null; setStopIdle(document.getElementById("btn-stop")); renderAll(); }
+    else if(e.key==="Enter"){ pushLog("inf","select "+MODELS[sel].name); }
+    else if(e.key==="s"||e.key==="S"){ doStart(); }
+    else if(e.key==="x"||e.key==="X"){ doStop(); }
+    else if(e.key==="r"||e.key==="R"){ renderAll(); pushLog("info","refresh · models re-polled"); }
+    else if(e.key==="a"||e.key==="A"){ doApply(); }
+    else if(e.key==="u"||e.key==="U"){ doRevert(); }
+    else if(e.key==="0"){ doReset(); }
+    else if(e.key==="q"||e.key==="Q"){ pushLog("warn","quit ignored in mockup · press browser back to exit"); }
+  });
+
+  var SPARK_LV = "▁▂▃▄▅▆▇█";
+  var SPARKS = {
+    "spark-gpu":[0,1,2,3,4,2,5,3],
+    "spark-vram":[2,4,2,3,4,3,5,4],
+    "spark-cpu":[1,2,1,3,4,5,6,7],
+    "spark-ram":[0,0,1,2,3,2,1,2],
+    "spark-nvme":[2,1,2,1,2,3,2,1]
+  };
+  function drawSpark(id){
+    var a = SPARKS[id];
+    var el = document.getElementById(id);
+    if(!a || !el) return;
+    var s = "";
+    for(var i=0;i<a.length;i++){ s += SPARK_LV.charAt(Math.max(0,Math.min(7,a[i]))); }
+    el.textContent = s;
+  }
+  function tickSparks(){
+    for(var id in SPARKS){
+      if(!SPARKS.hasOwnProperty(id)) continue;
+      var a = SPARKS[id];
+      var last = a[a.length-1];
+      var d = Math.floor(Math.random()*3)-1;
+      var n = Math.max(0, Math.min(7, last+d));
+      a.push(n); a.shift();
+      drawSpark(id);
+    }
+  }
+  function paintStrip(){
+    var blocks = document.querySelectorAll(".sysstrip .sys");
+    for(var i=0;i<blocks.length;i++){
+      var b = blocks[i];
+      var util = parseFloat(b.getAttribute("data-util"));
+      var temp = parseFloat(b.getAttribute("data-temp"));
+      var used = parseFloat(b.getAttribute("data-used"));
+      var total = parseFloat(b.getAttribute("data-total"));
+      var uEl = b.querySelector('[data-t="util"]');
+      var tEl = b.querySelector('[data-t="temp"]');
+      var bar = b.querySelector(".mbar");
+      var hot = b.querySelector(".hot-tag");
+      if(!isNaN(util) && uEl){
+        var uw = util >= 85;
+        uEl.classList.toggle("warn", uw);
+        if(bar) bar.classList.toggle("warn", uw);
+      }
+      if(!isNaN(temp) && tEl){
+        var hx = temp >= 90;
+        tEl.classList.toggle("hot", hx);
+        if(hot) hot.style.display = hx ? "" : "none";
+      } else if(hot){
+        hot.style.display = "none";
+      }
+      if(!isNaN(used) && !isNaN(total) && total > 0 && (used/total) >= 0.9){
+        var vs = b.querySelectorAll(".v");
+        for(var j=0;j<vs.length;j++){
+          if(vs[j].textContent.indexOf("GiB") >= 0){ vs[j].classList.add("warn"); }
+        }
+        if(bar) bar.classList.add("warn");
+      }
+    }
+  }
+
+  function ensureSpark(m){
+    if(m.spark) return m.spark;
+    var base = MODELS[0].spark;
+    m.spark = {
+      decode: base.decode.slice(), prefill: base.prefill.slice(),
+      streamed: base.streamed.slice(), dec_calls: base.dec_calls.slice(), pre_calls: base.pre_calls.slice(),
+      dec_total: 12, pre_total: 210
+    };
+    return m.spark;
+  }
+  function tickMetricHist(){
+    for(var i=0;i<MODELS.length;i++){
+      var m = MODELS[i];
+      if(m.state !== "RUNNING") continue;
+      var s = ensureSpark(m);
+      var dl = s.decode[s.decode.length-1] + (Math.random()-0.5)*0.9;
+      dl = Math.max(18.4, Math.min(22.2, dl));
+      s.decode.push(Math.round(dl*10)/10); s.decode.shift();
+      var pl = s.prefill[s.prefill.length-1] + (Math.random()-0.5)*1.1;
+      pl = Math.max(27.2, Math.min(31.4, pl));
+      s.prefill.push(Math.round(pl*10)/10); s.prefill.shift();
+      var inc = 4 + Math.round(Math.random()*34);
+      s.streamed.push(s.streamed[s.streamed.length-1]+inc); s.streamed.shift();
+      var dc = s.dec_calls[s.dec_calls.length-1] + (Math.floor(Math.random()*3)-1);
+      dc = Math.max(0, Math.min(6, dc));
+      s.dec_calls.push(dc); s.dec_calls.shift();
+      var pc = s.pre_calls[s.pre_calls.length-1] + (Math.floor(Math.random()*13)-6);
+      pc = Math.max(35, Math.min(78, pc));
+      s.pre_calls.push(pc); s.pre_calls.shift();
+      s.dec_total += (Math.random() < 0.4 ? 1 : 0);
+      s.pre_total += (Math.random() < 0.5 ? Math.round(1+Math.random()*2) : 0);
+      if(i === sel || MODELS[sel] === m){
+        LIVE.decode = s.decode[s.decode.length-1].toFixed(1) + "t/s";
+        LIVE.prefill = s.prefill[s.prefill.length-1].toFixed(1) + "t/s";
+        LIVE.streamed = s.streamed[s.streamed.length-1] + "MiB";
+        LIVE.dec_calls = String(s.dec_total);
+        LIVE.pre_calls = String(s.pre_total);
+        m.rate = LIVE.decode;
+      }
+    }
+  }
+
+  function tick(){
+    var d = new Date();
+    function p(n){ return (n<10?"0":"")+n; }
+    document.getElementById("clock").textContent = p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+    document.getElementById("date").textContent = d.toLocaleDateString("en-CA",{month:"short",day:"2-digit"});
+    tickSparks();
+    tickMetricHist();
+    if(MODELS[sel].state === "RUNNING"){ renderMetrics(); }
+  }
+
+  renderAll();
+  paintStrip();
+  drawSpark("spark-gpu"); drawSpark("spark-vram"); drawSpark("spark-cpu"); drawSpark("spark-ram"); drawSpark("spark-nvme");
+  tick();
+  setInterval(tick, 1000);
+  window.__siphon = {MODELS:MODELS, get sel(){return sel;}, set sel(v){sel=v; renderAll();}};
+})();
+</script>
+</body>
+</html>

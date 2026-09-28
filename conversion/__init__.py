@@ -53,6 +53,7 @@ TEXT_MODEL_MAP: dict[str, str] = {
     "DistilBertModel": "bert",
     "Dots1ForCausalLM": "dots1",
     "DotsOCRForCausalLM": "qwen",
+    "DFlashDraftModel": "qwen",
     "DreamModel": "dream",
     "Ernie4_5ForCausalLM": "ernie",
     "Ernie4_5_ForCausalLM": "ernie",

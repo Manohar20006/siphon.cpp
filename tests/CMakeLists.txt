@@ -236,6 +236,7 @@ set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-downlo
 
 llama_build_and_test(test-arg-parser.cpp)
 
+if (WIN32)
 llama_build(test-dstorage-stream-bench.cpp)
 target_sources(test-dstorage-stream-bench PRIVATE ${PROJECT_SOURCE_DIR}/src/llama-dstorage-slots.cpp)
 target_sources(test-dstorage-stream-bench PRIVATE ${PROJECT_SOURCE_DIR}/src/llama-impl.cpp)
@@ -243,6 +244,7 @@ target_sources(test-dstorage-stream-bench PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src
 target_include_directories(test-dstorage-stream-bench PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/ggml/include)
 target_include_directories(test-dstorage-stream-bench PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src/ggml-cuda)
 target_link_libraries(test-dstorage-stream-bench PRIVATE d3d12.lib dxgi.lib ole32.lib)
+endif()
 
 llama_build_and_test(test-dstorage-cache-layout.cpp)
 target_include_directories(test-dstorage-cache-layout PRIVATE ${PROJECT_SOURCE_DIR}/src)

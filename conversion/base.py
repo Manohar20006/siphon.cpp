@@ -120,7 +120,8 @@ class ModelBase:
                  disable_mistral_community_chat_template: bool = False,
                  sentence_transformers_dense_modules: bool = False,
                  fuse_gate_up_exps: bool = False,
-                 fp8_as_q8: bool = False):
+                 fp8_as_q8: bool = False,
+                 target_model_dir: Path | None = None):
         if type(self) is ModelBase or \
                 type(self) is TextModel or \
                 type(self) is MmprojModel:
@@ -151,6 +152,7 @@ class ModelBase:
         self._is_mxfp4 = False
         self._fp8_as_q8 = fp8_as_q8
         self._fp8_dequantized: set[str] = set()
+        self.target_model_dir = target_model_dir
 
         # Apply heuristics to figure out typical tensor encoding based on first tensor's dtype
         # NOTE: can't use field "torch_dtype" in config.json, because some finetunes lie.

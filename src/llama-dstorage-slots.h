@@ -11,6 +11,7 @@
 #include <future>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -98,6 +99,27 @@ struct ExpertSlot {
 
 class DStorageSlotManager {
 public:
+    // A cheap, lock-protected view of the counters that back the Siphon
+    // dashboard.  Counters are intentionally cumulative for the lifetime of
+    // the loaded model; clients can take a before/after delta for one request.
+    struct TelemetrySnapshot {
+        bool active = false;
+        uint64_t l1_resident_experts = 0;
+        uint64_t l2_resident_experts = 0;
+        uint64_t prefill_calls = 0;
+        uint64_t prefill_hits = 0;
+        uint64_t prefill_misses = 0;
+        uint64_t decode_calls = 0;
+        uint64_t decode_hits = 0;
+        uint64_t decode_misses = 0;
+        uint64_t decode_cold_experts = 0;
+        uint64_t decode_pinned_experts = 0;
+        uint64_t streamed_file_bytes = 0;
+        uint64_t pinned_transfer_bytes = 0;
+        uint64_t pinned_transfer_us = 0;
+        uint64_t stream_total_us = 0;
+    };
+
     struct CacheLayout {
         uint64_t persistent_cache_budget_bytes = 0;
         uint64_t workspace_reserve_bytes = 0;
@@ -512,6 +534,14 @@ public:
         return slots_[slot_idx].pool_index >= pool_group_slot_counts_[group] - spec_slots_for_group;
     }
 
+    // pure static helper: the tail `speculative_slots` of `n_slots` are the speculative partition
+    static bool slot_in_speculative_partition(int slot_idx, int n_slots, int speculative_slots) {
+        if (speculative_slots <= 0 || n_slots <= 0) {
+            return false;
+        }
+        return slot_idx >= n_slots - speculative_slots;
+    }
+
     static bool should_admit_prefetch(
             double confidence,
             int64_t expected_saved_stall,
@@ -665,6 +695,11 @@ public:
 
     const PinnedEntry * get_pinned_entry(int layer_idx, int expert_idx);
 
+    // Safe to call while inference is running.  This does not wait for I/O or
+    // mutate cache state, so exporting it through the server metrics endpoint
+    // has negligible impact on decode.
+    TelemetrySnapshot telemetry_snapshot();
+
     void destroy();
     ~DStorageSlotManager();
 
@@ -687,8 +722,10 @@ private:
     bool pinned_cache_enabled() const;
     bool pinned_admission_pending(uint64_t expert_key) const;
     bool static_pinned_entry(uint64_t expert_key) const;
+    void pin_index_update(uint64_t expert_key);
     bool preload_static_pinned_layers();
     void release_prefill_only_pinned_cache();
+    bool cache_evicted_expert_to_ram(int slot_idx);
     bool prefetch_global_batch(std::vector<QueuedGlobalPrefetch> batch);
     void collect_async_prefetches(bool wait_all);
     void collect_pinned_admissions(bool wait_all);
@@ -822,6 +859,8 @@ private:
     // Per-layer list of registered tensor names
     std::unordered_map<int, std::vector<std::string>> layer_tensors_;
     std::unordered_map<uint64_t, PinnedEntry> pinned_cache_;
+    std::set<std::pair<uint64_t, uint64_t>> pinned_lru_index_; // (last_used_tick, expert_key)
+    std::vector<std::pair<uint64_t, std::pair<void *, int>>> pinned_buf_freelist_; // (bytes, (host_ptr, is_pinned))
     std::unordered_set<uint64_t> static_pinned_experts_;
     std::vector<int> static_pinned_layers_;
     std::vector<std::pair<int, int>> static_pinned_expert_selection_;
@@ -939,6 +978,14 @@ private:
         uint64_t pinned_prefill_only_release_entries = 0;
         uint64_t pinned_prefill_only_release_bytes = 0;
         uint64_t pinned_prefill_only_release_us = 0;
+        uint64_t evict_to_ram_attempted = 0;
+        uint64_t evict_to_ram_completed = 0;
+        uint64_t evict_to_ram_skipped_cold = 0;
+        uint64_t evict_to_ram_skipped_already = 0;
+        uint64_t evict_to_ram_skipped_budget = 0;
+        uint64_t evict_to_ram_skipped_failed = 0;
+        uint64_t evict_to_ram_bytes = 0;
+        uint64_t evict_to_ram_us = 0;
     };
 
     struct DecodeHotStats {

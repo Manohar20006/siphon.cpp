@@ -386,8 +386,10 @@ extern "C" {
         bool kv_unified;  // use a unified buffer across the input sequences when computing the attention
                           // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
                           // ref: https://github.com/ggml-org/llama.cpp/pull/14363
-        bool dstorage_moe; // enable DirectStorage MoE eval callback
+bool dstorage_moe; // enable DirectStorage MoE eval callback
         bool dstorage_moe_prefetch; // speculatively prefetch future-layer experts from previous-token routing
+
+        struct llama_context * ctx_other; // other context to share weights/models with (dflash etc.)
 
         // [EXPERIMENTAL]
         // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)
@@ -619,6 +621,12 @@ extern "C" {
 
     // Returns true if the model contains an encoder that requires llama_encode() call
     LLAMA_API bool llama_model_has_encoder(const struct llama_model * model);
+
+    // Returns the target layer indices that the draft model extracts embeddings from (dflash etc.)
+    LLAMA_API const int32_t * llama_model_target_layer_ids(const struct llama_model * model);
+
+    // Returns the number of target layer indices
+    LLAMA_API uint32_t llama_model_target_layer_ids_n(const struct llama_model * model);
 
     // Returns true if the model contains a decoder that requires llama_decode() call
     LLAMA_API bool llama_model_has_decoder(const struct llama_model * model);

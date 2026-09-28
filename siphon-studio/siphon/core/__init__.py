@@ -1,0 +1,1 @@
+"""core: UI-free logic shared by the CLI, the TUI and future desktop apps."""

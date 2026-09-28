@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Siphon — Local LLM Ops Console</title>
+<style>
+:root{
+  --bg: oklch(99% 0.002 240);
+  --surface: oklch(100% 0 0);
+  --fg: oklch(18% 0.012 250);
+  --muted: oklch(54% 0.012 250);
+  --border: oklch(92% 0.005 250);
+  --accent: oklch(58% 0.18 255);
+  --font-display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', system-ui, sans-serif;
+  --font-body: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', system-ui, sans-serif;
+  /* Siphon dark adaptation (explicit user brief overrides light base) */
+  --ink:#0B0F19;
+  --ink-2:#0E1423;
+  --card: rgba(255,255,255,0.035);
+  --card-2: rgba(255,255,255,0.055);
+  --hair: rgba(255,255,255,0.08);
+  --txt:#E8ECF5;
+  --txt-dim:#9AA3B8;
+  --txt-faint:#6B7590;
+  --indigo:#6366F1;
+  --indigo-hi:#818CF8;
+  --emerald:#10B981;
+  --amber:#F59E0B;
+  --rose:#F43F5E;
+  --radius:18px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  font-family: var(--font-body);
+  background: var(--ink);
+  color: var(--txt);
+  min-height:100vh;
+  -webkit-font-smoothing:antialiased;
+  letter-spacing:-0.01em;
+  overflow-x:hidden;
+}
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(900px 520px at 28% -8%, rgba(99,102,241,0.20), transparent 65%),
+    radial-gradient(700px 500px at 85% 12%, rgba(99,102,241,0.08), transparent 60%),
+    radial-gradient(800px 600px at 50% 110%, rgba(56,189,248,0.06), transparent 60%);
+}
+h1,h2,h3{font-family:var(--font-display);letter-spacing:-0.025em;font-weight:650}
+.num{font-variant-numeric:tabular-nums;letter-spacing:-0.02em}
+.app{display:flex;min-height:100vh;position:relative;z-index:1}
+/* SIDEBAR */
+.sidebar{
+  width:220px;flex-shrink:0;position:sticky;top:0;height:100vh;
+  display:flex;flex-direction:column;padding:22px 14px 16px;
+  background:rgba(11,15,25,0.72);backdrop-filter:blur(18px);
+  border-right:1px solid var(--hair);
+}
+.brand{display:flex;align-items:center;gap:10px;padding:2px 8px 18px}
+.logo{width:32px;height:32px;border-radius:10px;background:linear-gradient(135deg,#6366F1,#8B5CF6 60%,#4F46E5);display:grid;place-items:center;box-shadow:0 6px 20px rgba(99,102,241,.45)}
+.logo svg{display:block}
+.brand-name{font-weight:700;font-size:18px;letter-spacing:-0.03em}
+.brand-sub{font-size:11px;color:var(--txt-faint);letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.nav{display:flex;flex-direction:column;gap:4px;margin-top:4px}
+.nav-label{font-size:11px;color:var(--txt-faint);text-transform:uppercase;letter-spacing:.1em;font-weight:600;padding:8px 10px 6px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:11px;color:var(--txt-dim);font-size:13.5px;font-weight:550;cursor:pointer;border:1px solid transparent;transition:all .18s ease;text-decoration:none}
+.nav-item svg{opacity:.8}
+.nav-item:hover{background:rgba(255,255,255,.05);color:var(--txt)}
+.nav-item.active{background:rgba(99,102,241,.14);border-color:rgba(99,102,241,.28);color:#fff}
+.nav-item.active svg{opacity:1}
+.env-card{margin-top:auto;background:var(--card);border:1px solid var(--hair);border-radius:14px;padding:12px 12px 11px}
+.env-card-top{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:650}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.dot.live{background:var(--emerald);box-shadow:0 0 0 4px rgba(16,185,129,.18)}
+.env-card p{font-size:12px;color:var(--txt-dim);margin-top:6px;line-height:1.45}
+.env-meter{height:6px;background:rgba(255,255,255,.08);border-radius:99px;margin-top:10px;overflow:hidden}
+.env-meter span{display:block;height:100%;width:65%;background:linear-gradient(90deg,var(--indigo),var(--indigo-hi));border-radius:99px}
+/* MAIN */
+.main{flex:1;min-width:0;padding:26px 28px 40px;max-width:1220px}
+.topbar{display:flex;align-items:center;gap:14px;margin-bottom:20px;animation:rise .6s ease both}
+.topbar h1{font-size:26px}
+.topbar .crumb{font-size:12.5px;color:var(--txt-faint)}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:var(--txt-dim);background:rgba(255,255,255,.05);border:1px solid var(--hair);padding:7px 11px;border-radius:99px}
+.pill b{color:var(--txt)}
+.actions{margin-left:auto;display:flex;gap:10px}
+.btn{height:38px;padding:0 18px;border-radius:11px;font-size:13.5px;font-weight:650;letter-spacing:-.01em;cursor:pointer;border:1px solid transparent;transition:all .18s ease;display:inline-flex;align-items:center;gap:8px}
+.btn-primary{background:var(--indigo);color:#fff;box-shadow:0 8px 22px rgba(99,102,241,.38)}
+.btn-primary:hover:not(:disabled){background:#5558ee;transform:translateY(-1px)}
+.btn-primary:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+.btn-ghost{background:transparent;color:#FDA4AF;border-color:rgba(244,63,94,.4)}
+.btn-ghost:hover:not(:disabled){background:rgba(244,63,94,.12);border-color:rgba(244,63,94,.6)}
+.btn-ghost:disabled{opacity:.4;cursor:not-allowed}
+.btn:focus-visible, .nav-item:focus-visible, input:focus-visible, button:focus-visible{outline:2px solid var(--indigo-hi);outline-offset:2px}
+/* KPI */
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--hair);border-radius:var(--radius);box-shadow:0 12px 32px rgba(0,0,0,.28);transition:transform .2s ease, background .2s ease, border-color .2s ease}
+.card:hover{transform:translateY(-2px);background:var(--card-2)}
+.kpi{padding:14px 14px 10px;animation:rise .6s ease both}
+.kpi:nth-child(2){animation-delay:.06s}.kpi:nth-child(3){animation-delay:.12s}.kpi:nth-child(4){animation-delay:.18s}.kpi:nth-child(5){animation-delay:.24s}
+.kpi-label{font-size:11.5px;font-weight:650;letter-spacing:.07em;text-transform:uppercase;color:var(--txt-faint)}
+.kpi-value{font-size:26px;font-weight:700;margin:8px 0 2px;font-variant-numeric:tabular-nums;letter-spacing:-.03em}
+.kpi-value small{font-size:13px;font-weight:600;color:var(--txt-dim)}
+.kpi-delta{font-size:12px;color:var(--txt-dim)}
+.kpi-delta.up{color:#6EE7B7}.kpi-delta.warn{color:#FCD34D}.kpi-delta.mut{color:var(--txt-faint)}
+.spark{margin-top:8px;display:block;width:100%;height:32px}
+/* GRID */
+.grid2{display:grid;grid-template-columns:1.05fr .95fr;gap:12px;margin-bottom:12px}
+.panel{padding:18px}
+.panel-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.panel-head h2{font-size:15px}
+.panel-head .hint{font-size:12.5px;color:var(--txt-faint);margin-left:auto}
+/* roster */
+.roster{display:flex;flex-direction:column;gap:10px}
+.model-row{display:flex;align-items:center;gap:12px;padding:13px 13px;border-radius:14px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.07);cursor:pointer;transition:all .18s ease;text-align:left;width:100%;color:inherit;font:inherit}
+.model-row:hover{background:rgba(255,255,255,.055);transform:translateY(-1px)}
+.model-row.selected{background:rgba(99,102,241,.11);border-color:rgba(99,102,241,.42);box-shadow:0 8px 24px rgba(99,102,241,.18)}
+.m-icon{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;font-weight:800;font-size:13px;flex-shrink:0;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);color:#C7D2FE}
+.model-row.selected .m-icon{background:var(--indigo);border-color:transparent;color:#fff}
+.m-main{min-width:0;flex:1}
+.m-name{font-size:13.5px;font-weight:700;letter-spacing:-.015em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m-meta{font-size:12px;color:var(--txt-dim);margin-top:3px;display:flex;gap:8px;align-items:center}
+.status{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:4px 9px;border-radius:99px;border:1px solid}
+.st-run{color:#6EE7B7;background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.32)}
+.st-idle{color:#A8B0C4;background:rgba(148,163,184,.1);border-color:rgba(148,163,184,.25)}
+.st-stop{color:#FDA4AF;background:rgba(244,63,94,.11);border-color:rgba(244,63,94,.3)}
+.fit{font-size:11px;font-weight:700;padding:4px 8px;border-radius:7px;background:rgba(99,102,241,.14);color:#C7D2FE;border:1px solid rgba(99,102,241,.28)}
+.fit.tight{background:rgba(245,158,11,.12);color:#FCD34D;border-color:rgba(245,158,11,.3)}
+.m-rate{font-size:13px;font-weight:700;color:var(--txt-dim);font-variant-numeric:tabular-nums}
+.model-row.selected .m-rate{color:#fff}
+/* form */
+.form-grid{display:grid;gap:12px}
+.field label{display:block;font-size:12px;font-weight:650;color:var(--txt-dim);margin-bottom:6px;letter-spacing:.01em}
+.field input[type=text]{width:100%;background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.1);border-radius:11px;color:var(--txt);font-size:13px;padding:10px 12px;font-family:inherit;transition:border-color .15s}
+.field input[type=text]:focus{border-color:var(--indigo);outline:none;box-shadow:0 0 0 3px rgba(99,102,241,.22)}
+.field-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.slider-row{background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:11px 12px}
+.slider-top{display:flex;align-items:center;margin-bottom:8px}
+.slider-top label{font-size:12.5px;font-weight:650;color:var(--txt-dim)}
+.slider-val{margin-left:auto;font-size:12.5px;font-weight:700;color:#C7D2FE;background:rgba(99,102,241,.15);padding:3px 8px;border-radius:7px;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;appearance:none;height:6px;border-radius:99px;background:linear-gradient(90deg,var(--indigo) var(--fill,50%),rgba(255,255,255,.12) var(--fill,50%));cursor:pointer}
+input[type=range]::-webkit-slider-thumb{appearance:none;width:16px;height:16px;border-radius:50%;background:#fff;border:3px solid var(--indigo);box-shadow:0 2px 8px rgba(0,0,0,.4)}
+.seg{display:flex;background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:4px;gap:4px}
+.seg button{flex:1;border:0;background:transparent;color:var(--txt-dim);font-size:13px;font-weight:650;padding:8px;border-radius:9px;cursor:pointer;transition:all .15s;font-family:inherit}
+.seg button.on{background:var(--indigo);color:#fff;box-shadow:0 4px 14px rgba(99,102,241,.4)}
+.status-rows{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:2px}
+.srow{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:11px;padding:9px 11px}
+.srow .k{font-size:11px;color:var(--txt-faint);text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+.srow .v{font-size:13px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+.form-actions{display:flex;gap:10px;margin-top:4px}
+.btn-apply{flex:1;background:var(--indigo);color:#fff;border:0;border-radius:11px;height:40px;font-weight:700;font-size:13.5px;cursor:pointer;box-shadow:0 8px 22px rgba(99,102,241,.35);font-family:inherit}
+.btn-apply:hover{background:#5558ee}
+.btn-revert{flex:1;background:transparent;border:1px solid rgba(255,255,255,.14);color:var(--txt-dim);border-radius:11px;height:40px;font-weight:650;font-size:13.5px;cursor:pointer;font-family:inherit}
+.btn-revert:hover{background:rgba(255,255,255,.06);color:var(--txt)}
+/* metrics */
+.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:12px}
+.tile{padding:14px;display:flex;gap:12px;align-items:center;animation:rise .6s ease both}
+.tile-main{min-width:0}
+.tile-label{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--txt-faint)}
+.tile-value{font-size:17px;font-weight:750;margin-top:4px;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.tile-sub{font-size:11.5px;color:var(--txt-dim);margin-top:2px}
+.ring{flex-shrink:0}
+.bar{height:6px;background:rgba(255,255,255,.1);border-radius:99px;margin-top:8px;overflow:hidden}
+.bar span{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--indigo),var(--indigo-hi));transition:width .7s ease}
+/* activity */
+.activity{padding:18px}
+.timeline{display:flex;flex-direction:column}
+.trow{display:flex;gap:13px;padding:11px 4px;border-top:1px solid rgba(255,255,255,.06);align-items:flex-start}
+.trow:first-child{border-top:0}
+.tdot{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;flex-shrink:0;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.05);margin-top:1px}
+.t-main{flex:1;min-width:0}
+.t-title{font-size:13.5px;font-weight:650}
+.t-desc{font-size:12.5px;color:var(--txt-dim);margin-top:2px}
+.t-time{font-size:12px;color:var(--txt-faint);font-variant-numeric:tabular-nums;white-space:nowrap;margin-top:3px}
+.mono-strip{margin-top:14px;background:#070B14;border:1px solid rgba(255,255,255,.07);border-radius:11px;padding:10px 12px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:11.5px;color:#8B94AD;display:flex;gap:10px;align-items:center;overflow:hidden;white-space:nowrap}
+.mono-strip .ok{color:#34D399}
+/* toast */
+.toast{position:fixed;bottom:26px;left:50%;transform:translate(-50%,20px);background:#151B2E;border:1px solid rgba(99,102,241,.4);color:#fff;font-size:13.5px;font-weight:600;padding:12px 18px;border-radius:13px;box-shadow:0 18px 50px rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:all .3s ease;z-index:50;display:flex;gap:10px;align-items:center}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@media(max-width:1080px){.kpis{grid-template-columns:repeat(2,1fr)}.metrics{grid-template-columns:repeat(2,1fr)}.grid2{grid-template-columns:1fr}.sidebar{display:none}.main{padding:18px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" data-od-id="sidebar">
+    <div class="brand" data-od-id="brand">
+      <div class="logo" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 1.5 16 5.6v6.8L9 16.5 2 12.4V5.6L9 1.5Z" stroke="white" stroke-width="1.8" stroke-linejoin="round"/><circle cx="9" cy="9" r="2.4" fill="white"/></svg>
+      </div>
+      <div><div class="brand-name">Siphon</div><div class="brand-sub">Ops Console</div></div>
+    </div>
+    <div class="nav-label">Workspace</div>
+    <nav class="nav" data-od-id="main-nav">
+      <a class="nav-item active" data-od-id="nav-overview" href="#"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.5" stroke="currentColor" stroke-width="1.4"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1.5" stroke="currentColor" stroke-width="1.4"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1.5" stroke="currentColor" stroke-width="1.4"/><rect x="9" y="9" width="5.5" height="5.5" rx="2" fill="currentColor"/></svg>Overview</a>
+      <a class="nav-item" data-od-id="nav-models" href="#roster"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2.5" width="12" height="4" rx="1.4" stroke="currentColor" stroke-width="1.4"/><rect x="2" y="9.5" width="7.5" height="4" rx="1.4" stroke="currentColor" stroke-width="1.4"/></svg>Models</a>
+      <a class="nav-item" data-od-id="nav-activity" href="#activity"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 8h3l2-4 3 8 2-4h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Activity</a>
+      <a class="nav-item" data-od-id="nav-settings" href="#config"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.4"/><path d="M8 1.8v1.8M8 12.4v1.8M1.8 8h1.8M12.4 8h1.8M3.6 3.6l1.3 1.3M11.1 11.1l1.3 1.3M12.4 3.6l-1.3 1.3M4.9 11.1 3.6 12.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>Settings</a>
+    </nav>
+    <div class="env-card" data-od-id="env-card">
+      <div class="env-card-top"><span class="dot live"></span>local · RTX 4050</div>
+      <p>6 GB VRAM · 3.9 GiB in use<br>Driver 551.86 · CUDA 12.4</p>
+      <div class="env-meter"><span id="envMeter"></span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar" data-od-id="page-header">
+      <div><div class="crumb">Siphon / Local</div><h1>Overview</h1></div>
+      <span class="pill" data-od-id="env-pill"><span class="dot live"></span><b>local</b> · RTX 4050 · <span class="num" id="pillVram">3.9 / 6.0 GiB</span></span>
+      <div class="actions">
+        <button class="btn btn-primary" id="btnStart" data-od-id="btn-start">▶ Start</button>
+        <button class="btn btn-ghost" id="btnStop" data-od-id="btn-stop">■ Stop</button>
+      </div>
+    </div>
+
+    <section class="kpis" data-od-id="kpi-strip" aria-label="Key metrics">
+      <div class="card kpi" data-od-id="kpi-vram"><div class="kpi-label">VRAM</div><div class="kpi-value num" data-count="3.9" data-suffix=" / 6.0 GiB">0 / 6.0 GiB</div><div class="kpi-delta up">▲ 0.2 GiB vs idle</div><svg class="spark" viewBox="0 0 120 32" data-spark="vram"><path d="" fill="rgba(99,102,241,.18)" stroke="none"/><path d="" fill="none" stroke="#818CF8" stroke-width="2" stroke-linecap="round"/></svg></div>
+      <div class="card kpi" data-od-id="kpi-gpu"><div class="kpi-label">GPU Util</div><div class="kpi-value num" data-count="47" data-suffix="%">0%</div><div class="kpi-delta up">▲ 6 pts this session</div><svg class="spark" viewBox="0 0 120 32" data-spark="gpu"><path d="" fill="rgba(99,102,241,.18)" stroke="none"/><path d="" fill="none" stroke="#818CF8" stroke-width="2" stroke-linecap="round"/></svg></div>
+      <div class="card kpi" data-od-id="kpi-decode"><div class="kpi-label">Decode</div><div class="kpi-value num" data-count="20.3" data-dec="1" data-suffix=" tok/s">0 tok/s</div><div class="kpi-delta up">▲ 1.4 tok/s steady</div><svg class="spark" viewBox="0 0 120 32" data-spark="decode"><path d="" fill="rgba(99,102,241,.18)" stroke="none"/><path d="" fill="none" stroke="#818CF8" stroke-width="2" stroke-linecap="round"/></svg></div>
+      <div class="card kpi" data-od-id="kpi-l1"><div class="kpi-label">L1 Cache Hit</div><div class="kpi-value num" data-count="84" data-suffix="%">0%</div><div class="kpi-delta up">▲ 3.1 pts after warmup</div><svg class="spark" viewBox="0 0 120 32" data-spark="l1"><path d="" fill="rgba(99,102,241,.18)" stroke="none"/><path d="" fill="none" stroke="#818CF8" stroke-width="2" stroke-linecap="round"/></svg></div>
+      <div class="card kpi" data-od-id="kpi-draft"><div class="kpi-label">Draft Acceptance</div><div class="kpi-value num" data-count="84" data-suffix="%">0%</div><div class="kpi-delta mut" id="draftDelta">MTP speculator · stable</div><svg class="spark" viewBox="0 0 120 32" data-spark="draft"><path d="" fill="rgba(99,102,241,.18)" stroke="none"/><path d="" fill="none" stroke="#818CF8" stroke-width="2" stroke-linecap="round"/></svg></div>
+    </section>
+
+    <section class="grid2">
+      <div class="card panel" id="roster" data-od-id="model-roster">
+        <div class="panel-head"><h2>Model roster</h2><span class="hint" id="rosterHint">1 running · 3 idle</span></div>
+        <div class="roster" id="rosterList"></div>
+      </div>
+      <div class="card panel" id="config" data-od-id="config-form">
+        <div class="panel-head"><h2 id="cfgTitle">Configuration</h2><span class="hint" id="cfgSub">qwen3.6-moe-tq3</span></div>
+        <div class="form-grid">
+          <div class="field"><label for="fPath">Model path</label><input type="text" id="fPath" value=""></div>
+          <div class="field-3">
+            <div class="field"><label for="fCtx">Context</label><input type="text" id="fCtx" value=""></div>
+            <div class="field"><label for="fBatch">Batch</label><input type="text" id="fBatch" value=""></div>
+            <div class="field"><label for="fPort">Port</label><input type="text" id="fPort" value=""></div>
+          </div>
+          <div class="slider-row"><div class="slider-top"><label for="sL1">L1 VRAM cache</label><span class="slider-val num" id="vL1">1536 MiB</span></div><input type="range" id="sL1" min="256" max="4096" step="64" value="1536"></div>
+          <div class="slider-row"><div class="slider-top"><label for="sL2">L2 pinned memory</label><span class="slider-val num" id="vL2">2048 MiB</span></div><input type="range" id="sL2" min="256" max="8192" step="128" value="2048"></div>
+          <div class="field"><label>Speculator</label><div class="seg" id="segSpec" data-od-id="speculator-seg"><button data-v="mtp" class="on">mtp</button><button data-v="simple">simple</button><button data-v="none">none</button></div></div>
+          <div class="status-rows">
+            <div class="srow"><div class="k">Latency P50</div><div class="v num" id="stLat">38 ms</div></div>
+            <div class="srow"><div class="k">Endpoint</div><div class="v num" id="stUrl">:8080 / v1</div></div>
+            <div class="srow"><div class="k">Suite</div><div class="v" id="stSuite">code-assist</div></div>
+            <div class="srow"><div class="k">State</div><div class="v" id="stState">Running</div></div>
+          </div>
+          <div class="form-actions"><button class="btn-apply" id="btnApply" data-od-id="btn-apply">Apply changes</button><button class="btn-revert" id="btnRevert" data-od-id="btn-revert">Revert</button></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="metrics" data-od-id="metrics-grid" aria-label="Detailed metrics"></section>
+
+    <section class="card activity" id="activity" data-od-id="activity-card">
+      <div class="panel-head"><h2>Activity</h2><span class="hint">Last 5 events · live tail</span></div>
+      <div class="timeline" id="timeline"></div>
+      <div class="mono-strip" data-od-id="activity-mono"><span class="ok">●</span><span id="monoLine">siphon tail — qwen3.6-moe-tq3 · decode 20.3 t/s · l1_hit 84% · vram 3.9/6.0 GiB</span></div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast" data-od-id="saved-toast"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#10B981"/><path d="M5 8.2 7.2 10.4 11 6" stroke="#06281F" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="toastMsg">Configuration saved.</span></div>
+
+<script>
+(function(){
+"use strict";
+var MODELS = {
+  "qwen3.6-moe-tq3": { short:"Q3", name:"qwen3.6-moe-tq3", size:"3.4 GiB", fit:"Fits · 57%", fitTight:false, state:"running", rate:"20.3 t/s",
+    cfg:{ path:"/models/qwen3.6-moe-tq3.gguf", ctx:"32768", batch:"128", port:"8080", l1:1536, l2:2048, spec:"mtp", lat:"38 ms", url:":8080 / v1", suite:"code-assist" },
+    kpi:{ vram:3.9, gpu:47, decode:20.3, l1:84, draft:84 },
+    sparks:{ vram:[2.8,3.0,3.1,3.3,3.2,3.5,3.6,3.9], gpu:[22,28,31,38,35,42,44,47], decode:[8,12,15,17,18.5,19.4,19.9,20.3], l1:[41,58,69,76,79,81,83,84], draft:[62,71,76,79,81,82,83,84] },
+    tiles:[["decode","Decode","20.3 t/s","prefill-gated","ring",72],["prefill","Prefill","29.4 t/s","+4.1% session","ring",64],["l1","L1 hit","84%","warm · stable","ring",84],["l2","L2 hit","55%","pinned 2 GiB","ring",55],["draft","Draft accept","84%","mtp · 3 heads","ring",84],["nvme","NVMe / GDS","5743 MiB/s","seq read","bar",78],["ram","RAM → VRAM","1915 MiB/s","streaming","bar",46],["stream","Streamed","1715 MiB","this run","bar",38],["dec","Decode calls","36","active batch","bar",30],["pre","Prefill calls","655","cached 84%","bar",66]] },
+  "kat-coder-mtp": { short:"KC", name:"kat-coder-mtp", size:"4.1 GiB", fit:"Fits · 68%", fitTight:true, state:"idle", rate:"standby",
+    cfg:{ path:"/models/kat-coder-mtp.gguf", ctx:"16384", batch:"64", port:"8081", l1:1024, l2:3072, spec:"mtp", lat:"—", url:":8081 / v1", suite:"code-review" },
+    kpi:{ vram:0, gpu:0, decode:0, l1:0, draft:0 },
+    sparks:{ vram:[0,0,0,0,0,0,0,0], gpu:[0,0,0,0,0,0,0,0], decode:[0,0,0,0,0,0,0,0], l1:[0,0,0,0,0,0,0,0], draft:[0,0,0,0,0,0,0,0] },
+    tiles:[["decode","Decode","0.0 t/s","standby","ring",0],["prefill","Prefill","0.0 t/s","standby","ring",0],["l1","L1 hit","—","cold","ring",0],["l2","L2 hit","—","unpinned","ring",0],["draft","Draft accept","—","mtp ready","ring",0],["nvme","NVMe / GDS","0 MiB/s","idle","bar",0],["ram","RAM → VRAM","0 MiB/s","idle","bar",0],["stream","Streamed","0 MiB","—","bar",0],["dec","Decode calls","0","—","bar",0],["pre","Prefill calls","0","—","bar",0]] },
+  "qwen3-coder-next": { short:"QN", name:"qwen3-coder-next", size:"2.8 GiB", fit:"Fits · 47%", fitTight:false, state:"idle", rate:"standby",
+    cfg:{ path:"/models/qwen3-coder-next.gguf", ctx:"65536", batch:"32", port:"8082", l1:2048, l2:1024, spec:"simple", lat:"—", url:":8082 / v1", suite:"chat" },
+    kpi:{ vram:0, gpu:0, decode:0, l1:0, draft:0 },
+    sparks:{ vram:[0,0,0,0,0,0,0,0], gpu:[0,0,0,0,0,0,0,0], decode:[0,0,0,0,0,0,0,0], l1:[0,0,0,0,0,0,0,0], draft:[0,0,0,0,0,0,0,0] },
+    tiles:[["decode","Decode","0.0 t/s","standby","ring",0],["prefill","Prefill","0.0 t/s","standby","ring",0],["l1","L1 hit","—","cold","ring",0],["l2","L2 hit","—","unpinned","ring",0],["draft","Draft accept","—","simple ready","ring",0],["nvme","NVMe / GDS","0 MiB/s","idle","bar",0],["ram","RAM → VRAM","0 MiB/s","idle","bar",0],["stream","Streamed","0 MiB","—","bar",0],["dec","Decode calls","0","—","bar",0],["pre","Prefill calls","0","—","bar",0]] },
+  "qwen3.6-dflash": { short:"DF", name:"qwen3.6-dflash", size:"1.9 GiB", fit:"Fits · 32%", fitTight:false, state:"idle", rate:"standby",
+    cfg:{ path:"/models/qwen3.6-dflash.gguf", ctx:"131072", batch:"16", port:"8083", l1:768, l2:512, spec:"none", lat:"—", url:":8083 / v1", suite:"embed" },
+    kpi:{ vram:0, gpu:0, decode:0, l1:0, draft:0 },
+    sparks:{ vram:[0,0,0,0,0,0,0,0], gpu:[0,0,0,0,0,0,0,0], decode:[0,0,0,0,0,0,0,0], l1:[0,0,0,0,0,0,0,0], draft:[0,0,0,0,0,0,0,0] },
+    tiles:[["decode","Decode","0.0 t/s","standby","ring",0],["prefill","Prefill","0.0 t/s","standby","ring",0],["l1","L1 hit","—","cold","ring",0],["l2","L2 hit","—","unpinned","ring",0],["draft","Draft accept","—","none","ring",0],["nvme","NVMe / GDS","0 MiB/s","idle","bar",0],["ram","RAM → VRAM","0 MiB/s","idle","bar",0],["stream","Streamed","0 MiB","—","bar",0],["dec","Decode calls","0","—","bar",0],["pre","Prefill calls","0","—","bar",0]] }
+};
+var EVENTS = [
+  { c:"#10B981", t:"Serve started", d:"qwen3.6-moe-tq3 is live on :8080 · MTP draft heads loaded", time:"14:02:11" },
+  { c:"#6366F1", t:"L1 cache warmed", d:"Hit rate 84% · 1,536 MiB resident · 655 prefill calls", time:"14:03:47" },
+  { c:"#6366F1", t:"NVMe stream burst", d:"5,743 MiB/s via GDS · 1,715 MiB streamed to VRAM", time:"14:05:02" },
+  { c:"#F59E0B", t:"kat-coder-mtp staged", d:"4.1 GiB verified · held idle · fits in remaining VRAM", time:"14:06:29" },
+  { c:"#9AA3B8", t:"Health check passed", d:"P50 38 ms · GPU 47% · suite code-assist green", time:"14:07:53" }
+];
+var selected = "qwen3.6-moe-tq3";
+var runningId = "qwen3.6-moe-tq3";
+var saved = JSON.parse(JSON.stringify(MODELS[selected].cfg));
+
+function $(id){ return document.getElementById(id); }
+function sparkPath(vals, w, h, pad){
+  var max = Math.max.apply(null, vals.concat([1]));
+  var min = Math.min.apply(null, vals.concat([0]));
+  var rng = (max-min)||1;
+  var step = (w-pad*2)/Math.max(vals.length-1,1);
+  var pts = vals.map(function(v,i){ var x=(pad+i*step).toFixed(1); var y=(h-pad-((v-min)/rng)*(h-pad*2)).toFixed(1); return x+","+y; });
+  var line = "M"+pts.join(" L");
+  var area = line+" L"+(w-pad)+","+h+" L"+pad+","+h+" Z";
+  return { line:line, area:area };
+}
+function paintSparks(model){
+  var keys=["vram","gpu","decode","l1","draft"];
+  keys.forEach(function(k){
+    var svg=document.querySelector('[data-spark="'+k+'"]');
+    if(!svg) return;
+    var r=sparkPath(model.sparks[k],120,32,3);
+    svg.children[0].setAttribute("d",r.area);
+    svg.children[1].setAttribute("d",r.line);
+    var idle = model.state!=="running" && runningId!==model.name;
+    svg.style.opacity = idle ? ".35" : "1";
+  });
+}
+function renderRoster(){
+  var list=$("rosterList"); list.innerHTML="";
+  Object.keys(MODELS).forEach(function(id,i){
+    var m=MODELS[id];
+    var isRun = (id===runningId);
+    var cls = isRun ? "st-run" : (m.state==="stopped" ? "st-stop" : "st-idle");
+    var lbl = isRun ? "Running" : (m.state==="stopped" ? "Stopped" : "Idle");
+    var b=document.createElement("button");
+    b.className="model-row"+(id===selected?" selected":"");
+    b.setAttribute("data-od-id","model-row-"+id);
+    b.innerHTML='<div class="m-icon">'+m.short+'</div><div class="m-main"><div class="m-name">'+m.name+'</div><div class="m-meta"><span class="num">'+m.size+'</span><span class="fit'+(m.fitTight?" tight":"")+'">'+m.fit+'</span></div></div><span class="status '+cls+'"><span class="dot" style="background:currentColor;width:6px;height:6px;border-radius:50%"></span>'+lbl+'</span><span class="m-rate num">'+(isRun?m.rate:"standby")+'</span>';
+    b.addEventListener("click",function(){ selectModel(id); });
+    list.appendChild(b);
+  });
+  var n = runningId ? 1 : 0;
+  $("rosterHint").textContent = n+" running · "+(4-n)+" idle";
+}
+function ringSVG(pct, color){
+  var c=2*Math.PI*15.5, off=(c*(1-pct/100)).toFixed(1);
+  return '<svg class="ring" width="44" height="44" viewBox="0 0 44 44"><circle cx="22" cy="22" r="15.5" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="5"/><circle cx="22" cy="22" r="15.5" fill="none" stroke="'+color+'" stroke-width="5" stroke-linecap="round" stroke-dasharray="'+c.toFixed(1)+'" stroke-dashoffset="'+off+'" transform="rotate(-90 22 22)" style="transition:stroke-dashoffset .7s ease"/></svg>';
+}
+function renderTiles(){
+  var m=MODELS[selected];
+  var grid=document.querySelector('[data-od-id="metrics-grid"]'); grid.innerHTML="";
+  var colors=["#818CF8","#818CF8","#34D399","#34D399","#818CF8","#38BDF8","#38BDF8","#818CF8","#9AA3B8","#9AA3B8"];
+  m.tiles.forEach(function(t,i){
+    var d=document.createElement("div");
+    d.className="card tile"; d.style.animationDelay=(i*0.04)+"s";
+    d.setAttribute("data-od-id","metric-tile-"+t[0]);
+    var viz = t[4]==="ring" ? ringSVG(t[5],colors[i]) : '<div style="flex-shrink:0;width:44px">'+ringSVG(t[5],colors[i])+'</div>';
+    var bar = t[4]==="bar" ? '<div class="bar"><span style="width:'+t[5]+'%"></span></div>' : "";
+    d.innerHTML=viz+'<div class="tile-main"><div class="tile-label">'+t[1]+'</div><div class="tile-value num">'+t[2]+'</div><div class="tile-sub">'+t[3]+'</div>'+bar+'</div>';
+    grid.appendChild(d);
+  });
+}
+function renderKpis(animate){
+  var m=MODELS[selected];
+  var isRun=(selected===runningId);
+  var vals=[ isRun?m.kpi.vram:0, isRun?m.kpi.gpu:0, isRun?m.kpi.decode:0, isRun?m.kpi.l1:0, isRun?m.kpi.draft:0 ];
+  var fmts=[function(v){return v.toFixed(1)+' <small>/ 6.0 GiB</small>';},function(v){return Math.round(v)+'%';},function(v){return v.toFixed(1)+' <small>tok/s</small>';},function(v){return Math.round(v)+'%';},function(v){return (isRun?Math.round(v)+'%':'—');}];
+  document.querySelectorAll(".kpi-value").forEach(function(el,i){
+    var target=vals[i];
+    if(!animate){ el.innerHTML=fmts[i](target); return; }
+    var start=0, t0=performance.now(), dur=900;
+    (function step(t){ var p=Math.min((t-t0)/dur,1), e=1-Math.pow(1-p,3), v=target*e;
+      el.innerHTML=fmts[i](v);
+      if(p<1) requestAnimationFrame(step); })(t0);
+  });
+  $("pillVram").textContent=(isRun?m.kpi.vram.toFixed(1):"0.0")+" / 6.0 GiB";
+  paintSparks({sparks:m.sparks, state:isRun?"running":"idle", name:selected});
+}
+function fillForm(){
+  var c=MODELS[selected].cfg;
+  $("cfgSub").textContent=selected;
+  $("cfgTitle").textContent="Configuration — "+MODELS[selected].short;
+  $("fPath").value=c.path; $("fCtx").value=c.ctx; $("fBatch").value=c.batch; $("fPort").value=c.port;
+  setSlider("sL1","vL1",c.l1); setSlider("sL2","vL2",c.l2);
+  document.querySelectorAll("#segSpec button").forEach(function(b){ b.classList.toggle("on", b.getAttribute("data-v")===c.spec); });
+  $("stLat").textContent=c.lat; $("stUrl").textContent=c.url; $("stSuite").textContent=c.suite;
+  $("stState").textContent=(selected===runningId)?"Running":"Idle";
+  saved=JSON.parse(JSON.stringify(c));
+  syncButtons();
+}
+function setSlider(sid,vid,val){
+  var s=$(sid); s.value=val; $(vid).textContent=val+" MiB";
+  var p=((val-s.min)/(s.max-s.min))*100; s.style.setProperty("--fill",p+"%");
+}
+function syncButtons(){
+  var isRun=(selected===runningId);
+  $("btnStart").disabled=isRun; $("btnStop").disabled=!isRun;
+  $("btnStart").style.opacity=isRun?".45":"1";
+  $("btnStop").style.opacity=!isRun?".4":"1";
+}
+function selectModel(id){ selected=id; renderRoster(); renderTiles(); renderKpis(false); fillForm(); renderMono(); }
+function renderTimeline(){
+  var tl=$("timeline"); tl.innerHTML="";
+  EVENTS.forEach(function(e){
+    var r=document.createElement("div"); r.className="trow";
+    r.innerHTML='<div class="tdot"><span style="width:8px;height:8px;border-radius:50%;background:'+e.c+'"></span></div><div class="t-main"><div class="t-title">'+e.t+'</div><div class="t-desc">'+e.d+'</div></div><div class="t-time num">'+e.time+'</div>';
+    tl.appendChild(r);
+  });
+}
+function renderMono(){
+  var m=MODELS[selected], isRun=(selected===runningId);
+  $("monoLine").textContent="siphon tail — "+selected+" · "+(isRun?("decode "+m.kpi.decode.toFixed(1)+" t/s · l1_hit "+m.kpi.l1+"% · vram "+m.kpi.vram.toFixed(1)+"/6.0 GiB"):"standby · 0.0 t/s · vram 0.0/6.0 GiB");
+}
+function toast(msg){
+  $("toastMsg").textContent=msg;
+  var t=$("toast"); t.classList.add("show");
+  clearTimeout(t._h); t._h=setTimeout(function(){t.classList.remove("show");},2400);
+}
+$("sL1").addEventListener("input",function(e){ setSlider("sL1","vL1",e.target.value); });
+$("sL2").addEventListener("input",function(e){ setSlider("sL2","vL2",e.target.value); });
+document.querySelectorAll("#segSpec button").forEach(function(b){
+  b.addEventListener("click",function(){
+    document.querySelectorAll("#segSpec button").forEach(function(x){x.classList.remove("on");});
+    b.classList.add("on");
+  });
+});
+$("btnApply").addEventListener("click",function(){
+  var c=MODELS[selected].cfg;
+  c.path=$("fPath").value; c.ctx=$("fCtx").value; c.batch=$("fBatch").value; c.port=$("fPort").value;
+  c.l1=parseInt($("sL1").value,10); c.l2=parseInt($("sL2").value,10);
+  var on=document.querySelector("#segSpec button.on"); c.spec=on?on.getAttribute("data-v"):"mtp";
+  c.url=":"+c.port+" / v1";
+  $("stUrl").textContent=c.url;
+  saved=JSON.parse(JSON.stringify(c));
+  toast("Configuration saved — "+selected+".");
+});
+$("btnRevert").addEventListener("click",function(){
+  var c=MODELS[selected].cfg;
+  Object.keys(saved).forEach(function(k){c[k]=saved[k];});
+  fillForm(); toast("Reverted to last saved values.");
+});
+$("btnStart").addEventListener("click",function(){
+  if(selected===runningId) return;
+  runningId=selected; MODELS[selected].state="running";
+  Object.keys(MODELS).forEach(function(k){ if(k!==selected) MODELS[k].state="idle"; });
+  renderRoster(); renderKpis(true); renderTiles(); fillForm(); renderMono();
+  toast("Started "+selected+" on :"+MODELS[selected].cfg.port+".");
+});
+$("btnStop").addEventListener("click",function(){
+  if(selected!==runningId) { selectModel(runningId); }
+  MODELS[runningId].state="stopped";
+  toast("Stopped "+runningId+". VRAM released.");
+  runningId=null; renderRoster(); renderKpis(false); renderTiles(); fillForm(); renderMono();
+  setTimeout(function(){ if(selected && MODELS[selected]){ MODELS[selected].state="idle"; renderRoster(); } },1800);
+});
+document.querySelectorAll(".nav-item").forEach(function(n){
+  n.addEventListener("click",function(e){ e.preventDefault();
+    document.querySelectorAll(".nav-item").forEach(function(x){x.classList.remove("active");});
+    n.classList.add("active");
+    var id=n.getAttribute("href"); if(id && id.length>1){ var el=document.querySelector(id); if(el) el.scrollIntoView({behavior:"smooth",block:"start"}); }
+  });
+});
+renderRoster(); renderTiles(); fillForm(); renderTimeline(); renderKpis(true); renderMono();
+$("envMeter").style.width="65%";
+})();
+</script>
+</body>
+</html>

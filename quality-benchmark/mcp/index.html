@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Task Board Benchmark</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-container">
+    <header class="app-header">
+      <h1>Task Board</h1>
+    </header>
+
+    <form id="task-form" class="task-form" novalidate>
+      <div class="input-group">
+        <label for="task-input" class="sr-only">Task description</label>
+        <input
+          type="text"
+          id="task-input"
+          name="taskInput"
+          placeholder="What needs to be done?"
+          autocomplete="off"
+        />
+        <button type="submit" id="add-task-btn">Add Task</button>
+      </div>
+    </form>
+
+    <section class="controls-section" aria-label="Task controls">
+      <div class="filters" role="group" aria-label="Filter tasks">
+        <button type="button" class="filter-btn" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" class="filter-btn" data-filter="active" aria-pressed="false">Active</button>
+        <button type="button" class="filter-btn" data-filter="completed" aria-pressed="false">Completed</button>
+      </div>
+      <button type="button" id="clear-completed-btn" class="clear-btn" disabled>Clear completed</button>
+    </section>
+
+    <section class="stats-section" aria-label="Task counts">
+      <p class="counts-text">
+        <span id="active-count">0</span> active remaining | <span id="total-count">0</span> total
+      </p>
+    </section>
+
+    <section class="list-section" aria-label="Task list">
+      <ul id="task-list" class="task-list"></ul>
+    </section>
+
+    <div id="status-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>

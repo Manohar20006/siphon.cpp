@@ -2658,7 +2658,14 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
-        if (ne2 <= MMVQ_MAX_BATCH_SIZE) {
+        // DirectStorage MoE expert pools may use a padded slot stride.  The
+        // MMVQ fast path assumes the canonical contiguous expert stride and
+        // computes addresses from that assumption.  Falling through to MMQ
+        // keeps the explicit nb[2] stride intact for pooled expert tensors.
+        const bool canonical_expert_stride = src0->nb[2] == src0->nb[1] * src0->ne[1];
+        const bool dstorage_expert_ids = ids != nullptr &&
+                ids->name[0] != '\0' && strstr(ids->name, "_ds") != nullptr;
+        if (ne2 <= MMVQ_MAX_BATCH_SIZE && canonical_expert_stride && !dstorage_expert_ids) {
             if (ggml_is_quantized(src0->type)) {
                 const int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
                 if (ne2 <= mmvq_mmid_max) {

@@ -509,6 +509,7 @@ class MODEL_ARCH(IntEnum):
     RND1             = auto()
     PANGU_EMBED      = auto()
     MISTRAL3         = auto()
+    DFLASH           = auto()
     MISTRAL4         = auto()
     PADDLEOCR        = auto()
     MIMO2            = auto()
@@ -933,6 +934,8 @@ class MODEL_TENSOR(IntEnum):
     A_QF_FFN_UP            = auto()
     A_QF_FFN_DOWN          = auto()
     A_QF_FFN_NORM          = auto()
+    # dflash
+    FC                     = auto()  # feature fusion layer
 
 
 MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
@@ -1056,6 +1059,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.RND1:             "rnd1",
     MODEL_ARCH.PANGU_EMBED:      "pangu-embedded",
     MODEL_ARCH.MISTRAL3:         "mistral3",
+    MODEL_ARCH.DFLASH:           "dflash",
     MODEL_ARCH.MISTRAL4:         "mistral4",
     MODEL_ARCH.PADDLEOCR:        "paddleocr",
     MODEL_ARCH.MIMO2:            "mimo2",
@@ -1470,6 +1474,8 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.A_QF_FFN_UP:               "a.proj_blk.{bid}.ffn_up",
     MODEL_TENSOR.A_QF_FFN_DOWN:             "a.proj_blk.{bid}.ffn_down",
     MODEL_TENSOR.A_QF_FFN_NORM:             "a.proj_blk.{bid}.ffn_norm",
+    # dflash
+    MODEL_TENSOR.FC:                        "fc",
     # NextN/MTP
     MODEL_TENSOR.NEXTN_EH_PROJ:             "blk.{bid}.nextn.eh_proj",
     MODEL_TENSOR.NEXTN_EMBED_TOKENS:        "blk.{bid}.nextn.embed_tokens",
@@ -4027,6 +4033,22 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_DOWN_SHEXP,
         MODEL_TENSOR.FFN_UP_SHEXP,
         MODEL_TENSOR.FFN_EXP_PROBS_B,
+    ],
+    MODEL_ARCH.DFLASH: [
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.FC,
+        MODEL_TENSOR.ENC_OUTPUT_NORM,
     ],
     MODEL_ARCH.MIMO2: [
         MODEL_TENSOR.TOKEN_EMBD,

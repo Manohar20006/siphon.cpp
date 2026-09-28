@@ -532,6 +532,24 @@ struct server_task_result_metrics : server_task_result {
     uint64_t n_decode_total     = 0;
     uint64_t n_busy_slots_total = 0;
 
+    // Siphon DirectStorage/MoE counters.  They remain zero for dense models
+    // or when the model was not loaded with the DirectStorage slot manager.
+    bool     dstorage_active = false;
+    uint64_t dstorage_l1_resident_experts = 0;
+    uint64_t dstorage_l2_resident_experts = 0;
+    uint64_t dstorage_prefill_calls = 0;
+    uint64_t dstorage_prefill_hits = 0;
+    uint64_t dstorage_prefill_misses = 0;
+    uint64_t dstorage_decode_calls = 0;
+    uint64_t dstorage_decode_hits = 0;
+    uint64_t dstorage_decode_misses = 0;
+    uint64_t dstorage_decode_cold_experts = 0;
+    uint64_t dstorage_decode_pinned_experts = 0;
+    uint64_t dstorage_streamed_file_bytes = 0;
+    uint64_t dstorage_pinned_transfer_bytes = 0;
+    uint64_t dstorage_pinned_transfer_us = 0;
+    uint64_t dstorage_stream_total_us = 0;
+
     // while we can also use std::vector<server_slot> this requires copying the slot object which can be quite messy
     // therefore, we use json to temporarily store the slot.to_json() result
     json slots_data = json::array();

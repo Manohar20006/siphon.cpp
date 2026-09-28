@@ -219,26 +219,6 @@ static __device__ __forceinline__ void tq3_0_dequant_consecutive(
     }
 }
 
-static __device__ __forceinline__ float tq3_0_vec_dot_block_q_warp(
-        const block_tq3_0 & x, const float q0, const float q1, const int lane, const int q_lane_offset) {
-    const bool active_q = lane >= q_lane_offset && lane < q_lane_offset + QK_TQ3_0/2;
-    const int i0 = 2*(lane - q_lane_offset) + 0;
-    const int i1 = 2*(lane - q_lane_offset) + 1;
-    const int col = lane;
-
-    float q_hadamard_col = 0.0f;
-    if (active_q) {
-        q_hadamard_col =
-            q0 * float(tq3_0_sign(i0)) * float(tq3_0_hadamard_sign(i0, col)) +
-            q1 * float(tq3_0_sign(i1)) * float(tq3_0_hadamard_sign(i1, col));
-    }
-
-    q_hadamard_col = warp_reduce_sum<WARP_SIZE>(q_hadamard_col);
-
-    return __half2float(x.gamma) * 0.17677669529663688f *
-        tq3_0_centroid(tq3_0_code(x, col)) * q_hadamard_col;
-}
-
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq3_0(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
@@ -250,22 +230,28 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq3_0(
     float sum = 0.0f;
     const int tid = nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads;
 
-    if constexpr (nthreads == WARP_SIZE) {
+if constexpr (nthreads == WARP_SIZE) {
         const int lane = threadIdx.x;
-        for (int i2_0 = 0; i2_0 < D/2; i2_0 += WARP_SIZE) {
+        // Each lane holds D/WARP_SIZE consecutive Q values (Q_v[0..(D/WARP_SIZE)/2-1]).
+        static_assert(D % (2*WARP_SIZE) == 0, "D not divisible by 2*WARP_SIZE");
+        constexpr int nq = D / WARP_SIZE;          // Q dims per lane
+        constexpr int np = nq / 2;                 // half2 pairs per lane
+        const int i0_base = lane*nq;               // first global Q dim of this lane
+#pragma unroll
+        for (int p = 0; p < np; ++p) {
+            float kv[2];
+            tq3_0_dequant_consecutive<2>(K_tq3_0, kv, i0_base + 2*p);
 #ifdef V_DOT2_F32_F16_AVAILABLE
-            const half2 qh2 = ((const half2 *) Q_v)[i2_0/WARP_SIZE];
+            const half2 qh2 = ((const half2 *) Q_v)[p];
             const float q0 = __half2float(__low2half(qh2));
             const float q1 = __half2float(__high2half(qh2));
 #else
-            const float2 qf2 = ((const float2 *) Q_v)[i2_0/WARP_SIZE];
+            const float2 qf2 = ((const float2 *) Q_v)[p];
             const float q0 = qf2.x;
             const float q1 = qf2.y;
 #endif // V_DOT2_F32_F16_AVAILABLE
 
-            const int ib = i2_0 / (QK_TQ3_0/2);
-            sum += tq3_0_vec_dot_block_q_warp(K_tq3_0[ib + 0], q0, q1, lane, 0);
-            sum += tq3_0_vec_dot_block_q_warp(K_tq3_0[ib + 1], q0, q1, lane, QK_TQ3_0/2);
+            sum += kv[0]*q0 + kv[1]*q1;
         }
     } else {
         for (int i2_0 = 0; i2_0 < D/2; i2_0 += nthreads) {

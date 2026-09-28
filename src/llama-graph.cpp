@@ -486,7 +486,11 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
     mctx->set_input_k_idxs(self_k_idxs, ubatch);
     mctx->set_input_v_idxs(self_v_idxs, ubatch);
 
-    mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+    // the mask is left unallocated when the graph only stores K/V without attending
+    // (e.g. DFlash's KV-injection pass)
+    if (self_kq_mask && self_kq_mask->buffer) {
+        mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+    }
 
     if (self_k_rot) {
         mctx->set_input_k_rot(self_k_rot);
@@ -566,7 +570,11 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
         mctx->get_base()->set_input_k_idxs(self_k_idxs, ubatch);
         mctx->get_base()->set_input_v_idxs(self_v_idxs, ubatch);
 
-        mctx->get_base()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+        // the mask is left unallocated when the graph only stores K/V without attending
+        // (e.g. DFlash's KV-injection pass)
+        if (self_kq_mask && self_kq_mask->buffer) {
+            mctx->get_base()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+        }
     }
 
     // swa tensors may not be allocated if there are no SWA attention layers
@@ -574,7 +582,10 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
         mctx->get_swa()->set_input_k_idxs(self_k_idxs_swa, ubatch);
         mctx->get_swa()->set_input_v_idxs(self_v_idxs_swa, ubatch);
 
-        mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn);
+        // the mask is left unallocated when the graph only stores K/V without attending
+        if (self_kq_mask_swa && self_kq_mask_swa->buffer) {
+            mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn);
+        }
     }
 
     if (self_k_rot) {
@@ -606,7 +617,9 @@ bool llm_graph_input_attn_kv_iswa::can_reuse(const llm_graph_params & params) {
         res &= self_k_idxs->ne[0] == params.ubatch.n_tokens;
       //res &= self_v_idxs->ne[0] == params.ubatch.n_tokens; // TODO: need to move this to the unified cache and check there
 
-        res &= can_reuse_kq_mask(self_kq_mask, mctx->get_base(), params.ubatch, params.cparams);
+        if (self_kq_mask) {
+            res &= can_reuse_kq_mask(self_kq_mask, mctx->get_base(), params.ubatch, params.cparams);
+        }
     }
 
     // swa tensors may not be allocated if there are no SWA attention layers
@@ -614,7 +627,9 @@ bool llm_graph_input_attn_kv_iswa::can_reuse(const llm_graph_params & params) {
         res &= self_k_idxs_swa->ne[0] == params.ubatch.n_tokens;
       //res &= self_v_idxs_swa->ne[0] == params.ubatch.n_tokens; // TODO: need to move this to the unified cache and check there
 
-        res &= can_reuse_kq_mask(self_kq_mask_swa, mctx->get_swa(), params.ubatch, params.cparams);
+        if (self_kq_mask_swa) {
+            res &= can_reuse_kq_mask(self_kq_mask_swa, mctx->get_swa(), params.ubatch, params.cparams);
+        }
     }
 
     return res;
@@ -891,6 +906,11 @@ void llm_graph_result::reset() {
     t_logits      = nullptr;
     t_embd        = nullptr;
     t_embd_pooled = nullptr;
+    t_h_nextn     = nullptr;
+
+    t_layer_inp.resize(LLAMA_MAX_LAYERS);
+    std::fill(t_layer_inp.begin(), t_layer_inp.end(), nullptr);
+
     t_sampled.clear();
     t_sampled_probs.clear();
     t_sampled_logits.clear();
@@ -919,7 +939,7 @@ void llm_graph_result::set_inputs(const llama_ubatch * ubatch) {
     }
 }
 
-void llm_graph_result::set_outputs() {
+void llm_graph_result::set_outputs(const llm_graph_params & params) {
     if (t_logits != nullptr) {
         ggml_set_output(t_logits);
     }
@@ -931,6 +951,15 @@ void llm_graph_result::set_outputs() {
     }
     if (t_h_nextn != nullptr) {
         ggml_set_output(t_h_nextn);
+    }
+    {
+        const auto & embeddings_layer_inp = params.cparams.embeddings_layer_inp;
+        for (size_t il = 0; il < embeddings_layer_inp.size(); ++il) {
+            if (embeddings_layer_inp[il]) {
+                GGML_ASSERT(t_layer_inp[il] != nullptr && "layer input tensor is null");
+                ggml_set_output(t_layer_inp[il]);
+            }
+        }
     }
     for (auto & [seq_id, t] : t_sampled) {
         if (t != nullptr) {
@@ -1463,6 +1492,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * down_exps_s,
                 bool   dstorage_moe,
                 bool   moe_routing_trace) const {
+    // DirectStorage is a context capability, not an architecture-specific
+    // graph-builder option.  Every architecture using the shared MoE builder
+    // receives the duplicated routing IDs required by the streaming callback.
+    dstorage_moe     = dstorage_moe     || cparams.dstorage_moe;
+    moe_routing_trace = moe_routing_trace || cparams.moe_routing_trace;
+
     const int64_t n_embd   = cur->ne[0];
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
@@ -2069,9 +2104,13 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             v = ggml_transpose(ctx0, v);
         }
 
-        // CUDA vector flash attention can consume tq3_0 K/V directly for decode.
+// CUDA vector flash attention can consume tq3_0 K/V directly for decode.
         // Mixed TQ3/F16 configurations keep the older explicit cast fallback.
-        const bool fused_tq3_fattn = k->type == GGML_TYPE_TQ3_0 && v->type == GGML_TYPE_TQ3_0;
+        // LLAMA_FUSED_TQ3_FATTN=0 forces the F16 cast fallback even for both-TQ3 KV.
+        bool fused_tq3_fattn = k->type == GGML_TYPE_TQ3_0 && v->type == GGML_TYPE_TQ3_0;
+        if (fused_tq3_fattn && getenv("LLAMA_FUSED_TQ3_FATTN")) {
+            fused_tq3_fattn = false;
+        }
         if (k->type == GGML_TYPE_TQ3_0 && !fused_tq3_fattn) {
             k = ggml_cast(ctx0, k, GGML_TYPE_F16);
             cb(k, "k_dequant", il);

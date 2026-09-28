@@ -1,0 +1,8 @@
+# Local credentials/configuration and generated Python files.
+workers.json
+.env
+__pycache__/
+*.py[cod]
+state.sqlite3
+state.sqlite3-shm
+state.sqlite3-wal

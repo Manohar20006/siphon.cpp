@@ -100,3 +100,13 @@ LLAMA_API float * llama_get_embeddings_nextn(struct llama_context * ctx);
 
 // LLAMA_API float * llama_get_embeddings_ith(struct llama_context * ctx, int32_t i);
 LLAMA_API float * llama_get_embeddings_nextn_ith(struct llama_context * ctx, int32_t i);
+
+// Enable/disable extraction of the input embeddings of a given transformer layer
+// (used by the DFlash harness to feed the draft encoder)
+LLAMA_API void llama_set_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid, bool enable);
+
+// Mirrors: LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
+LLAMA_API float * llama_get_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid);
+
+// Returns the other context that this one shares weights/models with (dflash etc.)
+LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);

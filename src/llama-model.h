@@ -544,6 +544,12 @@ struct llama_model {
     struct ggml_tensor * output_b        = nullptr;
     struct ggml_tensor * output_norm_enc = nullptr;
 
+    // dflash/eagle3: feature fusion layer (encoder)
+    struct ggml_tensor * fc = nullptr;
+
+    // target-model extracted layer ids (dflash, eagle3, etc.)
+    std::vector<int32_t> target_layer_ids;
+
 
     // NVFP4 per-tensor scale2, input_scale for LM head
     struct ggml_tensor * output_s    = nullptr;

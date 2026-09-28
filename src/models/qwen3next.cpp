@@ -123,6 +123,10 @@ llama_model_qwen3next::graph::graph(const llama_model & model, const llm_graph_p
     for (int il = 0; il < n_layer; ++il) {
         ggml_tensor * inpSA = inpL;
 
+        if (cparams.embeddings_layer_inp[il]) {
+            res->t_layer_inp[il] = inpL;
+        }
+
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
 
@@ -548,7 +552,10 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_ffn(ggml_tensor * cur, c
                 LLM_FFN_SILU, true,
                 hparams.expert_weights_scale,
                 LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX, il,
-                nullptr, model.layers[il].ffn_gate_up_exps);
+                nullptr, model.layers[il].ffn_gate_up_exps,
+                nullptr, nullptr, nullptr,
+                cparams.dstorage_moe,
+                cparams.moe_routing_trace);
         cb(moe_out, "ffn_moe_out", il);
 
         // Add shared experts if present - following Qwen3Next reference implementation

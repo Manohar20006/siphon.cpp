@@ -1,0 +1,2393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Siphon Studio — DirectStorage Zero-Copy Inference Engine</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --bg-base: #06080F;
+      --bg-surface: rgba(13, 17, 26, 0.78);
+      --bg-card: rgba(16, 22, 34, 0.72);
+      --bg-card-hover: rgba(22, 30, 48, 0.85);
+      --bg-panel: rgba(10, 14, 22, 0.9);
+
+      --border-subtle: rgba(255, 255, 255, 0.07);
+      --border-light: rgba(255, 255, 255, 0.12);
+      --border-focus: rgba(6, 182, 212, 0.45);
+
+      --accent-violet: #8B5CF6;
+      --accent-violet-glow: rgba(139, 92, 246, 0.35);
+      --accent-cyan: #06B6D4;
+      --accent-cyan-glow: rgba(6, 182, 212, 0.35);
+      --accent-emerald: #10B981;
+      --accent-emerald-glow: rgba(16, 185, 129, 0.3);
+      --accent-amber: #F59E0B;
+      --accent-amber-glow: rgba(245, 158, 11, 0.3);
+      --accent-rose: #EF4444;
+      --accent-rose-glow: rgba(239, 68, 68, 0.4);
+
+      --txt-primary: #F8FAFC;
+      --txt-secondary: #94A3B8;
+      --txt-muted: #64748B;
+
+      --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+      --font-display: 'Space Grotesk', sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      background: var(--bg-base);
+      color: var(--txt-primary);
+      font-family: var(--font-main);
+      font-size: 13px;
+      line-height: 1.5;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+      background-image: 
+        radial-gradient(circle at 10% 12%, rgba(6, 182, 212, 0.08) 0%, transparent 45%),
+        radial-gradient(circle at 90% 20%, rgba(139, 92, 246, 0.09) 0%, transparent 50%),
+        radial-gradient(circle at 75% 85%, rgba(245, 158, 11, 0.06) 0%, transparent 45%),
+        radial-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 100%, 100% 100%, 26px 26px;
+    }
+
+    .app-root {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ─── TITLEBAR ─── */
+    .titlebar {
+      height: 44px;
+      background: rgba(10, 14, 22, 0.95);
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      flex-shrink: 0;
+      z-index: 50;
+      backdrop-filter: blur(12px);
+    }
+    .titlebar-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .window-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .win-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      cursor: pointer;
+      transition: transform 0.15s ease;
+    }
+    .win-dot:hover { transform: scale(1.15); }
+    .dot-close { background: #FF5F56; border: 1px solid #E0443E; }
+    .dot-min { background: #FFBD2E; border: 1px solid #DEA123; }
+    .dot-max { background: #27C93F; border: 1px solid #1AAB29; }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding-left: 8px;
+    }
+    .brand-icon {
+      width: 26px;
+      height: 26px;
+      background: linear-gradient(135deg, #7C3AED, #06B6D4);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 12px rgba(124, 58, 237, 0.5);
+    }
+    .brand-title {
+      font-weight: 800;
+      font-size: 14px;
+      letter-spacing: -0.01em;
+      color: #FFF;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-display);
+    }
+    .brand-badge {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      background: rgba(139, 92, 246, 0.2);
+      border: 1px solid rgba(139, 92, 246, 0.4);
+      color: #DDD6FE;
+      padding: 1px 7px;
+      border-radius: 4px;
+    }
+
+    .titlebar-center {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border-subtle);
+      border-radius: 20px;
+      padding: 4px 14px;
+      font-size: 11px;
+      font-family: var(--font-mono);
+      color: var(--txt-secondary);
+    }
+    .pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #10B981;
+      box-shadow: 0 0 8px #10B981;
+      animation: pulse-green 2s infinite;
+    }
+    @keyframes pulse-green {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.3); opacity: 0.6; }
+    }
+
+    .titlebar-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn-tb {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-subtle);
+      color: var(--txt-secondary);
+      font-size: 11px;
+      font-weight: 500;
+      padding: 5px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .btn-tb:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: #FFF;
+      border-color: var(--border-light);
+    }
+    .btn-tb.primary {
+      background: linear-gradient(135deg, #7C3AED, #6366F1);
+      color: #FFF;
+      border: 1px solid rgba(139, 92, 246, 0.6);
+      box-shadow: 0 0 10px rgba(124, 58, 237, 0.3);
+    }
+
+    /* ─── APP BODY ─── */
+    .app-body {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ─── SIDEBAR ─── */
+    .sidebar {
+      width: 210px;
+      background: rgba(10, 14, 22, 0.85);
+      border-right: 1px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      backdrop-filter: blur(16px);
+      z-index: 40;
+    }
+    .nav-group-title {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--txt-muted);
+      padding: 18px 16px 8px;
+    }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      color: var(--txt-secondary);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      border-left: 2px solid transparent;
+      text-decoration: none;
+    }
+    .nav-item:hover {
+      background: rgba(255, 255, 255, 0.03);
+      color: #FFF;
+    }
+    .nav-item.active {
+      background: linear-gradient(90deg, rgba(139, 92, 246, 0.15), transparent);
+      color: #FFF;
+      border-left-color: var(--accent-violet);
+      font-weight: 600;
+    }
+    .nav-badge {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: rgba(139, 92, 246, 0.2);
+      color: #DDD6FE;
+      border: 1px solid rgba(139, 92, 246, 0.3);
+    }
+    .nav-badge.live {
+      background: rgba(16, 185, 129, 0.2);
+      color: #6EE7B7;
+      border-color: rgba(16, 185, 129, 0.4);
+    }
+
+    .sidebar-footer {
+      margin-top: auto;
+      padding: 14px;
+      border-top: 1px solid var(--border-subtle);
+      background: rgba(0, 0, 0, 0.2);
+    }
+    .hw-status-pill {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--txt-secondary);
+      margin-bottom: 4px;
+    }
+
+    /* ─── MAIN CONTENT ─── */
+    .main-content {
+      flex: 1;
+      height: 100%;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      justify-content: space-between;
+    }
+    .main-content::-webkit-scrollbar { width: 5px; }
+    .main-content::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+
+    /* ─── HUB HEADER ─── */
+    .hub-header {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: linear-gradient(135deg, rgba(16, 22, 34, 0.8), rgba(20, 26, 42, 0.5));
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 11px 18px;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+      position: relative;
+      overflow: hidden;
+    }
+    .hub-header::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; width: 180px; height: 100%;
+      background: linear-gradient(90deg, rgba(6, 182, 212, 0.1), transparent);
+      pointer-events: none;
+    }
+    .hub-title-group h1 {
+      font-family: var(--font-display);
+      font-size: 17px;
+      font-weight: 700;
+      color: #FFF;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      line-height: 1.2;
+    }
+    .model-tag {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 10px;
+      border-radius: 6px;
+      background: rgba(139, 92, 246, 0.18);
+      border: 1px solid rgba(139, 92, 246, 0.4);
+      color: #C4B5FD;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .hub-title-group p {
+      font-size: 11px;
+      color: var(--txt-secondary);
+      margin-top: 2px;
+    }
+    .hub-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-quick {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-subtle);
+      color: var(--txt-secondary);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .btn-quick:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: #FFF;
+      border-color: var(--border-light);
+    }
+    .btn-quick.active-step {
+      background: linear-gradient(135deg, rgba(6, 182, 212, 0.25), rgba(139, 92, 246, 0.25));
+      color: #A5F3FC;
+      border-color: rgba(6, 182, 212, 0.5);
+    }
+
+    /* ═════════════════════════════════════════════════════════════════
+       ROW 1: BENTO PROPULSION ROW (4 SIZES)
+       ═════════════════════════════════════════════════════════════════ */
+    .bento-propulsion-grid {
+      display: grid;
+      grid-template-columns: 1.3fr 1.05fr 0.8fr 1.15fr;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    .kpi-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 13px;
+      position: relative;
+      overflow: hidden;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      transition: transform 0.2s ease, border-color 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .kpi-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(255, 255, 255, 0.16);
+    }
+    .kpi-card-glow {
+      position: absolute;
+      top: -30px; right: -30px; width: 100px; height: 100px;
+      border-radius: 50%;
+      filter: blur(40px);
+      opacity: 0.15;
+      pointer-events: none;
+    }
+    .kpi-card.violet .kpi-card-glow { background: var(--accent-violet); }
+    .kpi-card.cyan .kpi-card-glow { background: var(--accent-cyan); }
+    .kpi-card.emerald .kpi-card-glow { background: var(--accent-emerald); }
+    .kpi-card.amber .kpi-card-glow { background: var(--accent-amber); }
+
+    .kpi-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .kpi-title {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--txt-secondary);
+      font-family: var(--font-mono);
+    }
+    .kpi-icon {
+      width: 24px;
+      height: 24px;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .kpi-icon.violet { color: var(--accent-violet); }
+    .kpi-icon.cyan { color: var(--accent-cyan); }
+    .kpi-icon.emerald { color: var(--accent-emerald); }
+    .kpi-icon.amber { color: var(--accent-amber); }
+
+    .kpi-val {
+      font-family: var(--font-display);
+      font-size: 23px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #FFF;
+      line-height: 1.1;
+      margin-bottom: 6px;
+    }
+    .kpi-val .unit {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--txt-secondary);
+      font-family: var(--font-main);
+    }
+
+    .kpi-sparkline-box {
+      height: 30px;
+      width: 100%;
+      margin-bottom: 6px;
+    }
+    .kpi-sparkline-box canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .segmented-bar {
+      height: 8px;
+      width: 100%;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 4px;
+      overflow: hidden;
+      display: flex;
+      margin-bottom: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .seg-fill {
+      height: 100%;
+      transition: width 0.3s ease;
+    }
+    .seg-fill.violet { background: linear-gradient(90deg, #7C3AED, #8B5CF6); }
+    .seg-fill.emerald { background: linear-gradient(90deg, #059669, #10B981); }
+    .seg-fill.cyan { background: linear-gradient(90deg, #0891B2, #06B6D4); }
+    .seg-fill.slate { background: rgba(255, 255, 255, 0.08); }
+
+    .vu-threads-spectrum {
+      display: flex;
+      gap: 2px;
+      height: 20px;
+      align-items: flex-end;
+      margin-bottom: 6px;
+    }
+    .vu-bar {
+      flex: 1;
+      background: rgba(16, 185, 129, 0.25);
+      border-radius: 1.5px;
+      transition: height 0.15s ease;
+      min-height: 3px;
+    }
+    .vu-bar.hot {
+      background: linear-gradient(180deg, #34D399, #10B981);
+      box-shadow: 0 0 4px rgba(16, 185, 129, 0.6);
+    }
+
+    .qd-matrix-slots {
+      display: grid;
+      grid-template-columns: repeat(16, 1fr);
+      gap: 2.5px;
+      margin-bottom: 6px;
+    }
+    .qd-slot {
+      height: 7px;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.06);
+      transition: all 0.15s ease;
+    }
+    .qd-slot.busy {
+      background: #F59E0B;
+      box-shadow: 0 0 5px rgba(245, 158, 11, 0.6);
+    }
+
+    .kpi-meta-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--txt-secondary);
+      font-family: var(--font-mono);
+    }
+    .kpi-tag {
+      font-size: 9px;
+      padding: 1.5px 5px;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+    .kpi-tag.violet { background: rgba(139, 92, 246, 0.18); color: #C4B5FD; }
+    .kpi-tag.cyan { background: rgba(6, 182, 212, 0.18); color: #A5F3FC; }
+    .kpi-tag.emerald { background: rgba(16, 185, 129, 0.18); color: #A7F3D0; }
+    .kpi-tag.amber { background: rgba(245, 158, 11, 0.18); color: #FDE68A; }
+
+    .token-stream-ticker {
+      margin-top: 5px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--txt-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      padding-top: 4px;
+    }
+
+    /* ═════════════════════════════════════════════════════════════════
+       ROW 2: MIDDLE ROW (REACTOR ON LEFT, MOE MATRIX ON RIGHT)
+       ═════════════════════════════════════════════════════════════════ */
+    .middle-section-grid {
+      display: grid;
+      grid-template-columns: 1.75fr 0.95fr;
+      gap: 12px;
+      flex: 1;
+      min-height: 280px;
+    }
+
+    /* ─── MIDDLE-LEFT: ZERO-COPY MEMORY REACTOR & REQUEST TELEMETRY HUB (OPTION 2: ASYMMETRIC SPLIT COCKPIT) ─── */
+    .memory-reactor-card {
+      background: linear-gradient(145deg, rgba(16, 22, 34, 0.88), rgba(12, 17, 28, 0.96));
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 13px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(16px);
+      height: 100%;
+      min-height: 0;
+      justify-content: space-between;
+      position: relative;
+      overflow: hidden;
+    }
+    .memory-reactor-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.5), rgba(139, 92, 246, 0.5), transparent);
+    }
+
+    .reactor-header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 7px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .reactor-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+    .reactor-icon-badge {
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, rgba(6, 182, 212, 0.2), rgba(139, 92, 246, 0.2));
+      border: 1px solid rgba(6, 182, 212, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent-cyan);
+      box-shadow: 0 0 10px rgba(6, 182, 212, 0.25);
+    }
+    .reactor-title {
+      font-family: var(--font-display);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      color: #FFF;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .reactor-tags {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .req-tag {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 700;
+      color: #6EE7B7;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      padding: 2px 8px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .pulse-emerald {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #10B981;
+      box-shadow: 0 0 6px #10B981;
+      animation: pulse-green 1.4s infinite;
+    }
+    .zero-copy-pill {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 700;
+      color: #C4B5FD;
+      background: rgba(139, 92, 246, 0.15);
+      border: 1px solid rgba(139, 92, 246, 0.35);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    /* Asymmetric Split Cockpit Grid */
+    .asym-cockpit-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 1fr;
+      gap: 12px;
+      flex: 1;
+      min-height: 0;
+      align-items: stretch;
+    }
+
+    /* Left Side: Physical Tier Stack */
+    .tier-vertical-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      background: rgba(8, 12, 20, 0.7);
+      border: 1px solid var(--border-subtle);
+      border-radius: 9px;
+      padding: 8px 10px;
+      justify-content: space-between;
+    }
+    .tier-stack-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255, 255, 255, 0.025);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 6px;
+      padding: 6px 9px;
+      transition: all 0.15s ease;
+    }
+    .tier-stack-row:hover {
+      background: rgba(255, 255, 255, 0.04);
+      border-color: rgba(255, 255, 255, 0.1);
+    }
+    .tier-stack-row.vram { border-left: 3px solid var(--accent-violet); }
+    .tier-stack-row.ram { border-left: 3px solid var(--accent-amber); }
+    .tier-stack-row.ssd { border-left: 3px solid var(--accent-cyan); }
+
+    .tier-stack-info {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .tier-stack-title {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .tier-stack-row.vram .tier-stack-title { color: #C4B5FD; }
+    .tier-stack-row.ram .tier-stack-title { color: #FDE68A; }
+    .tier-stack-row.ssd .tier-stack-title { color: #A5F3FC; }
+
+    .tier-stack-val {
+      font-family: var(--font-display);
+      font-size: 15px;
+      font-weight: 800;
+      color: #FFF;
+      line-height: 1.15;
+    }
+    .tier-stack-row.vram .tier-stack-val { color: #DDD6FE; }
+    .tier-stack-row.ram .tier-stack-val { color: #FEF08A; }
+    .tier-stack-row.ssd .tier-stack-val { color: #BAE6FD; }
+
+    .tier-stack-sub {
+      font-size: 8.5px;
+      font-weight: 400;
+      color: var(--txt-muted);
+      font-family: var(--font-mono);
+    }
+    .tier-stack-side {
+      text-align: right;
+      font-family: var(--font-mono);
+      font-size: 8.5px;
+      color: var(--txt-secondary);
+      line-height: 1.2;
+    }
+
+    .tier-bus-connector {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      font-family: var(--font-mono);
+      font-size: 8px;
+      color: var(--txt-muted);
+      padding: 0;
+    }
+    .tier-bus-badge {
+      background: rgba(0, 0, 0, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      padding: 2px 7px;
+      font-weight: 700;
+      font-size: 8.5px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .tier-bus-badge.pcie {
+      color: #F59E0B;
+      text-shadow: 0 0 6px rgba(245, 158, 11, 0.35);
+    }
+    .tier-bus-badge.gds {
+      color: #06B6D4;
+      text-shadow: 0 0 6px rgba(6, 182, 212, 0.35);
+    }
+    .bus-arrow-flow {
+      font-size: 8px;
+      color: var(--accent-cyan);
+      animation: bounce-right 1.2s infinite;
+    }
+
+    /* Right Side: Quad Telemetry Metrics Grid */
+    .quad-metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+      gap: 8px;
+    }
+    .quad-telemetry-cell {
+      background: rgba(10, 14, 22, 0.7);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.2s ease;
+    }
+    .quad-telemetry-cell:hover {
+      background: rgba(14, 20, 32, 0.85);
+      border-color: rgba(255, 255, 255, 0.14);
+      transform: translateY(-1px);
+    }
+    .quad-telemetry-cell.highlight {
+      border-color: rgba(16, 185, 129, 0.35);
+      background: rgba(16, 185, 129, 0.03);
+    }
+
+    .quad-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .quad-kicker {
+      font-family: var(--font-mono);
+      font-size: 7.5px;
+      font-weight: 700;
+      color: var(--txt-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .quad-badge {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+    .quad-badge.emerald { background: rgba(16, 185, 129, 0.18); color: #6EE7B7; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .quad-badge.violet { background: rgba(139, 92, 246, 0.18); color: #C4B5FD; border: 1px solid rgba(139, 92, 246, 0.3); }
+    .quad-badge.cyan { background: rgba(6, 182, 212, 0.18); color: #A5F3FC; border: 1px solid rgba(6, 182, 212, 0.3); }
+    .quad-badge.neutral { background: rgba(255, 255, 255, 0.06); color: var(--txt-secondary); border: 1px solid rgba(255, 255, 255, 0.1); }
+
+    .quad-mid {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 6px;
+      margin: 1px 0;
+    }
+    .quad-big-num {
+      font-family: var(--font-display);
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #FFF;
+      line-height: 1.1;
+    }
+    .quad-big-num .unit {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--txt-secondary);
+      font-family: var(--font-mono);
+    }
+
+    .quad-foot {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      color: var(--txt-muted);
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      padding-top: 3px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .quad-foot strong { color: var(--txt-primary); }
+
+    /* Footer Status Strip */
+    .asym-footer-strip {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 5px;
+      font-family: var(--font-mono);
+      font-size: 8.5px;
+      color: var(--txt-muted);
+    }
+    .asym-footer-strip strong { color: var(--txt-primary); }
+    .ribbon-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .ribbon-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent-cyan);
+    }
+
+    /* ─── MIDDLE-RIGHT: VERTICAL ACTIVE MOE EXPERT MATRIX ─── */
+    .vertical-matrix-card {
+      background: linear-gradient(145deg, rgba(16, 22, 34, 0.85), rgba(12, 17, 28, 0.95));
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(16px);
+      height: 100%;
+      justify-content: space-between;
+    }
+    .matrix-title-block {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .matrix-title-main {
+      font-family: var(--font-display);
+      font-size: 13px;
+      font-weight: 700;
+      color: #FFF;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .matrix-subtitle {
+      font-size: 10px;
+      color: var(--txt-muted);
+      font-family: var(--font-main);
+    }
+
+    .layer-scrubber-cockpit {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 2px 4px;
+    }
+    .btn-scrub {
+      background: none;
+      border: none;
+      color: var(--txt-muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      padding: 2px 4px;
+      border-radius: 4px;
+      transition: all 0.15s ease;
+    }
+    .btn-scrub:hover { color: #FFF; background: rgba(255, 255, 255, 0.08); }
+    .layer-badge-disp {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--accent-cyan);
+      min-width: 60px;
+      text-align: center;
+    }
+
+    .vertical-canvas-box {
+      width: 100%;
+      flex: 1;
+      min-height: 200px;
+      background: rgba(0, 0, 0, 0.6);
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      position: relative;
+      overflow: hidden;
+      cursor: crosshair;
+    }
+    .vertical-canvas-box canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .matrix-legend-deck {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      padding-top: 4px;
+      border-top: 1px solid var(--border-subtle);
+    }
+    .legend-chip {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--txt-secondary);
+    }
+    .chip-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 3px;
+    }
+    .chip-dot.active { background: #06B6D4; box-shadow: 0 0 6px #06B6D4; }
+    .chip-dot.vram { background: #8B5CF6; }
+    .chip-dot.ram { background: #F59E0B; }
+    .chip-dot.ssd { background: #1E293B; border: 1px solid #334155; }
+
+    /* ═════════════════════════════════════════════════════════════════
+       ROW 3: BOTTOM ROW (CACHE ALLOCATION ON LEFT, TRANSFER PIPELINE ON RIGHT)
+       ═════════════════════════════════════════════════════════════════ */
+    .bottom-section-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      flex-shrink: 0;
+      min-height: 220px;
+      margin-top: auto;
+    }
+
+    /* ─── BOTTOM-LEFT: CACHE ALLOCATOR & TUNER ─── */
+    .tuner-card {
+      background: linear-gradient(145deg, rgba(16, 22, 34, 0.85), rgba(12, 17, 28, 0.95));
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 13px 15px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(16px);
+      justify-content: space-between;
+    }
+    .btn-apply-reactor {
+      background: linear-gradient(135deg, #7C3AED, #4F46E5);
+      border: 1px solid rgba(139, 92, 246, 0.6);
+      color: #FFF;
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 4px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      box-shadow: 0 0 10px rgba(124, 58, 237, 0.35);
+      transition: all 0.2s ease;
+    }
+    .btn-apply-reactor:hover {
+      box-shadow: 0 0 16px rgba(124, 58, 237, 0.6);
+      transform: translateY(-1px);
+    }
+
+    .fader-group {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .fader-row-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10px;
+      font-family: var(--font-mono);
+    }
+    .fader-name { color: var(--txt-secondary); }
+    .fader-readout { color: #FFF; font-weight: 700; }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 5px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.08);
+      outline: none;
+      margin: 2px 0;
+      cursor: pointer;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #FFF;
+      cursor: pointer;
+      border: 2px solid var(--accent-violet);
+      box-shadow: 0 0 8px var(--accent-violet-glow);
+      transition: transform 0.1s ease;
+    }
+    input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+    #sliderVram::-webkit-slider-thumb { border-color: var(--accent-violet); }
+    #sliderRam::-webkit-slider-thumb { border-color: var(--accent-amber); }
+    #sliderThreads::-webkit-slider-thumb { border-color: var(--accent-emerald); }
+    #sliderCtx::-webkit-slider-thumb { border-color: var(--accent-cyan); }
+
+    .footprint-balance-bar {
+      height: 6px;
+      width: 100%;
+      background: rgba(0, 0, 0, 0.4);
+      border-radius: 3px;
+      overflow: hidden;
+      display: flex;
+      margin-top: 2px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .footprint-seg { height: 100%; transition: width 0.2s ease; }
+    .footprint-seg.vram { background: var(--accent-violet); }
+    .footprint-seg.ram { background: var(--accent-amber); }
+    .footprint-seg.ssd { background: #334155; }
+
+    .preset-chips-row {
+      display: flex;
+      gap: 5px;
+      margin-top: 2px;
+    }
+    .btn-preset {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border-subtle);
+      color: var(--txt-secondary);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      padding: 3px 4px;
+      border-radius: 4px;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.15s ease;
+    }
+    .btn-preset:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #FFF;
+      border-color: var(--border-light);
+    }
+
+    /* ─── BOTTOM-RIGHT: COMPACT RED/GREEN LIVE TRANSFER PIPELINE ─── */
+    .live-transfer-indicator-card {
+      background: linear-gradient(145deg, rgba(16, 22, 34, 0.85), rgba(12, 17, 28, 0.95));
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 13px 15px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(16px);
+      justify-content: space-between;
+    }
+    .transfer-header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .transfer-header-title {
+      font-family: var(--font-display);
+      font-size: 12px;
+      font-weight: 700;
+      color: #FFF;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      text-transform: uppercase;
+    }
+    .transfer-status-badge {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .transfer-status-badge.in-flight {
+      background: rgba(239, 68, 68, 0.2);
+      border: 1px solid rgba(239, 68, 68, 0.5);
+      color: #FCA5A5;
+    }
+    .transfer-status-badge.ready {
+      background: rgba(16, 185, 129, 0.2);
+      border: 1px solid rgba(16, 185, 129, 0.5);
+      color: #6EE7B7;
+    }
+
+    /* 8 Compact Transfer Pills in 4x2 Grid */
+    .transfer-expert-slots-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+    }
+    .transfer-slot-pill {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 6px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      transition: all 0.25s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .transfer-slot-pill.transferring {
+      background: rgba(239, 68, 68, 0.18);
+      border-color: #EF4444;
+      box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+      animation: transfer-pulse 1s infinite alternate;
+    }
+    @keyframes transfer-pulse {
+      0% { border-color: rgba(239, 68, 68, 0.6); box-shadow: 0 0 6px rgba(239, 68, 68, 0.3); }
+      100% { border-color: #EF4444; box-shadow: 0 0 14px rgba(239, 68, 68, 0.7); }
+    }
+    .transfer-slot-pill.arrived {
+      background: rgba(16, 185, 129, 0.15);
+      border-color: #10B981;
+      box-shadow: 0 0 8px rgba(16, 185, 129, 0.35);
+    }
+
+    .slot-pill-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+    .slot-pill-id {
+      font-weight: 700;
+      color: #FFF;
+    }
+    .slot-pill-indicator {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+    .transfer-slot-pill.transferring .slot-pill-indicator {
+      background: #EF4444;
+      box-shadow: 0 0 6px #EF4444;
+    }
+    .transfer-slot-pill.arrived .slot-pill-indicator {
+      background: #10B981;
+      box-shadow: 0 0 6px #10B981;
+    }
+
+    .slot-pill-status-text {
+      font-family: var(--font-mono);
+      font-size: 8.5px;
+      font-weight: 600;
+    }
+    .transfer-slot-pill.transferring .slot-pill-status-text {
+      color: #F87171;
+    }
+    .transfer-slot-pill.arrived .slot-pill-status-text {
+      color: #34D399;
+    }
+
+    .transfer-footer-stats {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--txt-muted);
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 6px;
+    }
+
+    /* Tooltip */
+    #matrixTooltip {
+      position: fixed;
+      pointer-events: none;
+      background: rgba(10, 14, 22, 0.95);
+      border: 1px solid var(--accent-cyan);
+      box-shadow: 0 0 15px rgba(6, 182, 212, 0.3);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: #FFF;
+      z-index: 1000;
+      display: none;
+      backdrop-filter: blur(10px);
+    }
+    #matrixTooltip .hud-title {
+      font-weight: 700;
+      color: var(--accent-cyan);
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    #matrixTooltip .hud-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--txt-secondary);
+      font-size: 10px;
+      margin-top: 2px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="app-root">
+
+    <!-- ─── TITLEBAR ─── -->
+    <header class="titlebar">
+      <div class="titlebar-left">
+        <div class="window-controls">
+          <div class="win-dot dot-close"></div>
+          <div class="win-dot dot-min"></div>
+          <div class="win-dot dot-max"></div>
+        </div>
+        <div class="brand-group">
+          <div class="brand-icon">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FFF" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          </div>
+          <div class="brand-title">
+            SIPHON STUDIO
+            <span class="brand-badge">DESKTOP v0.2.1</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="titlebar-center">
+        <div class="pulse-dot"></div>
+        <span>CUDA MoE Engine</span>
+        <span>·</span>
+        <span>127.0.0.1:8090</span>
+        <span>·</span>
+        <span style="color: #6EE7B7;">DirectStorage GDS Active (20T)</span>
+      </div>
+
+      <div class="titlebar-right">
+        <button class="btn-tb" id="btnBurstTest">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          <span>Burst Test</span>
+        </button>
+        <button class="btn-tb" id="btnRestartEngine">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+          <span>Restart Engine</span>
+        </button>
+        <button class="btn-tb primary" id="btnOpenChat">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span>Open Chat</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ─── MAIN BODY ─── -->
+    <div class="app-body">
+
+      <!-- ─── SIDEBAR ─── -->
+      <aside class="sidebar">
+        <div class="nav-group-title">Navigation</div>
+        <a class="nav-item active" href="#">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+          <span>Overview</span>
+          <span class="nav-badge live">LIVE</span>
+        </a>
+        <a class="nav-item" href="#">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span>Chat &amp; Play</span>
+        </a>
+        <a class="nav-item" href="#">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 4.24 4.24M14.83 9.17l4.24-4.24M14.83 14.83l4.24 4.24M9.17 14.83l-4.24 4.24"/></svg>
+          <span>MoE Topology</span>
+          <span class="nav-badge">41L</span>
+        </a>
+        <a class="nav-item" href="#">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span>Model Profiles</span>
+        </a>
+        <a class="nav-item" href="#">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/></svg>
+          <span>Benchmarks</span>
+        </a>
+
+        <div class="nav-group-title">System &amp; Settings</div>
+        <a class="nav-item" href="#">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Engine Config</span>
+        </a>
+        <a class="nav-item" href="#">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+          <span>Live Terminal</span>
+        </a>
+
+        <div class="sidebar-footer">
+          <div class="hw-status-pill">
+            <span style="font-weight:700; color:#FFF;">RTX 4050 Laptop</span>
+            <span style="color:#6EE7B7;">43°C</span>
+          </div>
+          <div class="hw-status-pill">
+            <span>VRAM Util</span>
+            <span style="color:#A5F3FC;">79% (4.8 GiB)</span>
+          </div>
+          <div class="hw-status-pill">
+            <span>GDS Bandwidth</span>
+            <span style="color:#FDE68A;">2.84 GB/s</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- ─── MAIN CONTENT ─── -->
+      <main class="main-content">
+
+        <!-- HUB HEADER -->
+        <section class="hub-header">
+          <div class="hub-title-group">
+            <h1>
+              Engine Telemetry &amp; Hardware Hub
+              <span class="model-tag">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+                Qwen3.6-35B-A3B (41L · 256 E/Layer · Top-8)
+              </span>
+            </h1>
+            <p>DirectStorage zero-copy inference pipeline with active per-layer MoE routing and live memory reactor telemetry.</p>
+          </div>
+
+          <div class="hub-actions">
+            <button class="btn-quick" id="btnStepToken">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              <span>Step Layer</span>
+            </button>
+            <button class="btn-quick active-step" id="btnToggleLive">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/></svg>
+              <span id="txtToggleLive">Auto-Feed (60 FPS)</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- ═════════════════════════════════════════════════════════════════
+             ROW 1: BENTO PROPULSION ROW (4 SIZES)
+             ═════════════════════════════════════════════════════════════════ -->
+        <section class="bento-propulsion-grid">
+
+          <!-- CARD 1: MODEL SPEED HERO (1.3fr) -->
+          <div class="kpi-card violet">
+            <div class="kpi-card-glow"></div>
+            <div class="kpi-top">
+              <span class="kpi-title">Model Inference Propulsion</span>
+              <div class="kpi-icon violet">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              </div>
+            </div>
+            <div class="kpi-val" id="valDecodeSpeed">
+              42.8 <span class="unit">t/s decode</span>
+            </div>
+
+            <div class="kpi-sparkline-box">
+              <canvas id="sparklineDecode"></canvas>
+            </div>
+
+            <div class="kpi-meta-row">
+              <span class="kpi-tag violet" id="valPrefillSpeed">⚡ 148.2 t/s prefill</span>
+              <span>TTFT: <strong>77.6ms</strong></span>
+            </div>
+            <div class="token-stream-ticker" id="tokenTicker">
+              [T#1842] &gt; "def moe_forward(hidden_states): return router.dispatch()"
+            </div>
+          </div>
+
+          <!-- CARD 2: GPU VRAM STATUS (1.05fr) -->
+          <div class="kpi-card cyan">
+            <div class="kpi-card-glow"></div>
+            <div class="kpi-top">
+              <span class="kpi-title">GPU Util &amp; VRAM Pool</span>
+              <div class="kpi-icon cyan">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15h10M9 9h6"/></svg>
+              </div>
+            </div>
+            <div class="kpi-val" id="valGpuUtil">
+              47% <span class="unit">· 43°C · 42W</span>
+            </div>
+
+            <div class="segmented-bar" title="Weights 1.2G | KV Cache 0.8G | MoE Cache 2.8G | Free 1.2G">
+              <div class="seg-fill violet" id="segWeights" style="width: 20%;"></div>
+              <div class="seg-fill emerald" id="segKv" style="width: 13%;"></div>
+              <div class="seg-fill cyan" id="segMoe" style="width: 47%;"></div>
+              <div class="seg-fill slate" style="width: 20%;"></div>
+            </div>
+
+            <div class="kpi-meta-row">
+              <span class="kpi-tag cyan">4.8 / 6.0 GiB (79%)</span>
+              <span>MoE: <strong id="kpiMoePool">2,816 MiB</strong></span>
+            </div>
+            <div class="token-stream-ticker">
+              Weights: 1.2G · KV: 0.8G · MoE: 2.8G · Free: 1.2G
+            </div>
+          </div>
+
+          <!-- CARD 3: CPU NEURAL HOST (0.8fr) -->
+          <div class="kpi-card emerald">
+            <div class="kpi-card-glow"></div>
+            <div class="kpi-top">
+              <span class="kpi-title">CPU Host</span>
+              <div class="kpi-icon emerald">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/></svg>
+              </div>
+            </div>
+            <div class="kpi-val" id="valCpuUtil">
+              12% <span class="unit">· 24T</span>
+            </div>
+
+            <div class="vu-threads-spectrum" id="vuThreads"></div>
+
+            <div class="kpi-meta-row">
+              <span class="kpi-tag emerald">RAM: 70%</span>
+              <span><strong id="kpiPinnedRam">8,192M</strong></span>
+            </div>
+            <div class="token-stream-ticker">
+              DMA Pinned: 8.0 GiB
+            </div>
+          </div>
+
+          <!-- CARD 4: DIRECTSTORAGE SPEED (1.15fr) -->
+          <div class="kpi-card amber">
+            <div class="kpi-card-glow"></div>
+            <div class="kpi-top">
+              <span class="kpi-title">DirectStorage GDS</span>
+              <div class="kpi-icon amber">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+              </div>
+            </div>
+            <div class="kpi-val" id="valGdsSpeed">
+              2.84 <span class="unit">GB/s NVMe</span>
+            </div>
+
+            <div class="qd-matrix-slots" id="qdMatrixSlots"></div>
+
+            <div class="kpi-meta-row">
+              <span class="kpi-tag amber" id="kpiGdsThreads">20 Workers</span>
+              <span>QD: <strong>32</strong> · <strong>40°C</strong></span>
+            </div>
+            <div class="token-stream-ticker">
+              PCIe 4.0 x4 Zero-Copy DMA · io_uring Ring
+            </div>
+          </div>
+
+        </section>
+
+        <!-- ═════════════════════════════════════════════════════════════════
+             ROW 2: MIDDLE SECTION
+             Left: Zero-Copy Memory Reactor Pipeline & Telemetry Hub
+             Right: Active MoE Expert Matrix (Vertical Die Shot)
+             ═════════════════════════════════════════════════════════════════ -->
+        <section class="middle-section-grid">
+
+          <!-- MIDDLE-LEFT: ZERO-COPY MEMORY REACTOR & REQUEST TELEMETRY HUB (OPTION 2: ASYMMETRIC SPLIT COCKPIT) -->
+          <div class="memory-reactor-card">
+            <div class="reactor-header-row">
+              <div class="reactor-title-wrap">
+                <div class="reactor-icon-badge">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                </div>
+                <div class="reactor-title">Zero-Copy Memory Reactor &amp; Request Telemetry</div>
+              </div>
+              <div class="reactor-tags">
+                <span class="req-tag"><span class="pulse-emerald"></span>REQ #9042 ACTIVE</span>
+                <span class="zero-copy-pill">97.7% IN-SILICON RESOLUTION</span>
+              </div>
+            </div>
+
+            <!-- Asymmetric Split Cockpit Body -->
+            <div class="asym-cockpit-grid">
+
+              <!-- Left Column: Physical Tier Hierarchy Stack -->
+              <div class="tier-vertical-stack">
+
+                <!-- Tier 1: VRAM / L1 CACHE HIT RATE -->
+                <div class="tier-stack-row vram">
+                  <div class="tier-stack-info">
+                    <span class="tier-stack-title">VRAM / L1 CACHE HIT RATE</span>
+                    <div class="tier-stack-val" id="valL1Hit">84.2% <span class="tier-stack-sub">(0.02ms latency)</span></div>
+                  </div>
+                  <div class="tier-stack-side">1,545 Slots<br><span style="color:#C4B5FD; font-size:7.5px;">RESIDENT</span></div>
+                </div>
+
+                <!-- PCIe Gen4 DMA Bus Bridge: RAM to VRAM Speed -->
+                <div class="tier-bus-connector">
+                  <span>PCIe Gen4 DMA</span>
+                  <span class="tier-bus-badge pcie">
+                    RAM ➔ VRAM SPEED: <strong id="hudRam2Vram">4,210 MB/s</strong>
+                  </span>
+                  <span class="bus-arrow-flow">▶ ▶</span>
+                </div>
+
+                <!-- Tier 2: RAM / L2 CACHE HIT RATE -->
+                <div class="tier-stack-row ram">
+                  <div class="tier-stack-info">
+                    <span class="tier-stack-title">RAM / L2 CACHE HIT RATE</span>
+                    <div class="tier-stack-val" id="valL2Hit">13.5% <span class="tier-stack-sub">(0.35ms DMA)</span></div>
+                  </div>
+                  <div class="tier-stack-side">4,491 Slots<br><span style="color:#FDE68A; font-size:7.5px;">STAGED</span></div>
+                </div>
+
+                <!-- DirectStorage io_uring GDS Bus Bridge -->
+                <div class="tier-bus-connector">
+                  <span>io_uring GDS</span>
+                  <span class="tier-bus-badge gds">
+                    STREAM RATE: <strong id="hudNvme">2,840 MB/s</strong>
+                  </span>
+                  <span class="bus-arrow-flow">▶ ▶</span>
+                </div>
+
+                <!-- Tier 3: STREAMED DATA FROM SSD -->
+                <div class="tier-stack-row ssd">
+                  <div class="tier-stack-info">
+                    <span class="tier-stack-title">STREAMED DATA FROM SSD</span>
+                    <div class="tier-stack-val" id="valStreamedSsd">14.8 GiB <span class="tier-stack-sub">(0.64ms GDS)</span></div>
+                  </div>
+                  <div class="tier-stack-side">60 Disk Slots<br><span style="color:#BAE6FD; font-size:7.5px;">NVMe DORMANT</span></div>
+                </div>
+
+              </div>
+
+              <!-- Right Column: 2x2 Cybernetic Telemetry Grid -->
+              <div class="quad-metrics-grid">
+
+                <!-- Quad 1: DRAFT ACCEPTANCE -->
+                <div class="quad-telemetry-cell highlight">
+                  <div class="quad-top">
+                    <span class="quad-kicker" style="color:#6EE7B7;">DRAFT ACCEPTANCE</span>
+                    <span class="quad-badge emerald">+1.74x Boost</span>
+                  </div>
+                  <div class="quad-mid">
+                    <div class="quad-big-num" id="valDraftAcc" style="color:#34D399;">78.4%</div>
+                  </div>
+                  <div class="quad-foot">
+                    <span>Verified: <strong id="hudVerified">1,444 / 1,842 Tokens</strong></span>
+                  </div>
+                </div>
+
+                <!-- Quad 2: TOTAL DECODE CALLS MADE -->
+                <div class="quad-telemetry-cell">
+                  <div class="quad-top">
+                    <span class="quad-kicker" style="color:#C4B5FD;">TOTAL DECODE CALLS</span>
+                    <span class="quad-badge violet" id="hudDecodeCadenceBadge">43.2 t/s</span>
+                  </div>
+                  <div class="quad-mid">
+                    <div class="quad-big-num" id="valTotalDecCalls">1,842 <span class="unit">tok</span></div>
+                  </div>
+                  <div class="quad-foot">
+                    <span>TTFT: <strong style="color:#A5F3FC;">77.6ms</strong></span>
+                    <span>Cadence Stream</span>
+                  </div>
+                </div>
+
+                <!-- Quad 3: TOTAL PREFILL CALLS TO SSD -->
+                <div class="quad-telemetry-cell">
+                  <div class="quad-top">
+                    <span class="quad-kicker" style="color:#A5F3FC;">TOTAL PREFILL CALLS TO SSD</span>
+                    <span class="quad-badge cyan">QD: 32</span>
+                  </div>
+                  <div class="quad-mid">
+                    <div class="quad-big-num" id="valTotalPreCalls">24 <span class="unit">chk</span></div>
+                  </div>
+                  <div class="quad-foot">
+                    <span>DirectStorage Async Zero-Copy</span>
+                  </div>
+                </div>
+
+                <!-- Quad 4: RADIX KV REUSE -->
+                <div class="quad-telemetry-cell">
+                  <div class="quad-top">
+                    <span class="quad-kicker">RADIX KV REUSE</span>
+                    <span class="quad-badge neutral">57 Active</span>
+                  </div>
+                  <div class="quad-mid">
+                    <div class="quad-big-num" id="valRadixReuse">94.2%</div>
+                  </div>
+                  <div class="quad-foot">
+                    <span>Prefill Context Acceleration</span>
+                  </div>
+                </div>
+
+              </div>
+
+            </div>
+
+            <!-- Footer Strip -->
+            <div class="asym-footer-strip">
+              <span>Speculative Acceleration: <strong style="color:#6EE7B7;">MTP K=4 Active</strong></span>
+              <span>DMA Ring Buffer: <strong style="color:#FFF;">DirectStorage Active</strong></span>
+              <span>Request Latency: <strong style="color:#A5F3FC;">0.02ms Silicon / 0.64ms GDS</strong></span>
+            </div>
+
+          </div>
+
+          <!-- MIDDLE-RIGHT: VERTICAL ACTIVE MOE EXPERT MATRIX -->
+          <div class="vertical-matrix-card">
+            <div class="card-header-line">
+              <div class="matrix-title-block">
+                <div class="matrix-title-main">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                  <span id="txtLayerMatrixTitle">Active MoE Expert Matrix (256)</span>
+                </div>
+                <span class="matrix-subtitle">Live memory residency and token routing state.</span>
+              </div>
+
+              <!-- Layer Scrubber -->
+              <div class="layer-scrubber-cockpit">
+                <button class="btn-scrub" id="btnPrevLayer">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <span class="layer-badge-disp" id="lblCurLayer">LAYER 13</span>
+                <button class="btn-scrub" id="btnNextLayer">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <!-- Vertical Canvas Viewport -->
+            <div class="vertical-canvas-box">
+              <canvas id="layerMatrixCanvas"></canvas>
+            </div>
+
+            <!-- Matrix Legend Deck -->
+            <div class="matrix-legend-deck">
+              <div class="legend-chip">
+                <div class="chip-dot active"></div>
+                <span id="legActiveCount">Active (8)</span>
+              </div>
+              <div class="legend-chip">
+                <div class="chip-dot vram"></div>
+                <span id="legVramCount">VRAM Cache (76)</span>
+              </div>
+              <div class="legend-chip">
+                <div class="chip-dot ram"></div>
+                <span id="legRamCount">Pinned RAM (119)</span>
+              </div>
+              <div class="legend-chip">
+                <div class="chip-dot ssd"></div>
+                <span id="legSsdCount">NVMe Dormant (61)</span>
+              </div>
+            </div>
+
+          </div>
+
+        </section>
+
+        <!-- ═════════════════════════════════════════════════════════════════
+             ROW 3: BOTTOM SECTION (PULLED CACHE ALLOCATION & TRANSFER PIPELINE)
+             Left: Cache Allocator & Tuner
+             Right: MoE Live Transfer Pipeline (Red ➔ Green Indicators)
+             ═════════════════════════════════════════════════════════════════ -->
+        <section class="bottom-section-grid">
+
+          <!-- BOTTOM-LEFT: CACHE ALLOCATOR & TUNER -->
+          <div class="tuner-card">
+            <div class="card-header-line">
+              <div class="card-title-group">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" x2="20" y1="21" y2="21"/><line x1="4" x2="20" y1="3" y2="3"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="8" x2="8" y1="9" y2="15"/><line x1="16" x2="16" y1="9" y2="15"/></svg>
+                <span>Cache Allocator &amp; Hardware Tuner</span>
+              </div>
+              <button class="btn-apply-reactor" id="btnApplyTuner">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                <span>Hot-Apply</span>
+              </button>
+            </div>
+
+            <!-- Fader 1: VRAM Cache Size -->
+            <div class="fader-group">
+              <div class="fader-row-top">
+                <span class="fader-name">GPU VRAM MoE Pool</span>
+                <span class="fader-readout" id="valVramCacheTag" style="color:#C4B5FD;">2,816 MiB (~1,545 Slots)</span>
+              </div>
+              <input type="range" id="sliderVram" min="1024" max="4608" step="256" value="2816">
+            </div>
+
+            <!-- Fader 2: Pinned RAM Cache Size -->
+            <div class="fader-group">
+              <div class="fader-row-top">
+                <span class="fader-name">Pinned RAM Cache</span>
+                <span class="fader-readout" id="valRamCacheTag" style="color:#FDE68A;">8,192 MiB (~4,491 Slots)</span>
+              </div>
+              <input type="range" id="sliderRam" min="2048" max="12288" step="512" value="8192">
+            </div>
+
+            <!-- Fader 3: DirectStorage Threads -->
+            <div class="fader-group">
+              <div class="fader-row-top">
+                <span class="fader-name">GDS Worker Threads</span>
+                <span class="fader-readout" id="valThreadsTag" style="color:#6EE7B7;">20 Async Threads</span>
+              </div>
+              <input type="range" id="sliderThreads" min="4" max="32" step="2" value="20">
+            </div>
+
+            <!-- Fader 4: Context Window Limit -->
+            <div class="fader-group">
+              <div class="fader-row-top">
+                <span class="fader-name">Context Window Limit</span>
+                <span class="fader-readout" id="valCtxTag" style="color:#A5F3FC;">65,536 Tokens</span>
+              </div>
+              <input type="range" id="sliderCtx" min="4096" max="65536" step="4096" value="65536">
+            </div>
+
+            <!-- Footprint Visualizer -->
+            <div>
+              <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:9px; color:var(--txt-muted); margin-bottom:1px;">
+                <span>VRAM (26.8%)</span>
+                <span>RAM (42.8%)</span>
+                <span>NVMe (30.4%)</span>
+              </div>
+              <div class="footprint-balance-bar">
+                <div class="footprint-seg vram" id="barFootprintVram" style="width: 26.8%;"></div>
+                <div class="footprint-seg ram" id="barFootprintRam" style="width: 42.8%;"></div>
+                <div class="footprint-seg ssd" id="barFootprintSsd" style="width: 30.4%;"></div>
+              </div>
+            </div>
+
+            <!-- Presets -->
+            <div class="preset-chips-row">
+              <button class="btn-preset" id="preLowVram">Low VRAM (4G)</button>
+              <button class="btn-preset" id="preBalanced">Balanced (6G)</button>
+              <button class="btn-preset" id="preSpeed">Speed (8G)</button>
+              <button class="btn-preset" id="preDeepCtx">Deep 65k</button>
+            </div>
+
+          </div>
+
+          <!-- BOTTOM-RIGHT: COMPACT RED/GREEN LIVE TRANSFER PIPELINE -->
+          <div class="live-transfer-indicator-card">
+            <div class="transfer-header-row">
+              <div class="transfer-header-title">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" stroke-width="2.5"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                <span>MoE Live Transfer Pipeline (Top-K=8)</span>
+              </div>
+              <div class="transfer-status-badge ready" id="transferStatusBadge">
+                <span style="width:6px; height:6px; border-radius:50%; background:currentColor;"></span>
+                <span id="txtTransferBadge">ALL 8 CACHED IN VRAM</span>
+              </div>
+            </div>
+
+            <!-- 8 Compact Transfer Pills: RED (Transferring) ➔ GREEN (Arrived) -->
+            <div class="transfer-expert-slots-grid" id="transferSlotsGrid"></div>
+
+            <!-- Compact Live Route Feed -->
+            <div class="transfer-footer-stats">
+              <span>DirectStorage io_uring: <strong style="color:#FFF;">Active (20 Workers)</strong></span>
+              <span>Transfer Latency: <strong style="color:var(--accent-emerald);" id="txtMaxLatency">0.02ms (L1 Hit)</strong></span>
+            </div>
+          </div>
+
+        </section>
+
+      </main>
+
+    </div>
+
+  </div>
+
+  <!-- Floating Holographic Tooltip -->
+  <div id="matrixTooltip">
+    <div class="hud-title">
+      <span id="ttId">Expert #000</span>
+      <span id="ttTierBadge" style="font-size: 9px; color: var(--accent-cyan); background: rgba(6,182,212,0.15); padding: 1px 5px; border-radius: 3px;">VRAM L1</span>
+    </div>
+    <div class="hud-row">
+      <span>Layer:</span>
+      <span id="ttLayer" style="color: #FFF; font-weight:700;">Layer 13 (Index 44)</span>
+    </div>
+    <div class="hud-row">
+      <span>Residency:</span>
+      <span id="ttLoc" style="color: #DDD6FE;">GPU VRAM Cache</span>
+    </div>
+    <div class="hud-row">
+      <span>Softmax Weight:</span>
+      <span id="ttWeight" style="color: #A5F3FC;">0.40 (Top-1)</span>
+    </div>
+    <div class="hud-row">
+      <span>Transfer Status:</span>
+      <span id="ttTransfer" style="color: var(--accent-emerald);">✓ Resident in VRAM (0.02ms)</span>
+    </div>
+  </div>
+
+  <!-- ─── SCRIPT ─── -->
+  <script>
+    const TOTAL_LAYERS = 41;
+    const EXPERTS_PER_LAYER = 256;
+    const K_ACTIVE = 8;
+    const EXPERT_SIZE_BYTES = 1900544; // 1.822 MiB
+
+    let currentLayer = 13;
+    let isLiveActive = true;
+    let liveStepTimer = null;
+    let transferAnimationTimer = null;
+
+    let vramCacheMiB = 2816;
+    let ramCacheMiB = 8192;
+    let gdsThreads = 20;
+    let ctxTokens = 65536;
+
+    let vramSlotsPerLayer = Math.floor((vramCacheMiB * 1024 * 1024) / EXPERT_SIZE_BYTES / TOTAL_LAYERS);
+    let ramSlotsPerLayer = Math.floor((ramCacheMiB * 1024 * 1024) / EXPERT_SIZE_BYTES / TOTAL_LAYERS);
+    vramSlotsPerLayer = Math.min(vramSlotsPerLayer, 200);
+    ramSlotsPerLayer = Math.min(ramSlotsPerLayer, EXPERTS_PER_LAYER - vramSlotsPerLayer);
+
+    // Active Top-K State with transfer state (transferring: bool)
+    let activeTopK = [
+      { id: 44, weight: 0.402, tier: 'vram', latency: '0.02ms', name: 'VRAM Resident', transferring: false },
+      { id: 39, weight: 0.351, tier: 'vram', latency: '0.02ms', name: 'VRAM Resident', transferring: false },
+      { id: 17, weight: 0.300, tier: 'vram', latency: '0.02ms', name: 'VRAM Resident', transferring: false },
+      { id: 50, weight: 0.253, tier: 'vram', latency: '0.02ms', name: 'VRAM Resident', transferring: false },
+      { id: 138, weight: 0.164, tier: 'ram', latency: '0.35ms', name: 'RAM ➔ VRAM DMA', transferring: false },
+      { id: 104, weight: 0.122, tier: 'ram', latency: '0.35ms', name: 'RAM ➔ VRAM DMA', transferring: false },
+      { id: 203, weight: 0.085, tier: 'ssd', latency: '0.64ms', name: 'SSD ➔ VRAM GDS', transferring: false },
+      { id: 241, weight: 0.051, tier: 'ssd', latency: '0.68ms', name: 'SSD ➔ VRAM GDS', transferring: false }
+    ];
+
+    // Sparkline Waveform
+    const sparkHistory = [38, 41, 39, 43, 42, 44, 42.8, 43.1, 41.9, 43.5, 42.8, 44.0, 43.2, 42.8];
+    const sparkCanvas = document.getElementById('sparklineDecode');
+    const sparkCtx = sparkCanvas ? sparkCanvas.getContext('2d') : null;
+
+    function renderSparkline() {
+      if (!sparkCanvas || !sparkCtx) return;
+      const w = sparkCanvas.width = sparkCanvas.parentElement.clientWidth;
+      const h = sparkCanvas.height = sparkCanvas.parentElement.clientHeight;
+      sparkCtx.clearRect(0, 0, w, h);
+
+      const min = 35;
+      const max = 48;
+      const step = w / (sparkHistory.length - 1);
+
+      sparkCtx.beginPath();
+      sparkHistory.forEach((val, i) => {
+        const x = i * step;
+        const y = h - ((val - min) / (max - min)) * (h - 6) - 3;
+        if (i === 0) sparkCtx.moveTo(x, y);
+        else sparkCtx.lineTo(x, y);
+      });
+      sparkCtx.strokeStyle = '#8B5CF6';
+      sparkCtx.lineWidth = 2;
+      sparkCtx.shadowColor = '#8B5CF6';
+      sparkCtx.shadowBlur = 8;
+      sparkCtx.stroke();
+
+      sparkCtx.lineTo(w, h);
+      sparkCtx.lineTo(0, h);
+      sparkCtx.closePath();
+      const grad = sparkCtx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, 'rgba(139, 92, 246, 0.3)');
+      grad.addColorStop(1, 'rgba(139, 92, 246, 0.0)');
+      sparkCtx.fillStyle = grad;
+      sparkCtx.fill();
+    }
+
+    // VU Multicore
+    function initVuSpectrum() {
+      const container = document.getElementById('vuThreads');
+      if (!container) return;
+      container.innerHTML = '';
+      for (let i = 0; i < 24; i++) {
+        const bar = document.createElement('div');
+        bar.className = 'vu-bar' + (Math.random() > 0.4 ? ' hot' : '');
+        const heightPct = Math.floor(Math.random() * 75) + 20;
+        bar.style.height = `${heightPct}%`;
+        container.appendChild(bar);
+      }
+    }
+
+    // QD Matrix
+    function initQdMatrix() {
+      const container = document.getElementById('qdMatrixSlots');
+      if (!container) return;
+      container.innerHTML = '';
+      for (let i = 0; i < 32; i++) {
+        const slot = document.createElement('div');
+        slot.className = 'qd-slot' + (i < 20 ? ' busy' : '');
+        container.appendChild(slot);
+      }
+    }
+
+    // Vertical Matrix Canvas Rendering
+    const matrixCanvas = document.getElementById('layerMatrixCanvas');
+    const mCtx = matrixCanvas ? matrixCanvas.getContext('2d') : null;
+    const tooltip = document.getElementById('matrixTooltip');
+
+    function drawCurvedCell(ctx, x, y, w, h, r, fill, stroke = null, strokeW = 1, shadowColor = null, shadowBlur = 0) {
+      ctx.beginPath();
+      if (ctx.roundRect) {
+        ctx.roundRect(x, y, w, h, r);
+      } else {
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+      }
+      ctx.closePath();
+
+      if (shadowColor && shadowBlur > 0) {
+        ctx.shadowColor = shadowColor;
+        ctx.shadowBlur = shadowBlur;
+      } else {
+        ctx.shadowBlur = 0;
+      }
+
+      if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fill();
+      }
+      if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = strokeW;
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+    }
+
+    function renderMatrix() {
+      if (!matrixCanvas || !mCtx) return;
+      const w = matrixCanvas.width = matrixCanvas.parentElement.clientWidth;
+      const h = matrixCanvas.height = matrixCanvas.parentElement.clientHeight;
+      mCtx.clearRect(0, 0, w, h);
+
+      const cols = 16;
+      const rows = 16;
+      const gap = 2.5;
+      const cellW = (w - (cols - 1) * gap - 12) / cols;
+      const cellH = (h - (rows - 1) * gap - 12) / rows;
+      const startX = 6;
+      const startY = 6;
+      const radius = Math.min(3.5, Math.max(2, cellH * 0.28));
+
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const idx = r * cols + c;
+          const x = startX + c * (cellW + gap);
+          const y = startY + r * (cellH + gap);
+
+          const activeItem = activeTopK.find(a => a.id === idx);
+          const isVram = idx < vramSlotsPerLayer;
+          const isRam = !isVram && (idx < vramSlotsPerLayer + ramSlotsPerLayer);
+
+          if (activeItem) {
+            if (activeItem.transferring) {
+              // Red during live transfer with curved corners!
+              drawCurvedCell(mCtx, x, y, cellW, cellH, radius, '#EF4444', '#FFFFFF', 1.2, '#EF4444', 12);
+            } else {
+              // Neon Cyan Active Core with curved corners!
+              drawCurvedCell(mCtx, x, y, cellW, cellH, radius, '#06B6D4', '#FFFFFF', 1.2, '#06B6D4', 10);
+            }
+          } else if (isVram) {
+            // Violet L1 with curvy corners
+            drawCurvedCell(mCtx, x, y, cellW, cellH, radius, '#7C3AED', null, 0, 'rgba(124, 58, 237, 0.35)', 3);
+          } else if (isRam) {
+            // Amber L2 with curvy corners
+            drawCurvedCell(mCtx, x, y, cellW, cellH, radius, '#D97706');
+          } else {
+            // Dormant NVMe with curvy corners
+            drawCurvedCell(mCtx, x, y, cellW, cellH, radius, '#1E293B', 'rgba(255, 255, 255, 0.06)', 0.6);
+          }
+        }
+      }
+
+      const vramCount = vramSlotsPerLayer;
+      const ramCount = ramSlotsPerLayer;
+      const ssdCount = EXPERTS_PER_LAYER - vramCount - ramCount;
+
+      document.getElementById('legActiveCount').textContent = `Active (${K_ACTIVE})`;
+      document.getElementById('legVramCount').textContent = `VRAM Cache (${vramCount})`;
+      document.getElementById('legRamCount').textContent = `Pinned RAM (${ramCount})`;
+      document.getElementById('legSsdCount').textContent = `NVMe Dormant (${ssdCount})`;
+    }
+
+    // Render Compact Live Transfer Grid (Red = In Flight, Green = Arrived!)
+    function renderTransferSlots() {
+      const grid = document.getElementById('transferSlotsGrid');
+      if (!grid) return;
+      grid.innerHTML = '';
+
+      let anyTransferring = false;
+      let maxLat = '0.02ms (L1 Hit)';
+
+      activeTopK.forEach((item, i) => {
+        const pill = document.createElement('div');
+        const isTransfer = item.transferring;
+        if (isTransfer) anyTransferring = true;
+
+        pill.className = `transfer-slot-pill ${isTransfer ? 'transferring' : 'arrived'}`;
+
+        let statusText = isTransfer ? 'IN FLIGHT' : 'ARRIVED';
+        let routeTag = item.tier === 'vram' ? 'L1 Resident' : (item.tier === 'ram' ? 'RAM ➔ VRAM' : 'SSD ➔ VRAM');
+
+        if (item.tier !== 'vram') {
+          maxLat = `${item.latency} (${item.tier === 'ram' ? 'RAM DMA' : 'NVMe GDS'})`;
+        }
+
+        pill.innerHTML = `
+          <div class="slot-pill-top">
+            <span class="slot-pill-id">E#${item.id}</span>
+            <span class="slot-pill-indicator"></span>
+          </div>
+          <div class="slot-pill-status-text">${isTransfer ? 'TRANSFERRING...' : `READY (${item.latency})`}</div>
+          <div style="font-size:8px; font-family:var(--font-mono); color:var(--txt-muted); white-space:nowrap; overflow:hidden;">${routeTag}</div>
+        `;
+        grid.appendChild(pill);
+      });
+
+      const badge = document.getElementById('transferStatusBadge');
+      const badgeText = document.getElementById('txtTransferBadge');
+      if (anyTransferring) {
+        badge.className = 'transfer-status-badge in-flight';
+        badgeText.textContent = 'DMA TRANSFERS IN FLIGHT';
+      } else {
+        badge.className = 'transfer-status-badge ready';
+        badgeText.textContent = 'ALL 8 CACHED IN VRAM';
+      }
+
+      document.getElementById('txtMaxLatency').textContent = maxLat;
+    }
+
+    // Trigger Dynamic Layer Step with Live Red ➔ Green Animation
+    function stepToLayer(l) {
+      currentLayer = (l + TOTAL_LAYERS) % TOTAL_LAYERS;
+      document.getElementById('lblCurLayer').textContent = `LAYER ${currentLayer.toString().padStart(2, '0')}`;
+      document.getElementById('txtLayerMatrixTitle').textContent = `Active MoE Expert Matrix (${currentLayer})`;
+
+      const ids = new Set();
+      while (ids.size < K_ACTIVE) {
+        const candidate = Math.floor(Math.random() * EXPERTS_PER_LAYER);
+        ids.add(candidate);
+      }
+      const sortedIds = Array.from(ids).sort((a, b) => a - b);
+      let weights = [0.40, 0.35, 0.30, 0.25, 0.16, 0.12, 0.08, 0.05];
+
+      activeTopK = sortedIds.map((id, idx) => {
+        let tier = 'ssd';
+        let latency = '0.64ms';
+        let name = 'SSD ➔ VRAM GDS';
+        let isTrans = true;
+
+        if (id < vramSlotsPerLayer) {
+          tier = 'vram';
+          latency = '0.02ms';
+          name = 'VRAM Resident';
+          isTrans = false;
+        } else if (id < vramSlotsPerLayer + ramSlotsPerLayer) {
+          tier = 'ram';
+          latency = '0.35ms';
+          name = 'RAM ➔ VRAM DMA';
+          isTrans = true;
+        }
+
+        return {
+          id: id,
+          weight: weights[idx],
+          tier: tier,
+          latency: latency,
+          name: name,
+          transferring: isTrans
+        };
+      });
+
+      renderMatrix();
+      renderTransferSlots();
+
+      clearTimeout(transferAnimationTimer);
+      transferAnimationTimer = setTimeout(() => {
+        activeTopK.forEach(item => {
+          item.transferring = false;
+        });
+        renderMatrix();
+        renderTransferSlots();
+      }, 350);
+    }
+
+    // Dynamic Tuner Handlers
+    function updateTunerCalculations() {
+      vramCacheMiB = parseInt(document.getElementById('sliderVram').value);
+      ramCacheMiB = parseInt(document.getElementById('sliderRam').value);
+      gdsThreads = parseInt(document.getElementById('sliderThreads').value);
+      ctxTokens = parseInt(document.getElementById('sliderCtx').value);
+
+      const totalVramSlots = Math.floor((vramCacheMiB * 1024 * 1024) / EXPERT_SIZE_BYTES);
+      const totalRamSlots = Math.floor((ramCacheMiB * 1024 * 1024) / EXPERT_SIZE_BYTES);
+
+      vramSlotsPerLayer = Math.min(Math.floor(totalVramSlots / TOTAL_LAYERS), 200);
+      ramSlotsPerLayer = Math.min(Math.floor(totalRamSlots / TOTAL_LAYERS), EXPERTS_PER_LAYER - vramSlotsPerLayer);
+
+      document.getElementById('valVramCacheTag').textContent = `${vramCacheMiB} MiB (~${totalVramSlots.toLocaleString()} Slots)`;
+      document.getElementById('valRamCacheTag').textContent = `${ramCacheMiB} MiB (~${totalRamSlots.toLocaleString()} Slots)`;
+      document.getElementById('valThreadsTag').textContent = `${gdsThreads} Async Threads`;
+      document.getElementById('valCtxTag').textContent = `${ctxTokens.toLocaleString()} Tokens`;
+
+      document.getElementById('kpiMoePool').textContent = `${vramCacheMiB} MiB`;
+      document.getElementById('kpiPinnedRam').textContent = `${ramCacheMiB} MiB`;
+      document.getElementById('kpiGdsThreads').textContent = `${gdsThreads} Workers`;
+
+      const totalAllocated = vramCacheMiB + ramCacheMiB + 6000;
+      const vramPct = ((vramCacheMiB / totalAllocated) * 100).toFixed(1);
+      const ramPct = ((ramCacheMiB / totalAllocated) * 100).toFixed(1);
+      const ssdPct = (100 - vramPct - ramPct).toFixed(1);
+
+      document.getElementById('barFootprintVram').style.width = `${vramPct}%`;
+      document.getElementById('barFootprintRam').style.width = `${ramPct}%`;
+      document.getElementById('barFootprintSsd').style.width = `${ssdPct}%`;
+
+      renderMatrix();
+    }
+
+    // Event Listeners
+    document.getElementById('sliderVram').addEventListener('input', updateTunerCalculations);
+    document.getElementById('sliderRam').addEventListener('input', updateTunerCalculations);
+    document.getElementById('sliderThreads').addEventListener('input', updateTunerCalculations);
+    document.getElementById('sliderCtx').addEventListener('input', updateTunerCalculations);
+
+    document.getElementById('btnPrevLayer').addEventListener('click', () => stepToLayer(currentLayer - 1));
+    document.getElementById('btnNextLayer').addEventListener('click', () => stepToLayer(currentLayer + 1));
+    document.getElementById('btnStepToken').addEventListener('click', () => stepToLayer(currentLayer + 1));
+
+    document.getElementById('btnToggleLive').addEventListener('click', function() {
+      isLiveActive = !isLiveActive;
+      this.classList.toggle('active-step', isLiveActive);
+      document.getElementById('txtToggleLive').textContent = isLiveActive ? 'Auto-Feed (60 FPS)' : 'Paused';
+      if (isLiveActive) {
+        startLiveTimer();
+      } else {
+        clearInterval(liveStepTimer);
+      }
+    });
+
+    document.getElementById('preLowVram').addEventListener('click', () => {
+      document.getElementById('sliderVram').value = 1024;
+      document.getElementById('sliderRam').value = 8192;
+      updateTunerCalculations();
+    });
+    document.getElementById('preBalanced').addEventListener('click', () => {
+      document.getElementById('sliderVram').value = 2816;
+      document.getElementById('sliderRam').value = 8192;
+      updateTunerCalculations();
+    });
+    document.getElementById('preSpeed').addEventListener('click', () => {
+      document.getElementById('sliderVram').value = 4096;
+      document.getElementById('sliderRam').value = 10240;
+      updateTunerCalculations();
+    });
+    document.getElementById('preDeepCtx').addEventListener('click', () => {
+      document.getElementById('sliderVram').value = 2048;
+      document.getElementById('sliderRam').value = 10240;
+      document.getElementById('sliderCtx').value = 65536;
+      updateTunerCalculations();
+    });
+
+    document.getElementById('btnApplyTuner').addEventListener('click', function() {
+      const origText = this.innerHTML;
+      this.innerHTML = `<span>✓ Applied!</span>`;
+      this.style.background = 'linear-gradient(135deg, #059669, #10B981)';
+      setTimeout(() => {
+        this.innerHTML = origText;
+        this.style.background = 'linear-gradient(135deg, #7C3AED, #4F46E5)';
+      }, 1500);
+    });
+
+    function startLiveTimer() {
+      clearInterval(liveStepTimer);
+      liveStepTimer = setInterval(() => {
+        if (!isLiveActive) return;
+        stepToLayer(currentLayer + 1);
+
+        const jitter = (Math.random() * 1.6 - 0.8);
+        const curSpeed = (42.8 + jitter).toFixed(1);
+        document.getElementById('valDecodeSpeed').innerHTML = `${curSpeed} <span class="unit">t/s decode</span>`;
+
+        // Live Telemetry Updates per-request
+        const l1Val = (84.0 + (Math.random() * 1.2 - 0.6)).toFixed(1);
+        const l2Val = (13.5 + (Math.random() * 0.8 - 0.4)).toFixed(1);
+        const ram2vram = Math.floor(4200 + (Math.random() * 40 - 20));
+        const draftAcc = (78.2 + (Math.random() * 1.0 - 0.5)).toFixed(1);
+
+        const elL1 = document.getElementById('valL1Hit');
+        if (elL1) elL1.innerHTML = `${l1Val}% <span class="tier-stack-sub">(0.02ms latency)</span>`;
+
+        const elL2 = document.getElementById('valL2Hit');
+        if (elL2) elL2.innerHTML = `${l2Val}% <span class="tier-stack-sub">(0.35ms DMA)</span>`;
+
+        const elRam2Vram = document.getElementById('hudRam2Vram');
+        if (elRam2Vram) elRam2Vram.textContent = `${ram2vram.toLocaleString()} MB/s`;
+
+        const elDraft = document.getElementById('valDraftAcc');
+        if (elDraft) elDraft.textContent = `${draftAcc}%`;
+
+        // Decode calls step forward
+        curDecCalls = (window.curDecCalls || 1842) + 1;
+        window.curDecCalls = curDecCalls;
+        const elDec = document.getElementById('valTotalDecCalls');
+        if (elDec) elDec.innerHTML = `${curDecCalls.toLocaleString()} <span class="unit">tok</span>`;
+        const elVerified = document.getElementById('hudVerified');
+        if (elVerified) elVerified.textContent = `${Math.floor(curDecCalls * 0.784).toLocaleString()} / ${curDecCalls.toLocaleString()} Tokens`;
+        const elDecCadenceBadge = document.getElementById('hudDecodeCadenceBadge');
+        if (elDecCadenceBadge) elDecCadenceBadge.textContent = `${curSpeed} t/s`;
+
+        sparkHistory.shift();
+        sparkHistory.push(parseFloat(curSpeed));
+        renderSparkline();
+
+        const vuBars = document.querySelectorAll('.vu-bar');
+        vuBars.forEach(b => {
+          if (Math.random() > 0.6) {
+            const h = Math.floor(Math.random() * 75) + 20;
+            b.style.height = `${h}%`;
+            b.classList.toggle('hot', h > 50);
+          }
+        });
+      }, 1000);
+    }
+
+    // Hover Tooltip on Matrix
+    matrixCanvas.addEventListener('mousemove', (e) => {
+      const rect = matrixCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      const cols = 16;
+      const rows = 16;
+      const gap = 2.5;
+      const cellW = (rect.width - (cols - 1) * gap - 12) / cols;
+      const cellH = (rect.height - (rows - 1) * gap - 12) / rows;
+
+      const c = Math.floor((x - 6) / (cellW + gap));
+      const r = Math.floor((y - 6) / (cellH + gap));
+
+      if (c >= 0 && c < cols && r >= 0 && r < rows) {
+        const idx = r * cols + c;
+        const activeItem = activeTopK.find(a => a.id === idx);
+        const isVram = idx < vramSlotsPerLayer;
+        const isRam = !isVram && (idx < vramSlotsPerLayer + ramSlotsPerLayer);
+
+        tooltip.style.display = 'block';
+        tooltip.style.left = `${e.clientX + 14}px`;
+        tooltip.style.top = `${e.clientY + 14}px`;
+
+        document.getElementById('ttId').textContent = `Expert #${idx.toString().padStart(3, '0')}`;
+        document.getElementById('ttLayer').textContent = `Layer ${currentLayer} (Grid [${r}, ${c}])`;
+
+        if (activeItem) {
+          document.getElementById('ttTierBadge').textContent = 'ACTIVE ROUTER';
+          document.getElementById('ttTierBadge').style.color = '#06B6D4';
+          document.getElementById('ttTierBadge').style.background = 'rgba(6,182,212,0.2)';
+          document.getElementById('ttLoc').textContent = activeItem.tier.toUpperCase() + ' Tier';
+          document.getElementById('ttWeight').textContent = `${activeItem.weight.toFixed(2)} (Softmax Prob)`;
+          document.getElementById('ttTransfer').textContent = activeItem.transferring ? 'Transferring (In Flight)...' : `${activeItem.name} (${activeItem.latency})`;
+        } else if (isVram) {
+          document.getElementById('ttTierBadge').textContent = 'VRAM L1';
+          document.getElementById('ttTierBadge').style.color = '#C4B5FD';
+          document.getElementById('ttTierBadge').style.background = 'rgba(139,92,246,0.2)';
+          document.getElementById('ttLoc').textContent = 'GPU VRAM Silicon Cache';
+          document.getElementById('ttWeight').textContent = 'Inactive (w=0.00)';
+          document.getElementById('ttTransfer').textContent = 'Resident on Silicon (0.02ms)';
+        } else if (isRam) {
+          document.getElementById('ttTierBadge').textContent = 'HOST RAM';
+          document.getElementById('ttTierBadge').style.color = '#FDE68A';
+          document.getElementById('ttTierBadge').style.background = 'rgba(245,158,11,0.2)';
+          document.getElementById('ttLoc').textContent = 'Pinned Host DMA Buffer';
+          document.getElementById('ttWeight').textContent = 'Inactive (w=0.00)';
+          document.getElementById('ttTransfer').textContent = 'Ready for PCIe DMA (0.35ms)';
+        } else {
+          document.getElementById('ttTierBadge').textContent = 'NVME GDS';
+          document.getElementById('ttTierBadge').style.color = '#94A3B8';
+          document.getElementById('ttTierBadge').style.background = 'rgba(255,255,255,0.08)';
+          document.getElementById('ttLoc').textContent = 'DirectStorage NVMe Disk';
+          document.getElementById('ttWeight').textContent = 'Inactive (w=0.00)';
+          document.getElementById('ttTransfer').textContent = 'Dormant on Gen4 SSD (0.64ms)';
+        }
+      } else {
+        tooltip.style.display = 'none';
+      }
+    });
+
+    matrixCanvas.addEventListener('mouseleave', () => {
+      tooltip.style.display = 'none';
+    });
+
+    window.addEventListener('resize', () => {
+      renderSparkline();
+      renderMatrix();
+    });
+
+    initVuSpectrum();
+    initQdMatrix();
+    updateTunerCalculations();
+    renderSparkline();
+    renderTransferSlots();
+    startLiveTimer();
+  </script>
+
+</body>
+</html>

@@ -407,6 +407,27 @@ static bool llama_dstorage_mtp_decode_phase_enabled() {
            std::strcmp(value, "FALSE") != 0;
 }
 
+static bool llama_dstorage_evict_to_ram_enabled() {
+    const char * value = std::getenv("LLAMA_DSTORAGE_EVICT_TO_RAM");
+    return value != nullptr &&
+           std::strcmp(value, "") != 0 &&
+           std::strcmp(value, "0") != 0 &&
+           std::strcmp(value, "false") != 0 &&
+           std::strcmp(value, "FALSE") != 0;
+}
+
+static uint32_t llama_dstorage_evict_to_ram_min_decode_hits() {
+    static const uint32_t value = [] {
+        const char * env = std::getenv("LLAMA_DSTORAGE_EVICT_TO_RAM_MIN_DECODE_HITS");
+        if (env == nullptr || env[0] == '\0') {
+            return 2u;
+        }
+        const int parsed = std::atoi(env);
+        return uint32_t(std::max(1, std::min(parsed, 1024)));
+    }();
+    return value;
+}
+
 static std::vector<int> llama_dstorage_parse_static_pinned_layers(int n_layers) {
     std::vector<int> layers;
     const char * env = std::getenv("LLAMA_MOE_PINNED_STATIC_LAYERS");
@@ -770,6 +791,20 @@ bool DStorageSlotManager::pinned_cache_enabled() const {
 
 bool DStorageSlotManager::static_pinned_entry(uint64_t expert_key) const {
     return static_pinned_experts_.find(expert_key) != static_pinned_experts_.end();
+}
+
+void DStorageSlotManager::pin_index_update(uint64_t expert_key) {
+    auto it = pinned_cache_.find(expert_key);
+    if (it == pinned_cache_.end()) {
+        return;
+    }
+    if (!static_pinned_entry(expert_key)) {
+        pinned_lru_index_.erase({ it->second.last_used_tick, expert_key });
+    }
+    it->second.last_used_tick = ++pinned_tick_;
+    if (!static_pinned_entry(expert_key)) {
+        pinned_lru_index_.insert({ it->second.last_used_tick, expert_key });
+    }
 }
 
 void DStorageSlotManager::set_speculative_prefetch_enabled(bool enabled) {
@@ -1159,7 +1194,11 @@ void DStorageSlotManager::collect_pinned_admissions(bool wait_all) {
                 } else {
                     diagnostic_stats_.pinned_admit_fallback_ram++;
                 }
+                const uint64_t admit_tick = result.entry.last_used_tick;
                 pinned_cache_[result.expert_key] = std::move(result.entry);
+                if (!static_pinned_entry(result.expert_key)) {
+                    pinned_lru_index_.insert({ admit_tick, result.expert_key });
+                }
                 LLAMA_DSTORAGE_DEBUG_LOG(
                         "DStorage DEBUG pinned:async_complete key=0x%" PRIx64 " slot=%d entries=%zu used_mib=%.2f\n",
                         result.expert_key, result.slot_idx, pinned_cache_.size(),
@@ -1201,6 +1240,11 @@ void DStorageSlotManager::destroy_pinned_cache() {
     }
 #endif
     pinned_cache_.clear();
+    pinned_lru_index_.clear();
+    for (auto & fb : pinned_buf_freelist_) {
+        ds_loader_host_free(fb.second.first, fb.second.second);
+    }
+    pinned_buf_freelist_.clear();
     pinned_frequency_.clear();
     static_pinned_experts_.clear();
     static_pinned_expert_selection_.clear();
@@ -1244,6 +1288,167 @@ void DStorageSlotManager::release_prefill_only_pinned_cache() {
             released_entries,
             released_bytes / 1024.0 / 1024.0,
             uint64_t(std::max<int64_t>(0, llama_dstorage_now_us() - t0)));
+}
+
+// ---------------------------------------------------------------------------
+// evict -> RAM (L2) cache
+//
+// When a VRAM slot is evicted, copy the expert VRAM->host into the pinned
+// RAM cache instead of discarding it. A later decode miss can then be served
+// from RAM (fast host->device copy) rather than re-reading the expert from
+// the SSD. Only "warm" experts (decode_hits >= threshold) are promoted, and
+// the copy is skipped when the expert is already resident in the pinned cache.
+// ---------------------------------------------------------------------------
+bool DStorageSlotManager::cache_evicted_expert_to_ram(int slot_idx) {
+    if (!llama_dstorage_evict_to_ram_enabled() || !pinned_cache_enabled()) {
+        return false;
+    }
+    if (slot_idx < 0 || slot_idx >= int(slots_.size()) || !slots_[slot_idx].occupied) {
+        return false;
+    }
+    const ExpertSlot & slot = slots_[slot_idx];
+    if (slot.decode_hits < llama_dstorage_evict_to_ram_min_decode_hits()) {
+        diagnostic_stats_.evict_to_ram_skipped_cold++;
+        return false;
+    }
+    const uint64_t expert_key = make_expert_key(slot.layer_idx, slot.expert_idx);
+    if (pinned_cache_.find(expert_key) != pinned_cache_.end() ||
+            pinned_admission_pending(expert_key)) {
+        diagnostic_stats_.evict_to_ram_skipped_already++;
+        return false;
+    }
+
+    const int layer_idx = slot.layer_idx;
+    const int eid = slot.expert_idx;
+    auto layer_it = layer_tensors_.find(layer_idx);
+    if (layer_it == layer_tensors_.end() || layer_it->second.empty()) {
+        return false;
+    }
+
+    // Build the host-side slices in the exact same layout as the pinned
+    // preload/admission path so the existing serve path can find them.
+    std::vector<PinnedSlice> slices;
+    std::vector<uint64_t> dst_offsets;
+    uint64_t entry_bytes = 0;
+    bool can_cache = true;
+    for (const std::string & tname : layer_it->second) {
+        const std::string tkey = make_tensor_key(layer_idx, tname.c_str());
+        auto reg_it = tensor_registry_.find(tkey);
+        if (reg_it == tensor_registry_.end()) {
+            can_cache = false;
+            break;
+        }
+        const ExpertTensorInfo & info = reg_it->second;
+        if (info.total_size_compressed > 0 || info.expert_stride == 0 || eid >= info.n_experts) {
+            can_cache = false;
+            break;
+        }
+        const std::string pool_key = pool_key_for_layer(layer_idx, tname);
+        auto pool_it = type_pools_.find(pool_key);
+        if (pool_it == type_pools_.end() || pool_it->second.slot_size == 0) {
+            can_cache = false;
+            break;
+        }
+        slices.push_back({ tname, entry_bytes, info.expert_stride });
+        dst_offsets.push_back(entry_bytes);
+        entry_bytes += info.expert_stride;
+    }
+    if (!can_cache || entry_bytes == 0 || entry_bytes > pinned_budget_bytes_) {
+        diagnostic_stats_.evict_to_ram_skipped_budget++;
+        return false;
+    }
+
+    // LRU-evict pinned entries until the new entry fits.
+    while (pinned_used_bytes_ + entry_bytes > pinned_budget_bytes_ && !pinned_lru_index_.empty()) {
+        auto idx_it = pinned_lru_index_.begin();
+        const uint64_t victim_key = idx_it->second;
+        auto victim = pinned_cache_.find(victim_key);
+        if (victim == pinned_cache_.end()) {
+            pinned_lru_index_.erase(idx_it);
+            diagnostic_stats_.evict_to_ram_skipped_budget++;
+            return false;
+        }
+        if (victim->second.host_ptr != nullptr) {
+            if (victim->second.is_pinned) {
+                pinned_buf_freelist_.push_back({ victim->second.bytes,
+                        { victim->second.host_ptr, 1 } });
+            } else {
+                ds_loader_host_free(victim->second.host_ptr, 0);
+            }
+        }
+        pinned_used_bytes_ -= victim->second.bytes;
+        pinned_lru_index_.erase(idx_it);
+        pinned_cache_.erase(victim);
+    }
+    if (pinned_used_bytes_ + entry_bytes > pinned_budget_bytes_) {
+        diagnostic_stats_.evict_to_ram_skipped_budget++;
+        return false;
+    }
+
+    int is_pinned = 0;
+    void * host_ptr = nullptr;
+    for (auto fit = pinned_buf_freelist_.begin(); fit != pinned_buf_freelist_.end(); ++fit) {
+        if (fit->first >= entry_bytes && fit->second.second != 0) {
+            host_ptr = fit->second.first;
+            is_pinned = fit->second.second;
+            pinned_buf_freelist_.erase(fit);
+            break;
+        }
+    }
+    if (host_ptr == nullptr) {
+        host_ptr = ds_loader_host_alloc(entry_bytes, &is_pinned);
+        if (host_ptr == nullptr) {
+            diagnostic_stats_.evict_to_ram_skipped_failed++;
+            return false;
+        }
+    }
+
+    const int64_t t0 = llama_dstorage_now_us();
+    std::vector<DSLoaderCudaToHostRequest> requests;
+    requests.reserve(dst_offsets.size());
+    for (size_t i = 0; i < slices.size(); ++i) {
+        const std::string pool_key = pool_key_for_layer(layer_idx, slices[i].tensor_name);
+        auto pool_it = type_pools_.find(pool_key);
+        if (pool_it == type_pools_.end() || pool_it->second.slot_size == 0) {
+            ds_loader_host_free(host_ptr, is_pinned);
+            diagnostic_stats_.evict_to_ram_skipped_failed++;
+            return false;
+        }
+        const uint64_t src_cuda = pool_it->second.cuda_ptr +
+                uint64_t(slot.pool_index) * pool_it->second.slot_size;
+        requests.push_back({ src_cuda,
+                reinterpret_cast<char *>(host_ptr) + dst_offsets[i],
+                slices[i].size });
+    }
+    const int copy_result = ds_loader_cuda_to_host_batch(ds_loader_, requests.data(), int(requests.size()));
+    const uint64_t copy_us = uint64_t(std::max<int64_t>(0, llama_dstorage_now_us() - t0));
+    if (copy_result != 0) {
+        ds_loader_host_free(host_ptr, is_pinned);
+        diagnostic_stats_.evict_to_ram_skipped_failed++;
+        return false;
+    }
+
+    PinnedEntry entry;
+    entry.layer_idx = layer_idx;
+    entry.expert_idx = eid;
+    entry.host_ptr = host_ptr;
+    entry.bytes = entry_bytes;
+    entry.is_pinned = is_pinned != 0;
+    entry.last_used_tick = ++pinned_tick_;
+    entry.slices = std::move(slices);
+    const uint64_t evict_ram_tick = entry.last_used_tick;
+    pinned_cache_[expert_key] = std::move(entry);
+    pinned_lru_index_.insert({ evict_ram_tick, expert_key });
+    pinned_used_bytes_ += entry_bytes;
+
+    diagnostic_stats_.evict_to_ram_attempted++;
+    diagnostic_stats_.evict_to_ram_completed++;
+    diagnostic_stats_.evict_to_ram_bytes += entry_bytes;
+    diagnostic_stats_.evict_to_ram_us += copy_us;
+    LLAMA_DSTORAGE_DEBUG_LOG(
+            "DStorage DEBUG evict_to_ram: cached (L%d,E%d) bytes_mib=%.2f copy_us=%" PRIu64 "\n",
+            layer_idx, eid, entry_bytes / 1024.0 / 1024.0, copy_us);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1384,6 +1589,30 @@ bool DStorageSlotManager::ensure_pools_allocated() {
     if (pools_allocated_) {
         llama_dstorage_trace_us("slots.ensure_pools", -1, "already_allocated", t_total0, llama_dstorage_now_us());
         return true;
+    }
+
+    // Allocation can fail part-way through a multi-tensor pool setup.  Keep
+    // retries deterministic by releasing every owned allocation from the
+    // incomplete attempt (fused pools expose several views but only one owns
+    // the allocation).
+    auto reset_incomplete_pools = [&]() {
+#if LLAMA_DSTORAGE_HAS_BACKEND
+        for (auto & [key, pool] : type_pools_) {
+            GGML_UNUSED(key);
+            if (pool.alloc_ptr != 0 && pool.owns_alloc) {
+                ds_loader_cuda_free(pool.alloc_ptr);
+            }
+        }
+#endif
+        type_pools_.clear();
+        slots_.clear();
+        pool_group_slot_counts_.clear();
+        layer_pool_groups_.clear();
+        n_slots_ = 0;
+        pools_allocated_ = false;
+    };
+    if (!type_pools_.empty()) {
+        reset_incomplete_pools();
     }
 
     LLAMA_DSTORAGE_DEBUG_LOG("DStorage DEBUG slots:ensure_pools enter type_count=%zu budget_mib=%.2f\n",
@@ -1567,13 +1796,45 @@ bool DStorageSlotManager::ensure_pools_allocated() {
         const char * large_slots_env = std::getenv("LLAMA_DSTORAGE_LARGE_DOWN_SLOTS");
         int large_slots = large_slots_env != nullptr ? std::atoi(large_slots_env) : 0;
         if (large_slots <= 0) {
-            const char * spec_env = std::getenv("LLAMA_DSTORAGE_SPECULATIVE_SLOTS");
-            const int speculative_reserve = spec_env != nullptr && spec_env[0] != '\0'
-                    ? calculate_speculative_slot_count(n_slots_, n_expert_used_)
-                    : std::min(n_slots_ / 4, std::max(32, n_expert_used_ * 8));
-            large_slots = std::max(
-                    max_prefill_workspace_experts() + speculative_reserve,
-                    (n_slots_ + 7) / 8);
+            // Size pool groups proportionally to how many layers each serves.
+            // The old fixed heuristic (max_prefill + (n_slots+7)/8) assumed the
+            // large-stride down group is a small minority of layers; on models
+            // with a 50/50 mixed-stride split (e.g. KAT-Coder: 20 Q6_K + 20
+            // Q4_K down layers) it starved the large group -> "no available
+            // slot" errors during decode. Allocate by layer count instead.
+            std::vector<int> group_layer_counts(n_pool_groups, 0);
+            for (const auto & [layer, group] : layer_pool_groups_) {
+                if (group >= 0 && group < n_pool_groups) {
+                    group_layer_counts[group]++;
+                }
+            }
+            int total_group_layers = 0;
+            for (int count : group_layer_counts) {
+                total_group_layers += count;
+            }
+            if (total_group_layers < n_layers_) {
+                group_layer_counts[0] += n_layers_ - total_group_layers;
+                total_group_layers = n_layers_;
+            }
+            if (total_group_layers > 0 && group_layer_counts[1] > 0) {
+                large_slots = std::max(1, int(
+                        (int64_t(n_slots_) * group_layer_counts[1]) / total_group_layers));
+            }
+            // Both stride groups can execute MoE layers.  Reserving nearly the
+            // entire cache for the large-stride group left the other group with
+            // one slot on mixed-stride Gemma models, so even warmup could not
+            // place its selected experts.  Give each group a bounded working
+            // set, then distribute the remaining slots proportionally.
+            const int workspace_floor = std::min(
+                    max_prefill_workspace_experts(),
+                    std::max(32, n_expert_used_ * 4));
+            if (n_slots_ >= workspace_floor * 2) {
+                large_slots = std::max(workspace_floor,
+                        std::min(n_slots_ - workspace_floor, large_slots));
+            } else {
+                large_slots = std::max(1,
+                        std::min(n_slots_ - 1, large_slots));
+            }
         }
         large_slots = std::max(1, std::min(n_slots_ - 1, large_slots));
         pool_group_slot_counts_[1] = large_slots;
@@ -1623,6 +1884,7 @@ bool DStorageSlotManager::ensure_pools_allocated() {
             if (alloc_ptr == 0) {
                 LLAMA_LOG_ERROR("%s: failed to allocate fused CUDA VRAM pool for group %d (%.2f MiB)\n",
                         __func__, group, pool_size / 1024.0 / 1024.0);
+                reset_incomplete_pools();
                 return false;
             }
             const uint64_t pool_ptr = llama_dstorage_pool_visible_ptr(alloc_ptr);
@@ -1675,6 +1937,7 @@ bool DStorageSlotManager::ensure_pools_allocated() {
                         group, type_key.c_str(), pool_size / 1024.0 / 1024.0);
                 LLAMA_LOG_ERROR("%s: failed to allocate CUDA VRAM pool for group %d type '%s' (%.2f MiB)\n",
                         __func__, group, type_key.c_str(), pool_size / 1024.0 / 1024.0);
+                reset_incomplete_pools();
                 return false;
             }
             const uint64_t pool_ptr = llama_dstorage_pool_visible_ptr(alloc_ptr);
@@ -3729,7 +3992,7 @@ bool DStorageSlotManager::ensure_experts_loaded(
             if (is_pinned_hit) {
                 // A pinned hit is only an L2 hit. It still needs a VRAM slot
                 // and a host->device copy before MUL_MAT_ID can consume it.
-                pinned_cache_[expert_key].last_used_tick = ++pinned_tick_;
+                pin_index_update(expert_key);
             }
         }
         if (llama_dstorage_decode_hot_cache_enabled() &&
@@ -3977,6 +4240,9 @@ bool DStorageSlotManager::ensure_experts_loaded(
                     target_slot, slots_[target_slot].layer_idx, slots_[target_slot].expert_idx,
                     slots_[target_slot].decode_hits, slots_[target_slot].prefill_hits,
                     slots_[target_slot].last_used_tick);
+            if (phase != dstorage_moe_phase::prefetch) {
+                cache_evicted_expert_to_ram(target_slot);
+            }
         }
 
         slots_[target_slot].layer_idx  = -1;
@@ -3992,7 +4258,7 @@ bool DStorageSlotManager::ensure_experts_loaded(
 
         const bool pinned_hit = pinned_cache_enabled() && pinned_cache_.find(expert_key) != pinned_cache_.end();
         if (pinned_hit) {
-            pinned_cache_[expert_key].last_used_tick = ++pinned_tick_;
+            pin_index_update(expert_key);
             pinned_to_load.push_back(eid);
         } else {
             cold_to_load.push_back(eid);
@@ -4684,7 +4950,10 @@ bool DStorageSlotManager::ensure_experts_loaded(
 #endif
 
 #if LLAMA_DSTORAGE_HAS_BACKEND
-    if (pinned_cache_enabled() && pinned_decode_like) {
+    // When evict->RAM is enabled, warm experts are promoted to the pinned cache
+    // on VRAM eviction (cheap D2H copy). The SSD-re-read admission below would
+    // only duplicate that work and steal SSD bandwidth, so skip it.
+    if (pinned_cache_enabled() && pinned_decode_like && !llama_dstorage_evict_to_ram_enabled()) {
         t0 = llama_dstorage_now_us();
         uint32_t queued = 0;
         uint32_t skipped = 0;
@@ -4824,6 +5093,7 @@ bool DStorageSlotManager::ensure_experts_loaded(
                     ds_loader_host_free(victim->second.host_ptr, victim->second.is_pinned ? 1 : 0);
                 }
                 pinned_used_bytes_ -= victim->second.bytes;
+                pinned_lru_index_.erase({ victim->second.last_used_tick, victim->first });
                 pinned_cache_.erase(victim);
             }
 
@@ -5753,7 +6023,14 @@ void DStorageSlotManager::destroy() {
                 " prefill_only_releases=%" PRIu64
                 " prefill_only_release_entries=%" PRIu64
                 " prefill_only_release_mib=%.2f"
-                " prefill_only_release_us=%" PRIu64 "\n",
+                " prefill_only_release_us=%" PRIu64
+                " evict_to_ram_attempted=%" PRIu64
+                " evict_to_ram_completed=%" PRIu64
+                " evict_to_ram_skipped_cold=%" PRIu64
+                " evict_to_ram_skipped_already=%" PRIu64
+                " evict_to_ram_skipped_budget=%" PRIu64
+                " evict_to_ram_skipped_failed=%" PRIu64
+                " evict_to_ram_mib=%.2f evict_to_ram_us=%" PRIu64 "\n",
                 pinned_budget_bytes_ / 1024.0 / 1024.0,
                 pinned_used_bytes_ / 1024.0 / 1024.0,
                 pinned_cache_.size(),
@@ -5772,7 +6049,15 @@ void DStorageSlotManager::destroy() {
                 diagnostic_stats_.pinned_prefill_only_releases,
                 diagnostic_stats_.pinned_prefill_only_release_entries,
                 diagnostic_stats_.pinned_prefill_only_release_bytes / 1024.0 / 1024.0,
-                diagnostic_stats_.pinned_prefill_only_release_us);
+                diagnostic_stats_.pinned_prefill_only_release_us,
+                diagnostic_stats_.evict_to_ram_attempted,
+                diagnostic_stats_.evict_to_ram_completed,
+                diagnostic_stats_.evict_to_ram_skipped_cold,
+                diagnostic_stats_.evict_to_ram_skipped_already,
+                diagnostic_stats_.evict_to_ram_skipped_budget,
+                diagnostic_stats_.evict_to_ram_skipped_failed,
+                diagnostic_stats_.evict_to_ram_bytes / 1024.0 / 1024.0,
+                diagnostic_stats_.evict_to_ram_us);
         const uint64_t decode_hot_total = decode_hot_stats_.hits + decode_hot_stats_.misses;
         std::fprintf(
                 stderr,
@@ -5975,6 +6260,35 @@ void DStorageSlotManager::destroy() {
 
 DStorageSlotManager::~DStorageSlotManager() {
     destroy();
+}
+
+DStorageSlotManager::TelemetrySnapshot DStorageSlotManager::telemetry_snapshot() {
+    std::lock_guard<std::mutex> slot_lock(slots_mutex_);
+
+    TelemetrySnapshot snapshot;
+    snapshot.active = n_slots_ > 0;
+    for (const ExpertSlot & slot : slots_) {
+        snapshot.l1_resident_experts += slot.occupied ? 1 : 0;
+    }
+    snapshot.l2_resident_experts = pinned_cache_.size();
+
+    snapshot.prefill_calls = prefill_stats_.calls;
+    snapshot.prefill_hits = prefill_stats_.hits;
+    snapshot.prefill_misses = prefill_stats_.misses;
+    snapshot.decode_calls = decode_stats_.calls;
+    snapshot.decode_hits = decode_stats_.hits;
+    snapshot.decode_misses = decode_stats_.misses;
+    snapshot.decode_cold_experts = decode_stats_.stream_cold_experts;
+    snapshot.decode_pinned_experts = decode_stats_.stream_pinned_experts;
+    snapshot.streamed_file_bytes =
+            prefill_stats_.stream_file_bytes + decode_stats_.stream_file_bytes;
+    snapshot.pinned_transfer_bytes =
+            prefill_stats_.stream_pinned_bytes + decode_stats_.stream_pinned_bytes;
+    snapshot.pinned_transfer_us =
+            prefill_stats_.stream_pinned_us + decode_stats_.stream_pinned_us;
+    snapshot.stream_total_us =
+            prefill_stats_.stream_total_us + decode_stats_.stream_total_us;
+    return snapshot;
 }
 
 const DStorageSlotManager::PinnedEntry * DStorageSlotManager::get_pinned_entry(int layer_idx, int expert_idx) {

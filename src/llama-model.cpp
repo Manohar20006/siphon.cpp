@@ -287,6 +287,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_qwen35moe(params);
         case LLM_ARCH_MISTRAL3:
             return new llama_model_mistral3(params);
+        case LLM_ARCH_DFLASH:
+            return new llama_model_dflash(params);
         case LLM_ARCH_MIMO2:
             return new llama_model_mimo2(params);
         case LLM_ARCH_KIMI_LINEAR:
@@ -1307,12 +1309,19 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // assign the output layer
     pimpl->dev_output = get_layer_buft_list(n_layer_all);
 
-    if (params.dstorage_moe) {
-        if (arch != LLM_ARCH_QWEN35MOE) {
-            throw std::runtime_error("--dstorage-moe currently supports only Qwen MoE models in milestone 1");
+if (params.dstorage_moe) {
+        // Capability is determined from the loaded MoE structure rather than
+        // an architecture-name allowlist. Architectures using the shared MoE
+        // graph and canonical expert tensors are streamed automatically; an
+        // incompatible topology fails during registration/warmup.
+        if (hparams.n_expert <= 0 || hparams.n_expert_used <= 0) {
+            throw std::runtime_error("--dstorage-moe requires a routed MoE model with valid expert_count and expert_used_count metadata");
         }
         if (devices.empty() || n_gpu_layers <= 0) {
             throw std::runtime_error("--dstorage-moe requires GPU offload");
+        }
+        if (n_gpu_layers < n_layer_all + 1) {
+            throw std::runtime_error("--dstorage-moe requires every repeating model layer to be GPU-routed; reduce context/cache memory instead of GPU_LAYERS");
         }
 
         pimpl->dstorage_slots = std::make_unique<DStorageSlotManager>();
@@ -2113,7 +2122,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         filter_recr = [&](uint32_t il) {
                             return hparams.is_recr(il) && hparams.n_ff(il) == 0;
                         };
-                    } else if (arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE) {
+                    } else if (arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_QWEN3NEXT) {
                         filter_attn = [&](uint32_t il) {
                             return il < hparams.n_layer() && !hparams.is_recr(il);
                         };
@@ -2248,7 +2257,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
     // TODO: move reranking logic here and generalize
     llm->build_dense_out(dense_2_out_layers, dense_2_out_layers_b, dense_3_out_layers);
 
-    llm->res->set_outputs();
+    llm->res->set_outputs(params);
 
     return llm->res->get_gf();
 }
@@ -2491,6 +2500,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_STEP35:
         case LLM_ARCH_TALKIE:
         case LLM_ARCH_MELLUM:
+        case LLM_ARCH_DFLASH:
             return LLAMA_ROPE_TYPE_NEOX;
 
         case LLM_ARCH_QWEN2VL:
@@ -2614,8 +2624,18 @@ bool llama_model_has_encoder(const llama_model * model) {
     switch (model->arch) {
         case LLM_ARCH_T5:        return true;
         case LLM_ARCH_T5ENCODER: return true;
+        case LLM_ARCH_DFLASH:    return true;
         default:                 return false;
     }
+}
+
+const int32_t * llama_model_target_layer_ids(const llama_model * model) {
+    const auto & v = model->target_layer_ids;
+    return v.empty() ? nullptr : v.data();
+}
+
+uint32_t llama_model_target_layer_ids_n(const llama_model * model) {
+    return (uint32_t) model->target_layer_ids.size();
 }
 
 bool llama_model_has_decoder(const llama_model * model) {

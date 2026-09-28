@@ -185,6 +185,10 @@ struct llama_hparams {
     // for Classifiers
     uint32_t n_cls_out = 1;
 
+    // encoder input embedding dimension (0 = use n_embd_inp())
+    // e.g. the dflash encoder fuses target_layers * target_hidden features
+    uint32_t n_embd_inp_enc_impl = 0;
+
     // output embedding dimension (0 = use n_embd)
     uint32_t n_embd_out_impl = 0;
 
@@ -302,6 +306,9 @@ struct llama_hparams {
 
     // dimension of output embeddings
     uint32_t n_embd_out() const;
+
+    // dimension of the encoder input embeddings
+    uint32_t n_embd_inp_enc() const;
 
     // dimension of key/value embeddings for each head (per layer)
     uint32_t n_embd_head_k(uint32_t il = 0) const;

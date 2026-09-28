@@ -1,0 +1,225 @@
+/* siphon term v4 theme — translated from siphon-tui-v4.html.
+ * ink #0A0E14 · surface #0F1520 · line #1C2536
+ * txt #C5CBD6 · dim #5E6A7E · faint #3A4358
+ * indigo #7C83F5 · green #3FB950 · amber #D29922 · red #F85149
+ * Textual 8-safe: full `border:` declarations only, no letter-spacing /
+ * font-weight / :not(). Bare containers pin height:auto (they default 1fr).
+ */
+
+#body {
+    height: 1fr;
+}
+
+/* -- header strip ----------------------------------------------------- */
+#sysbar {
+    height: auto;
+    background: #0F1520;
+    border-bottom: solid #1C2536;
+    padding: 0 1;
+}
+
+.sys-block {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+}
+
+.sys-label {
+    color: #5E6A7E;
+    text-style: bold;
+}
+
+.sys-sub {
+    color: #5E6A7E;
+}
+
+.sys-hot {
+    color: #F85149;
+    text-style: bold;
+}
+
+.sys-warn {
+    color: #D29922;
+    text-style: bold;
+}
+
+.sys-spark {
+    height: 2;
+    color: #7C83F5;
+}
+
+/* -- main row ----------------------------------------------------------- */
+#main {
+    height: auto;
+    min-height: 12;
+}
+
+#table-panel {
+    width: 55%;
+    height: auto;
+    background: #0A0E14;
+    border-right: solid #1C2536;
+    padding: 0 1;
+}
+
+#detail-panel {
+    width: 45%;
+    height: auto;
+    padding: 0 1;
+}
+
+.panel-title {
+    color: #5E6A7E;
+    text-style: bold;
+    padding: 0 0 1 0;
+}
+
+#models-table {
+    height: auto;
+    max-height: 8;
+    background: #0A0E14;
+}
+
+#table-hint {
+    color: #3A4358;
+    padding-top: 1;
+}
+
+/* -- detail definition list + form --------------------------------------- */
+#detail-scroll {
+    height: 1fr;
+}
+
+.dl-label {
+    color: #5E6A7E;
+}
+
+.dl-value {
+    color: #C5CBD6;
+    text-style: bold;
+}
+
+.dl-value.ok {
+    color: #3FB950;
+}
+
+.dl-value.warn {
+    color: #D29922;
+}
+
+.dl-value.bad {
+    color: #F85149;
+}
+
+#detail-panel Input {
+    background: #070B14;
+    border: round #1C2536;
+    color: #C5CBD6;
+}
+
+#detail-panel Input:focus {
+    border: round #7C83F5;
+}
+
+#detail-panel Select {
+    background: #070B14;
+    border: round #1C2536;
+    color: #C5CBD6;
+}
+
+Collapsible {
+    background: #0A0E14;
+    border: round #1C2536;
+    margin-top: 1;
+    padding: 0 1;
+}
+
+Collapsible > CollapsibleTitle {
+    color: #5E6A7E;
+    text-style: bold;
+}
+
+#detail-foot {
+    height: auto;
+    padding-top: 1;
+}
+
+#btn-row {
+    height: auto;
+    width: auto;
+}
+
+#cfg-status {
+    color: #5E6A7E;
+    padding-top: 1;
+}
+
+/* -- metrics -------------------------------------------------------------- */
+#metrics-panel {
+    height: auto;
+    border-top: solid #1C2536;
+    padding: 0 1;
+}
+
+#metrics-row1,
+#metrics-row2 {
+    height: auto;
+}
+
+.tile {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+}
+
+.tile-label {
+    color: #5E6A7E;
+}
+
+.tile-value {
+    color: #C5CBD6;
+    text-style: bold;
+}
+
+.tile-sub {
+    color: #3A4358;
+}
+
+.tile-bar {
+    color: #7C83F5;
+}
+
+.tile-bar.ok {
+    color: #3FB950;
+}
+
+.tile-bar.warn {
+    color: #D29922;
+}
+
+.tile-bar.bad {
+    color: #F85149;
+}
+
+.tile-spark {
+    height: 2;
+    color: #7C83F5;
+}
+
+/* -- log ------------------------------------------------------------------- */
+#log-panel {
+    height: auto;
+    border-top: solid #1C2536;
+    padding: 0 1;
+}
+
+#log {
+    height: 5;
+    background: #0A0E14;
+    color: #5E6A7E;
+}
+
+#status-line {
+    color: #5E6A7E;
+    padding: 0 1;
+}

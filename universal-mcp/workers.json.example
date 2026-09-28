@@ -1,0 +1,43 @@
+{
+  "project_root": "${UNIVERSAL_MCP_PROJECT_ROOT}",
+  "storage_path": "${UNIVERSAL_MCP_STORAGE_PATH}",
+  "allowed_command_prefixes": [
+    ["python3"],
+    ["pytest"],
+    ["npm", "test"],
+    ["npm", "run"],
+    ["cargo", "test"],
+    ["go", "test"]
+  ],
+  "workers": [
+    {
+      "id": "antigravity-gemini",
+      "source": "antigravity",
+      "model": "gemini-3.8-flash",
+      "transport": "command",
+      "command": "python3 /absolute/path/to/antigravity_worker_adapter.py",
+      "timeout_seconds": 300,
+      "enabled": true
+    },
+    {
+      "id": "antigravity-claude",
+      "source": "antigravity",
+      "model": "claude",
+      "transport": "command",
+      "command": "python3 /absolute/path/to/antigravity_worker_adapter.py",
+      "timeout_seconds": 300,
+      "enabled": true
+    },
+    {
+      "id": "kaggle-qwen27b",
+      "source": "kaggle",
+      "model": "qwen-27b",
+      "transport": "openai_compatible",
+      "base_url": "${KAGGLE_QWEN_BASE_URL}",
+      "api_key_env": "KAGGLE_QWEN_API_KEY",
+      "api_key_header": "Authorization",
+      "timeout_seconds": 300,
+      "enabled": true
+    }
+  ]
+}

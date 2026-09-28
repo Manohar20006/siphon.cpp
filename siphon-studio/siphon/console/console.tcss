@@ -1,0 +1,344 @@
+/* siphon console v2 theme — translated from siphon-console.html.
+ * ink #0B0F19 · surface #11172A · panel #0E1423 · hairline #2B3553
+ * txt #E8ECF5 · dim #9AA3B8 · faint #6B7590
+ * indigo #6366F1 / hi #818CF8 · emerald #10B981 · amber #F59E0B · rose #F43F5E
+ * Textual 8-safe: no letter-spacing / font-weight / :not(); borders are full
+ * `border:` declarations only.
+ */
+
+#body {
+    height: 1fr;
+}
+
+/* -- sidebar -------------------------------------------------------- */
+#sidebar {
+    width: 28;
+    min-width: 28;
+    background: #0E1423;
+    border-right: solid #2B3553;
+    padding: 1 1;
+}
+
+#brand-name {
+    text-style: bold;
+    color: #E8ECF5;
+    padding: 0 1;
+}
+
+#brand-sub {
+    color: #6B7590;
+    padding: 0 1 1 1;
+}
+
+.nav-label {
+    color: #6B7590;
+    text-style: bold;
+    padding: 1 1 0 1;
+}
+
+#nav {
+    height: auto;
+    background: #0E1423;
+}
+
+#nav ListItem {
+    padding: 0 1;
+}
+
+#nav ListItem.--highlight {
+    background: #6366F1;
+}
+
+#env-card {
+    background: #11172A;
+    border: round #2B3553;
+    padding: 1;
+    margin-top: 1;
+}
+
+#env-card-title {
+    text-style: bold;
+    color: #E8ECF5;
+}
+
+.env-dim {
+    color: #9AA3B8;
+}
+
+/* -- main ------------------------------------------------------------ */
+#main {
+    padding: 1 2;
+}
+
+#topbar {
+    height: auto;
+    padding-bottom: 1;
+}
+
+#title-block {
+    width: 1fr;
+    min-width: 24;
+    height: auto;
+}
+
+#env-pill {
+    width: auto;
+}
+
+.field-3 {
+    height: auto;
+}
+
+.field-3 Vertical {
+    width: 1fr;
+    margin-right: 1;
+}
+
+#crumb {
+    color: #6B7590;
+}
+
+#page-title {
+    text-style: bold;
+    color: #E8ECF5;
+}
+
+#env-pill {
+    color: #9AA3B8;
+    background: #11172A;
+    border: round #2B3553;
+    padding: 0 2;
+    margin-left: 2;
+}
+
+#btn-row {
+    width: auto;
+    height: auto;
+    align: right middle;
+}
+
+/* -- KPI strip -------------------------------------------------------- */
+#kpis {
+    height: auto;
+    padding-bottom: 1;
+}
+
+.kpi-card {
+    width: 1fr;
+    height: auto;
+    background: #11172A;
+    border: round #2B3553;
+    padding: 1;
+    margin-right: 1;
+}
+
+.kpi-label {
+    color: #6B7590;
+    text-style: bold;
+}
+
+.kpi-delta {
+    color: #9AA3B8;
+}
+
+.kpi-delta.up {
+    color: #6EE7B7;
+}
+
+.kpi-delta.warn {
+    color: #FCD34D;
+}
+
+.kpi-delta.mut {
+    color: #6B7590;
+}
+
+.spark {
+    height: 3;
+    margin-top: 1;
+    color: #818CF8;
+}
+
+/* -- roster + config --------------------------------------------------- */
+#grid2 {
+    height: auto;
+    padding-bottom: 1;
+}
+
+.panel {
+    background: #11172A;
+    border: round #2B3553;
+    padding: 1;
+}
+
+#roster-panel {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+#config-panel {
+    width: 1fr;
+    height: auto;
+}
+
+.panel-head {
+    height: auto;
+}
+
+.panel-title {
+    text-style: bold;
+    color: #E8ECF5;
+}
+
+.panel-hint {
+    color: #6B7590;
+}
+
+#roster {
+    height: 12;
+    background: #11172A;
+}
+
+#roster ListItem.--highlight {
+    background: #6366F1;
+}
+
+.roster-fit {
+    color: #818CF8;
+}
+
+.roster-fit.tight {
+    color: #FCD34D;
+}
+
+.field-label {
+    color: #9AA3B8;
+    padding-top: 1;
+}
+
+#config-panel Input {
+    background: #070B14;
+    border: round #2B3553;
+    color: #E8ECF5;
+    margin-bottom: 0;
+}
+
+#config-panel Input:focus {
+    border: round #6366F1;
+}
+
+RadioSet {
+    background: #070B14;
+    border: round #2B3553;
+    padding: 0 1;
+}
+
+RadioButton {
+    color: #9AA3B8;
+}
+
+RadioButton.--highlight {
+    background: #6366F1;
+    color: #FFFFFF;
+}
+
+.status-grid {
+    height: auto;
+    padding-top: 1;
+}
+
+.srow {
+    width: 1fr;
+    height: auto;
+    background: #0E1423;
+    border: round #2B3553;
+    padding: 0 1;
+    margin-right: 1;
+}
+
+.srow-k {
+    color: #6B7590;
+    text-style: bold;
+}
+
+.srow-v {
+    color: #E8ECF5;
+    text-style: bold;
+}
+
+/* -- metric tiles ------------------------------------------------------- */
+#tiles {
+    height: auto;
+    padding-bottom: 1;
+}
+
+.tile {
+    width: 1fr;
+    height: auto;
+    background: #11172A;
+    border: round #2B3553;
+    padding: 1;
+    margin-right: 1;
+    margin-bottom: 1;
+}
+
+#tiles-row1,
+#tiles-row2 {
+    height: auto;
+}
+
+.tile-label {
+    color: #6B7590;
+    text-style: bold;
+}
+
+.tile-value {
+    color: #E8ECF5;
+    text-style: bold;
+}
+
+.tile-sub {
+    color: #9AA3B8;
+}
+
+.tile-bar {
+    color: #818CF8;
+    padding-top: 1;
+}
+
+.tile-bar.ok {
+    color: #34D399;
+}
+
+.tile-bar.warn {
+    color: #FCD34D;
+}
+
+.tile-bar.bad {
+    color: #F43F5E;
+}
+
+/* -- activity ------------------------------------------------------------ */
+#activity-panel {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#timeline {
+    height: auto;
+    max-height: 10;
+}
+
+#mono {
+    background: #070B14;
+    border: round #2B3553;
+    color: #9AA3B8;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+#status-line {
+    color: #9AA3B8;
+    padding: 0 1 1 1;
+}

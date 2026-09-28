@@ -80,6 +80,10 @@ llama_model_qwen3moe::graph::graph(const llama_model & model, const llm_graph_pa
     for (int il = 0; il < n_layer; ++il) {
         ggml_tensor * inpSA = inpL;
 
+        if (cparams.embeddings_layer_inp[il]) {
+            res->t_layer_inp[il] = inpL;
+        }
+
         // norm
         cur = build_norm(inpL,
                 model.layers[il].attn_norm, NULL,

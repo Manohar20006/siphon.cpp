@@ -1906,6 +1906,22 @@ json server_task_result_metrics::to_json() {
         { "n_decode_total",                  n_decode_total },
         { "n_busy_slots_total",              n_busy_slots_total },
 
+        { "dstorage_active",                 dstorage_active },
+        { "dstorage_l1_resident_experts",    dstorage_l1_resident_experts },
+        { "dstorage_l2_resident_experts",    dstorage_l2_resident_experts },
+        { "dstorage_prefill_calls",          dstorage_prefill_calls },
+        { "dstorage_prefill_hits",           dstorage_prefill_hits },
+        { "dstorage_prefill_misses",         dstorage_prefill_misses },
+        { "dstorage_decode_calls",           dstorage_decode_calls },
+        { "dstorage_decode_hits",            dstorage_decode_hits },
+        { "dstorage_decode_misses",          dstorage_decode_misses },
+        { "dstorage_decode_cold_experts",    dstorage_decode_cold_experts },
+        { "dstorage_decode_pinned_experts",  dstorage_decode_pinned_experts },
+        { "dstorage_streamed_file_bytes",    dstorage_streamed_file_bytes },
+        { "dstorage_pinned_transfer_bytes",  dstorage_pinned_transfer_bytes },
+        { "dstorage_pinned_transfer_us",     dstorage_pinned_transfer_us },
+        { "dstorage_stream_total_us",        dstorage_stream_total_us },
+
         { "slots",                           slots_data },
     };
 }

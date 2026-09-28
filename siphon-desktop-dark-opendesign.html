@@ -1,0 +1,1087 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Siphon Studio — Obsidian Console</title>
+<style>
+:root{
+  --bg:oklch(0.145 0.008 285);--surface:oklch(0.19 0.011 285);--surface-2:oklch(0.225 0.013 285);
+  --surface-3:oklch(0.265 0.014 285);--fg:oklch(0.93 0.008 285);--muted:oklch(0.65 0.014 285);
+  --dim:oklch(0.49 0.012 285);--border:oklch(0.31 0.014 285);--border-hi:oklch(0.39 0.016 285);
+  --accent:oklch(0.67 0.22 298);--accent-dim:oklch(0.34 0.11 298);--accent-ink:oklch(0.16 0.02 298);
+  --success:oklch(0.73 0.17 150);--danger:oklch(0.66 0.2 25);--warning:oklch(0.78 0.15 82);
+  --display:"Ubuntu Sans","Noto Sans",sans-serif;
+  --body:"Ubuntu Sans","Noto Sans",sans-serif;
+  --mono:"Ubuntu Mono","Noto Sans Mono","DejaVu Sans Mono",monospace;
+}
+*{box-sizing:border-box}html,body,#app{width:100%;height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--fg)}
+body{font-family:var(--body);font-size:14px;-webkit-font-smoothing:auto;-moz-osx-font-smoothing:auto;text-rendering:optimizeLegibility;font-variant-numeric:tabular-nums}
+button,select,input,textarea{font:inherit;color:inherit}button,select{min-height:36px}
+button:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button{border:1px solid var(--border-hi);background:var(--surface-2);cursor:pointer;transition:background .15s,border-color .15s,transform .15s}
+button:hover{background:var(--surface-3);border-color:var(--muted)}button:active{transform:translateY(1px)}
+.shell{height:100dvh;display:grid;grid-template-rows:52px minmax(0,1fr);background:var(--bg);border:1px solid var(--border)}
+.titlebar{display:grid;grid-template-columns:68px 1fr auto;align-items:center;border-bottom:1px solid var(--border);background:var(--surface);-webkit-app-region:drag}
+.mark{height:100%;display:grid;place-items:center;border-right:1px solid var(--border);font:600 18px/1 var(--display);letter-spacing:-.02em}
+.mark span{width:23px;height:23px;border:1px solid var(--border-hi);display:grid;place-items:center;position:relative}
+.mark span:after{content:"";position:absolute;width:7px;height:7px;background:var(--accent);right:-1px;bottom:-1px}
+.app-title{padding:0 18px;display:flex;align-items:center;gap:12px;font-weight:560;letter-spacing:-.01em}
+.sim-label{font:600 10px/1 var(--mono);letter-spacing:.08em;color:var(--muted);border-left:1px solid var(--border);padding-left:12px;text-transform:uppercase}
+.window-tools{display:flex;align-items:center;height:100%;-webkit-app-region:no-drag}.window-tool{width:48px;height:100%;min-height:0;border:0;border-left:1px solid var(--border);background:transparent;color:var(--muted)}
+.window-tool:hover{background:var(--surface-3);color:var(--fg)}
+.workspace{min-height:0;display:grid;grid-template-columns:68px minmax(0,1fr)}
+.rail{border-right:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;align-items:center;padding:10px 0 8px;gap:8px}
+.rail button{width:48px;height:48px;min-height:48px;border:1px solid transparent;background:transparent;display:grid;place-items:center;color:var(--muted);position:relative}
+.rail button:hover{color:var(--fg);border-color:var(--border)}.rail button.active{color:var(--fg);background:var(--surface-3);border-color:var(--border-hi)}
+.rail button.active:before{content:"";position:absolute;left:-11px;top:10px;bottom:10px;width:3px;background:var(--accent)}
+.rail svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6}.rail .spacer{flex:1}.rail .avatar{font:600 11px var(--mono);border-color:var(--border);color:var(--fg)}
+.content{min-width:0;min-height:0;display:grid;grid-template-rows:58px minmax(0,1fr)}
+.toolbar{display:grid;grid-template-columns:minmax(260px,420px) 1fr auto;align-items:center;gap:18px;padding:0 18px;border-bottom:1px solid var(--border);background:var(--bg)}
+.model-wrap{height:38px;display:grid;grid-template-columns:34px 1fr 28px;align-items:center;border:1px solid var(--border-hi);background:var(--surface)}
+.model-glyph{font:600 11px var(--mono);color:var(--accent);text-align:center}.model-wrap select{appearance:none;min-height:36px;border:0;background:transparent;font-weight:550;outline:0;width:100%}.chev{color:var(--muted)}
+.engine-state{justify-self:start;display:flex;align-items:center;gap:9px;font:600 11px var(--mono);letter-spacing:.04em;color:var(--muted);text-transform:uppercase}
+.pulse{width:7px;height:7px;background:var(--success);box-shadow:0 0 0 3px oklch(0.73 0.17 150/.12)}.engine-state.paused .pulse{background:var(--warning);box-shadow:none}
+.toolbar-actions{display:flex;align-items:center;gap:8px}.tool-btn{height:38px;padding:0 14px;font:600 11px var(--mono);letter-spacing:.04em;text-transform:uppercase}
+.tool-btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:700}.tool-btn.primary:hover{background:oklch(0.73 0.19 298);color:var(--accent-ink)}
+.tab-view{min-height:0}.tab-view:not(.active){display:none!important}.tab-view.dashboard.active,.tab-view.chat.active,.tab-view.models.active{display:grid}
+.dashboard{height:100%;padding:12px;grid-template-columns:minmax(0,1.52fr) minmax(360px,.95fr);grid-template-rows:minmax(0,1fr) clamp(176px,18vh,214px);gap:10px}
+.panel{background:var(--surface);border:1px solid var(--border);min-width:0;min-height:0;position:relative;overflow:hidden}
+.panel-head{height:36px;padding:0 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.panel-index{color:var(--dim)}.live{display:flex;align-items:center;gap:7px;color:var(--success)}.live:before{content:"";width:5px;height:5px;background:currentColor}
+.decode-panel{display:grid;grid-template-rows:36px minmax(0,1fr) 88px}
+.decode-main{display:grid;grid-template-columns:minmax(0,1fr) 190px;min-height:0;overflow:hidden}
+.metric-hero{min-width:0;min-height:0;padding:clamp(15px,2.1vw,32px);display:flex;flex-direction:column;justify-content:space-between;border-right:1px solid var(--border)}
+.metric-label{font:600 11px var(--mono);letter-spacing:.08em;color:var(--muted);text-transform:uppercase}.hero-value{display:flex;align-items:flex-end;gap:12px}
+.hero-value strong{font:520 clamp(54px,min(7vw,10vh),116px)/.88 var(--display);letter-spacing:-.055em}.hero-value span{font:600 13px var(--mono);letter-spacing:.05em;color:var(--muted);padding-bottom:8px}
+.throughput-graph{flex:1;min-height:120px;margin:18px 0 12px;position:relative;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:linear-gradient(to bottom,transparent 49.5%,oklch(0.31 0.014 285/.35) 50%,transparent 50.5%)}.throughput-graph-head{position:absolute;top:9px;left:0;right:0;display:flex;justify-content:space-between;gap:12px;font:600 9px var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--dim)}.throughput-graph-head span{display:flex;align-items:center;gap:6px}.throughput-graph-head i{width:8px;height:2px;display:inline-block}.throughput-graph-head .decode-key i{background:oklch(0.72 0.22 298/.9)}.throughput-graph-head .prefill-key i{background:oklch(0.72 0.02 285/.62)}.throughput-graph svg{position:absolute;inset:25px 0 8px;width:100%;height:calc(100% - 33px);overflow:visible}.throughput-graph .graph-fill{stroke:none}.throughput-graph .decode-fill{fill:oklch(0.72 0.22 298/.12)}.throughput-graph .prefill-fill{fill:oklch(0.72 0.02 285/.14)}.throughput-graph .decode-line{fill:none;stroke:oklch(0.72 0.22 298/.9);stroke-width:1.8;vector-effect:non-scaling-stroke}.throughput-graph .prefill-line{fill:none;stroke:oklch(0.72 0.02 285/.62);stroke-width:1.6;vector-effect:non-scaling-stroke}.delta{font:600 11px var(--mono);color:var(--success);letter-spacing:.03em}.delta:before{content:"▲ ";font-size:8px}
+.prefill{padding:20px 16px;display:flex;flex-direction:column;justify-content:space-between;background:var(--surface-2)}
+.prefill strong{font:520 clamp(30px,3.1vw,52px)/1 var(--display);letter-spacing:-.035em}.prefill .unit{font:600 10px var(--mono);color:var(--muted);margin-top:6px}.micro-note{font:500 10px/1.5 var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+.decode-footer{border-top:1px solid var(--border);display:grid;grid-template-columns:1fr 1fr 1fr 1fr}.mini-stat{padding:12px;border-right:1px solid var(--border);min-width:0}.mini-stat:last-child{border-right:0}.mini-stat label{display:block;font:600 9px var(--mono);color:var(--muted);letter-spacing:.07em;text-transform:uppercase;white-space:nowrap}.mini-stat output{display:block;margin-top:8px;font:520 19px var(--mono);letter-spacing:-.03em}.mini-stat small{font:500 9px var(--mono);color:var(--dim)}
+.hardware-stack{display:grid;grid-template-rows:1fr 1fr .88fr;gap:10px;min-height:0}.hardware{display:grid;grid-template-rows:36px minmax(0,1fr)}
+.hardware-body{display:grid;grid-template-columns:1fr 1.14fr;min-height:0}.gauge-box{padding:12px;border-right:1px solid var(--border);display:flex;flex-direction:column;justify-content:space-between}.gauge-value{font:520 clamp(28px,2.6vw,43px)/1 var(--display);letter-spacing:-.04em}.bar{height:5px;background:var(--surface-3);overflow:hidden}.bar i{display:block;height:100%;background:var(--fg);transition:width .45s ease}.bar.accent i{background:var(--accent)}
+.memory{padding:12px;display:flex;flex-direction:column;justify-content:space-between}.memory label{font:600 9px var(--mono);color:var(--muted);letter-spacing:.07em;text-transform:uppercase}.memory strong{font:520 clamp(18px,1.6vw,26px) var(--mono);letter-spacing:-.035em}.memory strong .memory-value{font-size:1em;color:var(--fg);letter-spacing:-.035em}.memory strong .memory-capacity{font-size:.48em;color:var(--muted);letter-spacing:0}.memory-row{display:flex;align-items:end;justify-content:space-between;gap:8px}.temperature{font:600 10px var(--mono);color:var(--muted)}
+.gds-body{padding:12px;display:grid;grid-template-columns:1fr 120px;align-items:center;gap:14px}.gds-number{font:520 clamp(26px,2.4vw,40px) var(--mono);letter-spacing:-.045em}.gds-number .gds-reading{font-size:1em;color:var(--fg);letter-spacing:-.045em}.gds-number .gds-unit{font-size:11px;color:var(--muted);letter-spacing:.03em}.flow-lines{display:grid;gap:5px}.flow-lines i{display:block;height:3px;background:var(--surface-3)}.flow-lines i:nth-child(1){width:100%}.flow-lines i:nth-child(2){width:78%;background:var(--accent)}.flow-lines i:nth-child(3){width:56%}
+.request-panel{grid-column:1/-1;display:grid;grid-template-rows:36px 1fr}.request-body{display:grid;grid-template-columns:1.22fr 1fr 1fr;min-height:0}
+.residency{padding:13px;border-right:1px solid var(--border);display:grid;grid-template-rows:auto 1fr;gap:10px}.request-title{display:flex;justify-content:space-between;gap:10px}.request-title strong{font:560 13px var(--display)}.request-title span{font:600 9px var(--mono);color:var(--muted);letter-spacing:.06em}
+.residency-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.res-cell{background:var(--bg);border:1px solid var(--border);padding:9px;min-width:0}.res-cell .status{display:flex;align-items:center;gap:7px;font:600 9px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}.dot{width:6px;height:6px;background:var(--success)}.dot.red{background:var(--danger)}.res-cell strong{display:block;margin-top:7px;font:520 17px var(--mono)}.res-cell small{display:block;margin-top:2px;font:500 9px var(--mono);color:var(--dim);white-space:nowrap}
+.cache{display:grid;grid-template-rows:1fr 1fr;border-right:1px solid var(--border)}.cache-row{padding:11px 13px;display:grid;grid-template-columns:1fr auto;align-items:center}.cache-row+ .cache-row{border-top:1px solid var(--border)}.cache-row label{font:600 10px var(--mono);letter-spacing:.06em;color:var(--muted);text-transform:uppercase}.cache-row strong{font:520 24px var(--mono)}.cache-meter{grid-column:1/-1;margin-top:7px;height:3px;background:var(--surface-3)}.cache-meter i{display:block;height:100%;background:var(--fg)}
+.calls{display:grid;grid-template-columns:repeat(3,1fr)}.call{padding:14px;border-right:1px solid var(--border);display:flex;flex-direction:column;justify-content:space-between}.call:last-child{border:0}.call label{font:600 9px/1.35 var(--mono);color:var(--muted);letter-spacing:.06em;text-transform:uppercase}.call strong{font:520 clamp(20px,2vw,30px) var(--mono)}.call small{font:500 9px var(--mono);color:var(--dim)}
+.chat{height:100%;padding:12px;grid-template-columns:280px minmax(0,1fr) 320px;gap:10px}.chat .panel{display:flex;flex-direction:column}.sessions{padding:8px}.session{width:100%;text-align:left;padding:12px;border-color:transparent;background:transparent;min-height:58px}.session.active{background:var(--surface-2);border-color:var(--border)}.session strong{display:block;font-size:13px}.session small{display:block;margin-top:5px;font:500 9px var(--mono);color:var(--muted);letter-spacing:.04em}.messages{flex:1;min-height:0;padding:20px;overflow:auto;display:flex;flex-direction:column;gap:16px}.message{max-width:72%;font-size:14px;line-height:1.55}.message .who{font:600 9px var(--mono);color:var(--muted);letter-spacing:.07em;margin-bottom:5px}.message.user{align-self:flex-end;background:var(--surface-3);padding:12px 14px;border:1px solid var(--border-hi)}.message.assistant{align-self:flex-start}.composer{margin:0 14px 14px;display:grid;grid-template-columns:1fr 44px;border:1px solid var(--border-hi);background:var(--bg)}.composer textarea{resize:none;height:58px;padding:11px;border:0;background:transparent;outline:0}.send{margin:6px;width:34px;height:44px;min-height:44px;background:var(--accent);color:var(--accent-ink);border:0;font-weight:700}.context-list{padding:12px;display:grid;gap:10px}.context-item{border-bottom:1px solid var(--border);padding-bottom:10px}.context-item label{font:600 9px var(--mono);color:var(--muted);letter-spacing:.07em;text-transform:uppercase}.context-item strong{display:block;margin-top:5px;font:520 12px var(--mono)}
+.models{height:100%;padding:12px;display:grid;grid-template-columns:minmax(280px,.34fr) minmax(0,1fr);gap:10px}.models>.panel{min-height:0}.catalog-panel{display:grid;grid-template-rows:36px 46px minmax(0,1fr) 58px}.catalog-search{padding:9px;border-bottom:1px solid var(--border)}.catalog-search input{width:100%;height:30px;border:1px solid var(--border-hi);background:var(--bg);padding:0 10px;outline:0;font:500 11px var(--mono)}.catalog-search input:focus{border-color:var(--accent)}.model-list{min-height:0;padding:8px;display:grid;align-content:start;gap:6px;overflow:auto}.model-item{width:100%;min-height:76px;padding:10px;text-align:left;background:transparent;border-color:transparent;display:grid;grid-template-columns:1fr auto;gap:5px 10px}.model-item:hover{background:var(--surface-2);border-color:var(--border)}.model-item.active{background:var(--surface-3);border-color:var(--accent-dim)}.model-item strong{font-size:13px;font-weight:650}.model-item .model-state{font:600 9px var(--mono);color:var(--success);text-transform:uppercase;letter-spacing:.07em}.model-item small{grid-column:1/-1;color:var(--muted);font:500 10px var(--mono)}.model-item .model-cap{grid-column:1/-1;display:flex;justify-content:space-between;color:var(--dim);font:500 9px var(--mono)}.catalog-foot{border-top:1px solid var(--border);padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px}.catalog-foot span{color:var(--dim);font:500 9px/1.4 var(--mono);text-transform:uppercase}.catalog-foot strong{display:block;color:var(--fg);font-size:12px}.settings-panel{display:grid;grid-template-rows:68px minmax(0,1fr) 56px}.settings-hero{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:16px}.settings-title{min-width:0}.settings-title .eyebrow{font:600 9px var(--mono);color:var(--muted);letter-spacing:.08em;text-transform:uppercase}.settings-title h2{margin:4px 0 0;font-size:18px;font-weight:650;letter-spacing:-.02em}.settings-title p{margin:3px 0 0;color:var(--muted);font:500 10px var(--mono)}.settings-summary{display:flex;align-items:center;gap:18px;text-align:right}.summary-metric label{display:block;color:var(--dim);font:600 8px var(--mono);letter-spacing:.07em;text-transform:uppercase}.summary-metric strong{display:block;margin-top:4px;font:600 12px var(--mono)}.settings-grid{min-height:0;padding:12px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));gap:10px;overflow:hidden}.settings-group{min-width:0;min-height:0;border:1px solid var(--border);background:var(--surface-2);padding:10px;display:flex;flex-direction:column;gap:8px}.settings-group h3{margin:0 0 1px;color:var(--muted);font:600 9px var(--mono);letter-spacing:.08em;text-transform:uppercase}.setting-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(92px,.82fr);align-items:center;gap:10px;min-height:27px}.setting-row label{color:var(--fg);font-size:11px}.setting-row label small{display:block;margin-top:2px;color:var(--dim);font:500 8px var(--mono)}.setting-row select,.setting-row input[type=text],.setting-row input[type=number]{width:100%;height:28px;min-height:28px;padding:0 7px;border:1px solid var(--border-hi);background:var(--bg);outline:0;font:500 10px var(--mono)}.setting-row select:focus,.setting-row input:focus{border-color:var(--accent)}.range-wrap{display:grid;grid-template-columns:1fr 35px;align-items:center;gap:6px}.range-wrap input[type=range]{width:100%;accent-color:var(--accent)}.range-wrap output{color:var(--fg);font:600 9px var(--mono);text-align:right}.switch-row{display:flex;align-items:center;justify-content:space-between;gap:10px}.switch{position:relative;width:32px;height:18px;min-height:18px;border:0;border-radius:99px;background:var(--surface-3)}.switch:after{content:"";position:absolute;top:3px;left:3px;width:12px;height:12px;border-radius:50%;background:var(--muted);transition:.15s}.switch.on{background:var(--accent-dim)}.switch.on:after{left:17px;background:var(--accent)}.settings-actions{border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 14px;gap:12px}.settings-actions .dirty{color:var(--dim);font:500 9px var(--mono);text-transform:uppercase;letter-spacing:.06em}.settings-actions .action-set{display:flex;gap:8px}.settings-actions button{height:32px;min-height:32px;padding:0 12px;font:600 10px var(--mono);text-transform:uppercase;letter-spacing:.04em}.settings-actions .apply{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.toast{position:fixed;right:18px;bottom:18px;padding:10px 14px;background:var(--fg);color:var(--bg);font:600 10px var(--mono);letter-spacing:.04em;transform:translateY(20px);opacity:0;pointer-events:none;transition:.2s}.toast.show{transform:none;opacity:1}
+@media(max-width:1500px){.dashboard{grid-template-columns:minmax(0,1.38fr) minmax(330px,.92fr)}.decode-main{grid-template-columns:minmax(0,1fr) 160px}.toolbar{grid-template-columns:minmax(250px,360px) 1fr auto}.chat{grid-template-columns:230px 1fr 270px}.hero-value strong{font-size:clamp(54px,min(6vw,9.5vh),88px)}}
+@media(max-width:1100px){.content{grid-template-rows:54px minmax(0,1fr)}.toolbar{padding:0 10px;gap:9px}.sim-label{display:none}.dashboard{padding:8px;gap:7px;grid-template-columns:minmax(0,1.25fr) minmax(320px,.88fr);grid-template-rows:minmax(0,1fr) 156px}.hardware-stack{gap:7px}.decode-main{grid-template-columns:1fr 132px}.metric-hero{padding:14px}.throughput-graph{min-height:96px;margin:12px 0 9px}.throughput-graph-head{top:7px;font-size:8px}.throughput-graph svg{inset:22px 0 6px;height:calc(100% - 28px)}.decode-footer{grid-template-columns:1fr 1fr}.mini-stat{padding:8px}.mini-stat:nth-child(2){border-right:0}.mini-stat:nth-child(n+3){display:none}.panel-head{height:32px}.hardware{grid-template-rows:32px minmax(0,1fr)}.decode-panel{grid-template-rows:32px minmax(0,1fr) 66px}.prefill{padding:12px}.hardware-body{grid-template-columns:.8fr 1.2fr}.gauge-box,.memory{padding:8px}.request-panel{grid-template-rows:32px 1fr}.residency,.cache-row,.call{padding:8px}.res-cell{padding:6px}.chat{padding:8px;gap:7px;grid-template-columns:200px 1fr}.chat>aside:last-child{display:none}}
+@media(max-width:1400px) and (max-height:800px){.dashboard{grid-template-columns:minmax(0,1.34fr) minmax(330px,.9fr);grid-template-rows:minmax(0,1fr) 150px}.decode-main{grid-template-columns:minmax(0,1fr) 150px}.metric-hero{padding:12px 16px}.hero-value strong{font-size:clamp(54px,5.2vw,68px);line-height:.9}.hero-value span{font-size:11px;padding-bottom:5px}.delta{font-size:9px}.prefill{padding:10px 12px}.prefill strong{font-size:28px}.prefill .unit,.micro-note{font-size:8px}.decode-footer{grid-template-columns:repeat(4,1fr)}.mini-stat{padding:7px}.mini-stat label{font-size:8px}.mini-stat output{font-size:15px;margin-top:4px}.mini-stat small{font-size:8px}.residency-grid{gap:5px}.res-cell{padding:5px}.res-cell .status{font-size:8px}.res-cell strong{font-size:14px;margin-top:4px}.res-cell small{font-size:8px}.cache-row label{font-size:8px}.call label{font-size:8px}.call small{font-size:8px}}
+@media(max-height:780px){.shell{grid-template-rows:46px minmax(0,1fr)}.content{grid-template-rows:50px minmax(0,1fr)}.titlebar{font-size:13px}.dashboard{padding:7px;gap:6px;grid-template-rows:minmax(0,1fr) 150px}.hardware-stack{gap:6px}.panel-head{height:30px}.decode-panel{grid-template-rows:30px minmax(0,1fr) 62px}.hardware{grid-template-rows:30px minmax(0,1fr)}.request-panel{grid-template-rows:30px 1fr}.metric-hero{padding:12px 16px}.hero-value strong{font-size:clamp(54px,5.2vw,68px);line-height:.9}.prefill strong{font-size:28px}.mini-stat{padding:7px}.mini-stat output{font-size:15px;margin-top:4px}.gauge-box,.memory,.gds-body{padding:7px 9px}.gauge-value{font-size:28px}.memory strong{font-size:18px}.gds-number{font-size:25px}.residency{padding:7px;gap:5px}.res-cell{padding:5px}.res-cell strong{font-size:14px;margin-top:4px}.request-title{display:none}.cache-row{padding:5px 8px}.cache-row strong{font-size:18px}.call{padding:7px}.call strong{font-size:19px}.rail{padding-top:5px}.rail button{height:43px;min-height:43px}.tool-btn{height:34px;min-height:34px}.model-wrap{height:34px}.model-wrap select{min-height:32px}}
+@media(max-width:1100px){.models{padding:8px;gap:7px;grid-template-columns:250px minmax(0,1fr)}.settings-grid{gap:7px;padding:8px}.settings-group{padding:8px;gap:6px}.setting-row{grid-template-columns:minmax(0,1fr) minmax(76px,.8fr);gap:6px}.settings-hero{padding-inline:12px}.settings-summary{gap:10px}.catalog-foot{padding-inline:10px}}
+@media(max-height:780px){.models{padding:7px;gap:6px;grid-template-columns:235px minmax(0,1fr)}.catalog-panel{grid-template-rows:30px 38px minmax(0,1fr) 48px}.catalog-search{padding:6px}.catalog-search input{height:26px}.model-item{min-height:65px;padding:8px}.settings-panel{grid-template-rows:56px minmax(0,1fr) 46px}.settings-hero{padding:8px 10px}.settings-title h2{font-size:15px}.settings-grid{padding:7px;gap:6px}.settings-group{padding:7px;gap:5px}.settings-group h3{font-size:8px}.setting-row{min-height:23px;grid-template-columns:minmax(0,1fr) minmax(68px,.75fr);gap:5px}.setting-row label{font-size:10px}.setting-row label small{font-size:7px}.setting-row select,.setting-row input[type=text],.setting-row input[type=number]{height:24px;min-height:24px;font-size:9px}.switch{transform:scale(.88);transform-origin:right center}.settings-actions{padding-inline:9px}.settings-actions button{height:28px;min-height:28px;font-size:9px}}
+</style>
+<style id="catalog-redesign">
+.catalog-search{display:grid!important;grid-template-columns:minmax(0,1fr) auto;gap:7px}.catalog-search .add-model{width:34px;height:30px;min-height:30px;padding:0;border-color:var(--accent-dim);background:var(--surface-3);color:var(--accent);font:700 17px var(--display)}.catalog-search .add-model:hover{background:var(--accent);color:var(--accent-ink)}
+/* Model Catalogue redesign: dense control surface with explicit Siphon cache semantics. */
+.models{grid-template-columns:minmax(252px,.3fr) minmax(0,1fr);gap:10px}
+.settings-panel{grid-template-rows:74px minmax(0,1fr) 56px}
+.settings-hero{padding:11px 16px}
+.settings-hero .settings-title h2{font-size:17px}
+.settings-summary{gap:12px}
+.settings-summary .summary-metric{padding-left:12px;border-left:1px solid var(--border)}
+.settings-summary .summary-metric:first-child{border-left:0}
+.settings-layout{min-height:0;overflow-x:hidden;overflow-y:scroll;scroll-behavior:auto;overscroll-behavior:contain;padding:10px;display:grid;grid-template-columns:minmax(0,1.08fr) minmax(0,.92fr);grid-template-rows:minmax(0,1fr) auto;gap:10px;align-content:start}
+.settings-panel,.catalog-panel{text-rendering:auto;-webkit-font-smoothing:subpixel-antialiased}
+.settings-column{min-width:0;display:grid;align-content:start;gap:10px}
+.settings-card,.advanced-card{min-width:0;border:1px solid var(--border);background:var(--surface-2);padding:11px}
+.settings-card.core-card{border-top:2px solid var(--accent)}
+.settings-card.cache-card{border-top:2px solid var(--success)}
+.settings-card.spec-card{border-top:2px solid var(--warning)}
+.settings-card.io-card{border-top:2px solid oklch(.69 .16 220)}
+.card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}
+.card-head h3{margin:0;color:var(--fg);font:650 11px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.card-head p{margin:4px 0 0;color:var(--dim);font:500 9px/1.35 var(--mono)}
+.card-tag{flex:0 0 auto;color:var(--muted);font:600 8px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.card-tag.live{color:var(--success)}
+.control-matrix{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.control{min-width:0;min-height:55px;padding:8px 9px;border:1px solid var(--border);background:var(--surface)}
+.control label{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--fg);font-size:10px}
+.control label small{display:block;margin-top:3px;color:var(--dim);font:500 8px var(--mono)}
+.control .control-note{margin-top:5px;color:var(--dim);font:500 8px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.control input[type=number],.control input[type=text],.control select{width:100%;height:27px;min-height:27px;margin-top:7px;padding:0 7px;border:1px solid var(--border-hi);background:var(--bg);outline:0;font:600 10px var(--mono)}
+.control input:focus,.control select:focus{border-color:var(--accent)}
+.control .range-wrap{margin-top:7px;grid-template-columns:1fr 42px}
+.control .range-wrap input[type=range]{accent-color:var(--accent)}
+.control .range-wrap output{font-size:9px}
+.cache-tiers{display:grid;gap:7px}
+.cache-tier{padding:8px 9px;border:1px solid var(--border);background:var(--surface);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px}
+.cache-tier .tier-name{font:650 10px var(--mono);letter-spacing:.05em}
+.cache-tier .tier-name small{display:block;margin-top:3px;color:var(--dim);font:500 8px var(--mono);letter-spacing:0}
+.cache-tier .tier-value{font:650 14px var(--mono);text-align:right}
+.cache-tier .tier-state{color:var(--muted);font:600 8px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.cache-tier .tier-state.hot{color:var(--accent)}.cache-tier .tier-state.warm{color:var(--success)}.cache-tier .tier-state.cold{color:var(--dim)}
+.cache-tier .tier-control{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1fr) 54px;align-items:center;gap:8px}
+.cache-tier .tier-control input[type=range]{width:100%;accent-color:var(--accent)}
+.cache-tier .tier-control output{color:var(--fg);font:600 9px var(--mono);text-align:right}
+.cache-foot{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:7px}
+.cache-foot .control{min-height:52px}
+.cache-foot .control input{margin-top:5px}
+.switch-line{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:30px;padding:7px 0;border-bottom:1px solid var(--border)}
+.switch-line:last-child{border-bottom:0;padding-bottom:0}.switch-line:first-of-type{padding-top:0}
+.switch-copy{min-width:0}.switch-copy strong{display:block;font-size:10px}.switch-copy small{display:block;margin-top:3px;color:var(--dim);font:500 8px var(--mono)}
+.compact-row{display:grid;grid-template-columns:minmax(0,1fr) 108px;align-items:center;gap:10px;min-height:33px;padding:6px 0;border-bottom:1px solid var(--border)}
+.compact-row:last-child{border-bottom:0}.compact-row label{font-size:10px}.compact-row label small{display:block;margin-top:3px;color:var(--dim);font:500 8px var(--mono)}
+.compact-row input,.compact-row select{width:100%;height:26px;min-height:26px;padding:0 6px;border:1px solid var(--border-hi);background:var(--bg);font:600 9px var(--mono)}
+.spec-mode{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;padding:8px 9px;margin-bottom:8px;border:1px solid var(--border-hi);background:var(--bg)}
+.spec-mode strong{font:650 11px var(--mono)}.spec-mode small{display:block;margin-top:3px;color:var(--dim);font:500 8px var(--mono)}
+.spec-badge{color:var(--warning);font:650 8px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.advanced-card{grid-column:1/-1;padding:0;background:var(--surface)}
+.advanced-card summary{cursor:pointer;list-style:none;padding:10px 11px;color:var(--muted);font:650 9px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.advanced-card summary::-webkit-details-marker{display:none}.advanced-card summary:before{content:'+';display:inline-block;width:16px;color:var(--accent);font-size:14px}.advanced-card[open] summary:before{content:'−'}
+.advanced-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:0 10px 10px;border-top:1px solid var(--border)}
+.advanced-grid .compact-row{display:block;border:0}.advanced-grid .compact-row input,.advanced-grid .compact-row select{margin-top:6px}
+.settings-actions{padding:0 13px}
+.settings-actions .dirty{letter-spacing:.05em}
+@media(max-width:1100px){.models{grid-template-columns:235px minmax(0,1fr)}.settings-layout{gap:7px;padding:8px}.settings-card,.advanced-card{padding:8px}.control-matrix{gap:6px}.control{padding:7px}.advanced-grid{gap:6px;padding-inline:8px}}
+@media(max-height:780px){.settings-panel{grid-template-rows:62px minmax(0,1fr) 46px}.settings-hero{padding:8px 12px}.settings-title h2{font-size:14px}.settings-title p{font-size:8px}.settings-summary{gap:7px}.settings-summary .summary-metric{padding-left:7px}.settings-summary .summary-metric label{font-size:7px}.settings-summary .summary-metric strong{font-size:10px}.settings-layout{padding:7px;gap:6px}.settings-card,.advanced-card{padding:7px}.card-head{margin-bottom:6px}.card-head h3{font-size:8px}.card-head p,.card-tag{font-size:7px}.control-matrix{gap:5px}.control{min-height:47px;padding:6px 7px}.control label{font-size:9px}.control label small,.control .control-note{font-size:7px}.control input[type=number],.control input[type=text],.control select{height:23px;min-height:23px;margin-top:5px;font-size:8px}.cache-tier{padding:6px 7px}.cache-tier .tier-name,.switch-copy strong,.compact-row label{font-size:9px}.cache-tier .tier-name small,.cache-tier .tier-state,.switch-copy small,.compact-row label small{font-size:7px}.cache-tier .tier-value{font-size:12px}.cache-foot{margin-top:5px;gap:5px}.cache-foot .control{min-height:43px}.spec-mode{padding:6px 7px;margin-bottom:5px}.spec-mode strong{font-size:9px}.spec-mode small,.spec-badge{font-size:7px}.compact-row{min-height:27px;padding:4px 0}.compact-row input,.compact-row select{height:22px;min-height:22px;font-size:8px}.advanced-card summary{padding:7px 8px;font-size:8px}.advanced-grid{padding:0 7px 7px;gap:5px}.settings-actions button{height:27px;min-height:27px}}
+</style>
+<style id="catalog-grid-refinement">
+/* Compact two-column catalogue surface: independent controls, no oversized empty cards. */
+.settings-panel{grid-template-rows:92px minmax(0,1fr) 56px}
+.settings-hero{padding:10px 16px;align-items:center}
+.settings-summary{max-width:720px;display:flex;flex-wrap:wrap;justify-content:flex-end;column-gap:12px;row-gap:6px}
+.settings-summary .summary-metric{min-width:62px}
+.settings-layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:auto auto;align-content:start;gap:8px;padding:9px}
+.settings-column{gap:8px}
+.settings-card,.advanced-card{padding:9px}
+.settings-card.core-card,.settings-card.cache-card,.settings-card.spec-card,.settings-card.io-card{border-top:1px solid var(--border)}
+.card-head{margin-bottom:7px;gap:8px}
+.card-head p{max-width:34ch}
+.control-matrix{gap:6px}
+.control{min-height:48px;padding:7px 8px}
+.control .control-note{margin-top:4px}
+.split-inputs{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:6px}
+.split-inputs input{margin-top:0!important}
+.cache-tiers{gap:5px}
+.cache-tier{padding:6px 8px;gap:3px 8px}
+.cache-foot{gap:5px;margin-top:5px}
+.cache-foot .control{min-height:46px}
+.spec-mode{padding:6px 8px;margin-bottom:5px}
+.compact-row{min-height:29px;padding:4px 0}
+.switch-line{min-height:27px;padding:5px 0}
+.advanced-card{grid-column:1/-1}
+.advanced-card summary{padding:8px 10px}
+.advanced-grid{padding:0 9px 9px;gap:6px}
+.context-range{grid-template-columns:minmax(0,1fr) 42px!important}
+.context-range input[type=range]{width:100%;accent-color:var(--accent)}
+/* Let the catalogue breathe like the dashboard: balanced paired rows instead of two vertical stacks. */
+.settings-layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:auto auto auto auto auto;gap:12px;padding:13px;align-content:start}
+.settings-column{display:contents}
+.settings-card{padding:13px}
+.core-card{grid-column:1;grid-row:1}
+.routing-card{grid-column:2;grid-row:1}
+.runtime-card{grid-column:1;grid-row:2}
+.sampling-card{grid-column:2;grid-row:2}
+.cache-card{grid-column:1;grid-row:3 / span 2}
+.spec-card{grid-column:2;grid-row:3}
+.io-card{grid-column:2;grid-row:4}
+.advanced-card{grid-column:1 / -1;grid-row:5}
+.settings-card .card-head{margin-bottom:10px}
+.settings-card .control{padding:9px 10px}
+.settings-card .compact-row{min-height:32px;padding:6px 0}
+.settings-card .switch-line{min-height:31px;padding:7px 0}
+@media(max-width:1250px){
+  .settings-summary{max-width:560px;column-gap:8px}
+  .settings-summary .summary-metric{min-width:54px}
+  .settings-summary .summary-metric strong{font-size:10px}
+}
+@media(max-width:900px){
+  .settings-layout{grid-template-columns:minmax(0,1fr);grid-template-rows:auto;gap:9px;padding:9px}
+  .settings-card,.advanced-card{grid-column:1;grid-row:auto}
+}
+@media(max-height:780px){
+  .settings-panel{grid-template-rows:78px minmax(0,1fr) 46px}
+  .settings-hero{padding:7px 11px}
+  .settings-summary{column-gap:6px;row-gap:4px}
+  .settings-summary .summary-metric{min-width:48px}
+  .settings-summary .summary-metric label{font-size:7px}
+  .settings-summary .summary-metric strong{font-size:9px;margin-top:2px}
+  .settings-layout{padding:8px;gap:8px}
+  .settings-column{gap:6px}
+  .settings-card,.advanced-card{padding:7px}
+  .control{min-height:43px;padding:6px 7px}
+  .cache-tier{padding:5px 7px}
+  .cache-foot{margin-top:4px}
+  .spec-mode{padding:5px 7px;margin-bottom:4px}
+  .compact-row{min-height:26px;padding:3px 0}
+  .switch-line{min-height:25px;padding:4px 0}
+  .advanced-card summary{padding:6px 8px}
+  .advanced-grid{padding:0 7px 7px}
+}
+@media(min-width:1400px) and (min-height:900px){
+  .settings-panel{grid-template-rows:104px minmax(0,1fr) 60px}
+  .settings-hero{padding:14px 20px;gap:24px}
+  .settings-title .eyebrow{font-size:10px}
+  .settings-title h2{font-size:20px;margin-top:6px}
+  .settings-title p{font-size:11px;margin-top:5px}
+  .settings-summary{max-width:780px;column-gap:18px;row-gap:10px}
+  .settings-summary .summary-metric{min-width:72px;padding-left:14px}
+  .settings-summary .summary-metric label{font-size:9px}
+  .settings-summary .summary-metric strong{font-size:13px;margin-top:5px}
+  .settings-layout{gap:14px;padding:16px}
+  .settings-card{padding:15px}
+  .settings-card .card-head{margin-bottom:13px;gap:16px}
+  .card-head h3{font-size:12px;letter-spacing:.09em}
+  .card-head p{font-size:10px;line-height:1.45;max-width:42ch;margin-top:5px}
+  .card-tag{font-size:9px}
+  .control-matrix{gap:10px}
+  .settings-card .control{min-height:60px;padding:10px 11px}
+  .control label{font-size:11px}
+  .control input[type=number],.control input[type=text],.control select{height:30px;min-height:30px;margin-top:8px;font-size:10px}
+  .control .control-note{margin-top:6px;font-size:9px}
+  .cache-tiers{gap:8px}
+  .cache-tier{padding:9px 11px;gap:5px 12px}
+  .cache-tier .tier-name{font-size:11px}
+  .cache-tier .tier-name small{font-size:9px;margin-top:4px}
+  .cache-tier .tier-value{font-size:15px}
+  .cache-tier .tier-state{font-size:9px}
+  .cache-foot{gap:9px;margin-top:9px}
+  .cache-foot .control{min-height:58px}
+  .settings-card .compact-row{min-height:36px;padding:7px 0}
+  .compact-row label{font-size:11px}
+  .compact-row label small{font-size:9px;margin-top:4px}
+  .compact-row input,.compact-row select{height:29px;min-height:29px;font-size:10px}
+  .settings-card .switch-line{min-height:35px;padding:8px 0}
+  .switch-copy strong{font-size:11px}
+  .switch-copy small{font-size:9px;margin-top:4px}
+  .spec-mode{padding:9px 11px;margin-bottom:8px}
+  .spec-mode strong{font-size:12px}
+  .spec-mode small,.spec-badge{font-size:9px}
+  .advanced-card summary{padding:11px 13px;font-size:10px}
+  .advanced-grid{padding:0 13px 13px;gap:10px}
+  .settings-actions{padding:0 17px}
+}
+</style>
+<style id="catalog-control-system">
+/* Inner control system: readable desktop fields instead of browser-default widgets. */
+.settings-card .control label,.settings-card .compact-row label{font-weight:600;color:var(--fg)}
+.settings-card .control label{font-size:11px;letter-spacing:.01em}
+.settings-card .control-note,.settings-card .compact-row label small,.switch-copy small{color:var(--muted);font-size:9px;line-height:1.35}
+.settings-card .control input[type=number],.settings-card .control input[type=text],.settings-card .control select,.settings-card .compact-row input,.settings-card .compact-row select,.cache-tier select{border:1px solid var(--border-hi);border-radius:2px;background:var(--bg);color:var(--fg);box-shadow:inset 0 1px 0 oklch(1 0 0/.035),0 0 0 1px oklch(0 0 0/.08);font-weight:650;letter-spacing:.015em;transition:border-color .15s,box-shadow .15s,background .15s}
+.settings-card .control input[type=number],.settings-card .compact-row input{text-align:right}
+.settings-card .control select,.settings-card .compact-row select,.cache-tier select{cursor:pointer;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 13px) 50%,calc(100% - 8px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:27px}
+.settings-card .control input:hover,.settings-card .control select:hover,.settings-card .compact-row input:hover,.settings-card .compact-row select:hover,.cache-tier select:hover{background-color:var(--surface-2);border-color:var(--muted)}
+.settings-card .control input:focus,.settings-card .control select:focus,.settings-card .compact-row input:focus,.settings-card .compact-row select:focus,.cache-tier select:focus{border-color:var(--accent);box-shadow:0 0 0 2px oklch(.67 .22 298/.16);outline:0}
+.settings-card input[type=range]{height:6px;cursor:pointer;accent-color:var(--accent)}
+.settings-card .range-wrap{gap:11px}
+.settings-card .range-wrap output{min-width:42px;color:var(--fg);font-size:10px;font-weight:700}
+.settings-card .control-note{letter-spacing:.01em}
+.split-inputs{gap:8px}
+.split-field{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:6px}
+.split-field span{color:var(--dim);font:600 8px var(--mono);letter-spacing:.06em;text-transform:uppercase}
+.split-field input{min-width:0}
+.settings-card .compact-row{border-bottom-color:oklch(.31 .014 285/.72)}
+.settings-card .compact-row:last-child{border-bottom-color:transparent}
+.settings-card .switch-line{border-bottom-color:oklch(.31 .014 285/.72)}
+.settings-card .switch-copy strong{font-size:11px;font-weight:650}
+.switch{width:50px;height:24px;min-height:24px;padding:0;border:1px solid var(--border-hi);border-radius:99px;background:var(--surface-3);box-shadow:inset 0 1px 2px oklch(0 0 0/.25)}
+.switch:before{content:'OFF';position:absolute;right:6px;top:5px;color:var(--dim);font:700 7px var(--mono);letter-spacing:.04em}
+.switch:after{top:3px;left:3px;width:16px;height:16px;background:var(--muted);box-shadow:0 1px 2px oklch(0 0 0/.35)}
+.switch.on{background:var(--accent-dim);border-color:var(--accent-dim)}
+.switch.on:before{content:'ON';left:7px;right:auto;color:var(--accent)}
+.switch.on:after{left:29px;background:var(--accent)}
+.settings-card input:disabled,.settings-card select:disabled{opacity:.62;cursor:not-allowed}
+.cache-tier .tier-control output{color:var(--muted)}
+@media(min-width:1400px) and (min-height:900px){
+  .settings-card .control label{font-size:12px}
+  .settings-card .control-note,.settings-card .compact-row label small,.switch-copy small{font-size:10px}
+  .settings-card .control input[type=number],.settings-card .control select,.settings-card .compact-row input,.settings-card .compact-row select,.cache-tier select{font-size:11px}
+  .split-field span{font-size:9px}
+  .settings-card .range-wrap output{font-size:11px}
+}
+</style>
+<style id="catalog-structural-controls">
+/* Dashboard-style controls: large readouts, clear lanes, and contained setting tiles. */
+.hero-control{display:grid;grid-template-columns:150px minmax(0,1fr);min-height:112px;border:1px solid var(--border);background:var(--bg)}
+.hero-control-value{padding:15px 16px;border-right:1px solid var(--border);display:flex;flex-direction:column;justify-content:center}
+.hero-control-value span,.routing-readout span,.temperature-readout span{color:var(--muted);font:650 9px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.hero-control-value strong,.routing-readout strong,.temperature-readout strong{margin-top:8px;font:520 34px/1 var(--display);letter-spacing:-.045em;color:var(--fg)}
+.hero-control-value small,.routing-readout small{margin-top:5px;color:var(--dim);font:600 9px var(--mono);text-transform:uppercase}
+.hero-control-lane{padding:17px 18px;display:flex;flex-direction:column;justify-content:center;min-width:0}
+.hero-control-lane input[type=range],.temperature-control input[type=range]{width:100%;height:7px;margin:14px 0 10px;accent-color:var(--accent);cursor:pointer}
+.lane-scale,.lane-foot,.temperature-scale{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--dim);font:600 8px var(--mono);letter-spacing:.04em;text-transform:uppercase}
+.lane-scale span:nth-child(2){color:var(--muted)}
+.lane-foot output{padding:3px 7px;border:1px solid var(--accent-dim);background:oklch(.34 .11 298/.16);color:var(--accent);font:700 10px var(--mono)}
+.metric-control-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.metric-control{min-width:0;min-height:108px;padding:13px 14px;border:1px solid var(--border);background:var(--bg);display:flex;flex-direction:column;justify-content:space-between;cursor:default}
+.metric-control-name{color:var(--fg);font-size:11px;font-weight:650}
+.metric-control-name small{display:block;margin-top:5px;color:var(--muted);font:500 9px var(--mono)}
+.metric-control-input{display:flex;align-items:flex-end;gap:8px;margin-top:12px}
+.metric-control-input input,.metric-control-input select{min-width:0;width:100%;height:38px!important;min-height:38px!important;margin:0!important;padding:0 28px 0 0!important;border:0!important;border-bottom:1px solid var(--border-hi)!important;border-radius:0!important;background-color:transparent!important;box-shadow:none!important;color:var(--fg);font:540 25px/1 var(--display)!important;letter-spacing:-.035em;text-align:left!important}
+.metric-control-input em{padding-bottom:7px;color:var(--muted);font:600 9px var(--mono);font-style:normal;text-transform:uppercase}
+.routing-control{display:grid;grid-template-columns:132px minmax(0,1fr);min-height:112px;border:1px solid var(--border);background:var(--bg)}
+.routing-readout{padding:15px 16px;border-right:1px solid var(--border);display:flex;flex-direction:column;justify-content:center}
+.routing-picker{padding:13px 15px;display:grid;grid-template-rows:auto 34px auto auto;align-content:center;gap:7px;min-width:0}
+.routing-picker>label{color:var(--muted);font:650 9px var(--mono);letter-spacing:.07em;text-transform:uppercase}
+.routing-picker select{width:100%;height:34px;min-height:34px;padding:0 30px 0 10px;border:1px solid var(--border-hi);background:var(--surface);color:var(--fg);font:650 11px var(--mono)}
+.routing-picker>small{color:var(--muted);font:500 8px var(--mono)}
+.routing-dots{display:grid;grid-template-columns:repeat(8,1fr);gap:4px}
+.routing-dots i{height:4px;background:var(--surface-3)}
+.routing-dots i.active{background:var(--accent);box-shadow:0 0 8px oklch(.67 .22 298/.25)}
+.sampling-console{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(180px,.8fr);min-height:112px;border:1px solid var(--border);background:var(--bg)}
+.temperature-control{padding:13px 16px;border-right:1px solid var(--border);min-width:0}
+.temperature-readout{display:grid;grid-template-columns:1fr auto;grid-template-rows:auto auto;align-items:end}
+.temperature-readout strong{grid-row:1 / span 2;grid-column:2;margin:0;font-size:29px}
+.temperature-readout small{margin-top:5px;color:var(--dim);font:500 8px var(--mono)}
+.temperature-control input[type=range]{margin:14px 0 7px}
+.sampling-limits{padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.sampling-limits label{min-width:0;padding:9px 10px;border:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;justify-content:space-between}
+.sampling-limits label>span{color:var(--fg);font-size:10px;font-weight:650}
+.sampling-limits label small{display:block;margin-top:3px;color:var(--dim);font:500 8px var(--mono)}
+.sampling-limits input{width:100%;height:31px;margin-top:8px;padding:0;border:0;border-bottom:1px solid var(--border-hi);background:transparent;color:var(--fg);font:600 17px var(--mono);text-align:right;outline:0}
+.sampling-limits input:focus{border-color:var(--accent)}
+.spec-card .compact-row,.io-card .compact-row,.advanced-grid .compact-row{margin-top:7px;padding:9px 11px;min-height:48px;border:1px solid var(--border);background:var(--bg)}
+.spec-card .compact-row:first-of-type,.io-card .compact-row:first-of-type{margin-top:0}
+.spec-card .compact-row:last-child,.io-card .compact-row:last-child{border:1px solid var(--border)}
+.io-card .switch-line{margin-top:7px;padding:9px 11px;min-height:52px;border:1px solid var(--border);background:var(--bg)}
+.io-card .switch-line:first-of-type{margin-top:0;padding-top:9px}
+.io-card .switch-line:last-child{padding-bottom:9px}
+.spec-mode{min-height:62px;padding:11px 13px;background:var(--bg)}
+.cache-tier{border-radius:2px;box-shadow:inset 0 1px 0 oklch(1 0 0/.02)}
+@media(max-width:1250px){
+  .hero-control{grid-template-columns:125px minmax(0,1fr)}
+  .routing-control{grid-template-columns:112px minmax(0,1fr)}
+  .sampling-console{grid-template-columns:1fr}
+  .temperature-control{border-right:0;border-bottom:1px solid var(--border)}
+}
+@media(max-width:900px){
+  .hero-control,.routing-control{grid-template-columns:1fr}
+  .hero-control-value,.routing-readout{border-right:0;border-bottom:1px solid var(--border)}
+}
+</style>
+<style id="catalog-remaining-controls">
+/* Residency map */
+.residency-map{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+.residency-tier{min-width:0;min-height:176px;padding:12px;border:1px solid var(--border);background:var(--bg);display:flex;flex-direction:column}
+.residency-tier header{display:grid;grid-template-columns:26px 1fr auto;align-items:center;gap:7px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.residency-tier header>span{width:26px;height:22px;display:grid;place-items:center;background:var(--surface-3);color:var(--fg);font:700 9px var(--mono)}
+.residency-tier header>strong{font:650 10px var(--mono);letter-spacing:.06em}
+.residency-tier header>em{font:700 8px var(--mono);font-style:normal;letter-spacing:.07em;text-transform:uppercase}
+.residency-hot header>em{color:var(--accent)}.residency-warm header>em{color:var(--success)}.residency-cold header>em{color:var(--muted)}
+.residency-value{margin:auto 0 12px}
+.residency-value strong{display:block;font:540 24px/1 var(--display);letter-spacing:-.035em}
+.residency-value small{display:block;margin-top:5px;color:var(--muted);font:600 8px var(--mono);text-transform:uppercase}
+.residency-tier input[type=range]{width:100%;height:6px;margin:0 0 9px;accent-color:var(--accent)}
+.residency-tier footer{display:flex;justify-content:space-between;gap:5px;color:var(--dim);font:600 7px var(--mono);letter-spacing:.025em;text-transform:uppercase}
+.residency-select{margin:auto 0 12px}
+.residency-select>span{display:block;margin-bottom:6px;color:var(--muted);font:600 8px var(--mono);text-transform:uppercase}
+.residency-select select{width:100%;height:34px;padding:0 28px 0 9px;border:1px solid var(--border-hi);background:var(--surface);color:var(--fg);font:650 13px var(--mono)}
+.cold-lane{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin:0 0 12px}
+.cold-lane i{height:6px;background:var(--surface-3)}
+.cold-lane i:first-child{background:var(--muted)}
+.residency-aux{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:9px}
+.aux-control{min-width:0;min-height:72px;padding:10px 12px;border:1px solid var(--border);background:var(--bg);display:grid;grid-template-columns:minmax(0,1fr) minmax(100px,.62fr);align-items:center;gap:12px}
+.aux-control>span{font-size:10px;font-weight:650}.aux-control>span small{display:block;margin-top:4px;color:var(--muted);font:500 8px var(--mono)}
+.aux-control>div{display:flex;align-items:center;gap:6px}
+.aux-control input,.aux-control select{width:100%;height:34px;padding:0 9px;border:1px solid var(--border-hi);background:var(--surface);color:var(--fg);font:650 11px var(--mono);text-align:right}
+.aux-control em,.unit-input em{color:var(--muted);font:650 8px var(--mono);font-style:normal;text-transform:uppercase}
+
+/* Speculative execution console */
+.spec-console{display:grid;gap:9px}
+.spec-hero{min-height:78px;padding:12px 14px;border:1px solid var(--border-hi);background:var(--bg);display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px}
+.spec-hero>div>span{display:block;color:var(--muted);font:650 8px var(--mono);letter-spacing:.07em;text-transform:uppercase}
+.spec-hero strong{display:block;margin-top:7px;font:540 18px var(--display);letter-spacing:-.02em}
+.spec-hero small{display:block;margin-top:5px;color:var(--muted);font:500 8px var(--mono)}
+.spec-control-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.spec-control{min-width:0;min-height:76px;padding:10px 11px;border:1px solid var(--border);background:var(--bg);display:flex;flex-direction:column;justify-content:space-between}
+.spec-control>span{font-size:10px;font-weight:650}.spec-control>span small{display:block;margin-top:4px;color:var(--muted);font:500 8px var(--mono)}
+.spec-control select,.spec-control input[type=number]{width:100%;height:32px;margin-top:9px;padding:0 28px 0 9px;border:1px solid var(--border-hi);background:var(--surface);color:var(--fg);font:650 10px var(--mono)}
+.spec-depth>div{display:grid;grid-template-columns:minmax(0,1fr) 46px;align-items:center;gap:9px;margin-top:10px}
+.spec-depth input[type=range]{width:100%;height:6px;accent-color:var(--accent)}
+.spec-depth output{color:var(--fg);font:700 10px var(--mono);text-align:right}
+.unit-input{display:flex;align-items:center;gap:7px;margin-top:9px}
+.unit-input input{margin-top:0!important;text-align:right}
+
+/* Streaming pipeline */
+.stream-console{display:grid;gap:9px}
+.stream-path{min-height:68px;padding:10px 12px;border:1px solid var(--border);background:var(--bg);display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:center;gap:8px}
+.stream-path>i{color:var(--dim);font:500 15px var(--mono);font-style:normal}
+.path-node{min-width:0;padding:7px 9px;background:var(--surface);border:1px solid var(--border)}
+.path-node span{color:var(--dim);font:700 8px var(--mono)}
+.path-node strong{display:block;margin-top:3px;font:650 11px var(--mono)}
+.path-node small{display:block;margin-top:3px;color:var(--muted);font:500 8px var(--mono)}
+.stream-control-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stream-control{min-width:0;min-height:66px;padding:9px 11px;border:1px solid var(--border);background:var(--bg);display:grid;grid-template-columns:minmax(0,1fr) minmax(76px,.44fr);align-items:center;gap:10px}
+.stream-control>span{font-size:10px;font-weight:650}.stream-control>span small{display:block;margin-top:4px;color:var(--muted);font:500 8px/1.3 var(--mono)}
+.stream-control .unit-input{margin:0}
+.stream-control input{width:100%;height:31px;padding:0 7px;border:1px solid var(--border-hi);background:var(--surface);color:var(--fg);font:650 10px var(--mono);text-align:right}
+.stream-switch{grid-template-columns:minmax(0,1fr) auto}
+.stream-wide{grid-column:1/-1;grid-template-columns:minmax(0,1fr) 150px}
+@media(max-width:1250px){
+  .residency-map{grid-template-columns:1fr}
+  .residency-tier{min-height:132px}
+  .residency-aux,.spec-control-grid,.stream-control-grid{grid-template-columns:1fr}
+  .stream-wide{grid-column:auto}
+}
+</style>
+<style id="catalog-allocation-controls">
+.allocation-stack{display:grid;gap:9px}
+.allocation-control{display:grid;grid-template-columns:168px minmax(0,1fr);min-height:116px;border:1px solid var(--border);background:var(--bg)}
+.allocation-readout{padding:14px 16px;border-right:1px solid var(--border);display:flex;flex-direction:column;justify-content:center}
+.allocation-readout>span{color:var(--muted);font:650 8px var(--mono);letter-spacing:.075em;text-transform:uppercase}
+.allocation-readout>strong{margin-top:8px;color:var(--fg);font:520 28px/1 var(--display);letter-spacing:-.04em}
+.allocation-readout>small{margin-top:6px;color:var(--dim);font:600 8px var(--mono);letter-spacing:.04em;text-transform:uppercase}
+.allocation-lane{min-width:0;padding:17px 18px;display:flex;flex-direction:column;justify-content:center}
+.allocation-scale,.allocation-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--dim);font:600 8px var(--mono);letter-spacing:.025em;text-transform:uppercase}
+.allocation-scale span:nth-child(2){color:var(--muted)}
+.allocation-lane input[type=range]{width:100%;height:7px;margin:14px 0 10px;cursor:pointer;accent-color:var(--accent)}
+.allocation-foot output{min-width:50px;padding:3px 7px;border:1px solid var(--accent-dim);background:oklch(.34 .11 298/.16);color:var(--accent);font:700 9px var(--mono);text-align:center}
+.allocation-warm .allocation-lane input[type=range]{accent-color:var(--success)}
+.allocation-warm .allocation-foot output{border-color:oklch(.73 .17 150/.34);background:oklch(.73 .17 150/.08);color:var(--success)}
+.allocation-prompt .allocation-lane input[type=range]{accent-color:oklch(.69 .16 220)}
+.allocation-prompt .allocation-foot output{border-color:oklch(.69 .16 220/.34);background:oklch(.69 .16 220/.08);color:oklch(.76 .12 220)}
+.residency-footer{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(210px,.8fr);gap:9px;margin-top:9px}
+.cold-source,.precision-control{min-width:0;min-height:68px;padding:10px 12px;border:1px solid var(--border);background:var(--bg);display:flex;align-items:center;gap:11px}
+.tier-chip{width:30px;height:26px;display:grid;place-items:center;background:var(--surface-3);color:var(--fg);font:700 9px var(--mono)}
+.cold-source>div{min-width:0;flex:1}.cold-source strong,.precision-control>span{font-size:10px;font-weight:650}
+.cold-source small,.precision-control small{display:block;margin-top:4px;color:var(--muted);font:500 8px var(--mono)}
+.cold-status{color:var(--muted);font:700 8px var(--mono);letter-spacing:.06em;text-transform:uppercase}
+.precision-control{display:grid;grid-template-columns:minmax(0,1fr) 96px}
+.precision-control select{width:100%;height:32px;padding:0 26px 0 8px;border:1px solid var(--border-hi);background:var(--surface);color:var(--fg);font:650 10px var(--mono)}
+@media(min-width:1400px) and (min-height:900px){
+  .allocation-control{grid-template-columns:190px minmax(0,1fr);min-height:126px}
+  .allocation-readout{padding:16px 18px}
+  .allocation-readout>span{font-size:9px}
+  .allocation-readout>strong{font-size:32px}
+  .allocation-readout>small{font-size:9px}
+  .allocation-scale,.allocation-foot{font-size:8px}
+  .allocation-foot output{font-size:10px}
+}
+@media(max-width:900px){
+  .allocation-control{grid-template-columns:1fr}
+  .allocation-readout{border-right:0;border-bottom:1px solid var(--border)}
+  .residency-footer{grid-template-columns:1fr}
+}
+</style>
+<style id="catalog-number-steppers">
+#models input[type=number]{appearance:textfield;-moz-appearance:textfield}
+#models input[type=number]::-webkit-inner-spin-button,#models input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.numeric-stepper{width:100%;min-width:0;height:34px;display:grid;grid-template-columns:31px minmax(0,1fr) 31px;border:1px solid var(--border-hi);background:var(--bg);box-shadow:inset 0 1px 0 oklch(1 0 0/.025)}
+.numeric-stepper input[type=number]{width:100%!important;height:32px!important;min-height:32px!important;margin:0!important;padding:0 7px!important;border:0!important;border-left:1px solid var(--border)!important;border-right:1px solid var(--border)!important;border-radius:0!important;background:transparent!important;box-shadow:none!important;color:var(--fg);font:700 11px var(--mono)!important;text-align:center!important;outline:0}
+.numeric-stepper:focus-within{border-color:var(--accent);box-shadow:0 0 0 2px oklch(.67 .22 298/.14)}
+.numeric-stepper .step-button{width:30px;height:32px;min-height:32px;padding:0;border:0;background:var(--surface-2);color:var(--muted);font:500 17px/1 var(--display);display:grid;place-items:center;transition:background .14s,color .14s}
+.numeric-stepper .step-button:hover{background:var(--surface-3);color:var(--fg)}
+.numeric-stepper .step-button:active{background:var(--accent-dim);color:var(--accent);transform:none}
+.numeric-stepper .step-button:focus-visible{position:relative;z-index:1;outline:1px solid var(--accent);outline-offset:-2px}
+.numeric-stepper:has(input:disabled){opacity:.55}.numeric-stepper:has(input:disabled) .step-button{pointer-events:none}
+.sampling-limits .numeric-stepper{margin-top:8px}
+.sampling-limits .numeric-stepper input[type=number]{margin:0!important;border-bottom:0!important}
+.metric-control-input .numeric-stepper{height:40px}
+.metric-control-input .numeric-stepper input[type=number]{height:38px!important;min-height:38px!important;font:540 20px/1 var(--display)!important}
+.metric-control-input .numeric-stepper .step-button{height:38px;min-height:38px}
+.unit-input .numeric-stepper{flex:1}
+.advanced-grid .numeric-stepper{margin-top:6px}
+</style>
+<style id="catalog-dark-native-controls">
+/* Keep WebKitGTK's native form controls in the same dark language as the panels. */
+html{color-scheme:dark}
+#models select{color-scheme:dark;-webkit-appearance:none;appearance:none;color:var(--fg)}
+#models .routing-picker select,
+#models .spec-control select,
+#models .precision-control select,
+#models .cache-tier select,
+#models .residency-select select,
+#models .aux-control select{background-color:var(--surface)!important;color:var(--fg)!important}
+#models .metric-control-input select{background-color:transparent!important;color:var(--fg)!important}
+#models #settingMicro{height:38px!important;min-height:38px!important;padding:0 30px 0 10px!important;border:1px solid var(--border-hi)!important;border-bottom:1px solid var(--border-hi)!important;border-radius:2px!important;background-color:var(--surface)!important;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%)!important;background-position:calc(100% - 13px) 50%,calc(100% - 8px) 50%!important;background-size:5px 5px,5px 5px!important;background-repeat:no-repeat!important;color:var(--fg)!important}
+#models #settingMicro:hover{background-color:var(--surface-2)!important;border-color:var(--muted)!important}
+#models .routing-picker select,
+#models .spec-control select,
+#models .precision-control select,
+#models .cache-tier select,
+#models .residency-select select,
+#models .aux-control select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%)!important;background-position:calc(100% - 13px) 50%,calc(100% - 8px) 50%!important;background-size:5px 5px,5px 5px!important;background-repeat:no-repeat!important}
+</style>
+<style id="catalog-stepper-visibility-fix">
+.numeric-stepper{min-width:104px;grid-template-columns:28px minmax(46px,1fr) 28px}
+.numeric-stepper .step-button{width:27px}
+.stream-control{grid-template-columns:minmax(0,1fr) minmax(142px,.62fr)}
+.stream-control .unit-input{min-width:0;display:grid;grid-template-columns:minmax(104px,1fr) auto;align-items:center;gap:7px}
+.stream-control .numeric-stepper{min-width:104px}
+.stream-switch{grid-template-columns:minmax(0,1fr) auto}
+.stream-wide{grid-template-columns:minmax(0,1fr) minmax(142px,190px)}
+@media(max-width:1250px){
+  .stream-control{grid-template-columns:minmax(0,1fr) minmax(150px,.45fr)}
+  .stream-switch{grid-template-columns:minmax(0,1fr) auto}
+}
+</style>
+<style id="catalog-sampling-balance-fix">
+.sampling-console{grid-template-columns:minmax(220px,.78fr) minmax(320px,1.22fr)}
+.temperature-control{padding:12px 14px}
+.sampling-limits{padding:10px 11px;gap:10px}
+.sampling-limits label{padding:10px 11px}
+.sampling-limits .numeric-stepper{min-width:112px}
+@media(max-width:1250px){
+  .sampling-console{grid-template-columns:1fr}
+}
+</style>
+<style id="catalog-setting-help">
+.setting-help-anchor{display:flex!important;align-items:center!important;flex-wrap:wrap;column-gap:6px;row-gap:0;min-width:0}
+.setting-help-anchor>small{flex:0 0 100%;width:100%}
+.setting-help{display:inline-grid;place-items:center;flex:0 0 15px;width:15px;height:15px;min-width:15px;min-height:15px;margin:0;padding:0;border:1px solid var(--border-hi);border-radius:50%;background:var(--surface-2);color:var(--muted);font:700 8px/1 var(--mono);vertical-align:middle}
+.setting-help:hover,.setting-help:focus-visible{border-color:var(--accent);background:var(--accent-dim);color:var(--accent);outline:0}
+.setting-help-popover{position:fixed;z-index:1000;width:min(292px,calc(100vw - 24px));padding:12px 13px;border:1px solid var(--border-hi);background:oklch(.175 .01 285);box-shadow:0 14px 40px oklch(0 0 0/.42);opacity:0;visibility:hidden;transform:translateY(-4px);pointer-events:none;transition:opacity .12s,transform .12s,visibility .12s}
+.setting-help-popover.show{opacity:1;visibility:visible;transform:none}
+.setting-help-popover strong{display:block;color:var(--accent);font:700 9px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.setting-help-popover p{margin:7px 0 0;color:var(--fg);font-size:11px;line-height:1.5}
+</style>
+<style id="catalog-runtime-actions">
+.settings-actions .action-set{align-items:center}
+.resource-guard{min-width:0;display:flex;flex-direction:column;gap:3px}
+.resource-guard .dirty{white-space:normal}
+.resource-guard small{color:var(--dim);font:600 8px/1.25 var(--mono);letter-spacing:.02em}
+.resource-guard.safe small{color:var(--success)}
+.resource-guard.warning small{color:var(--warning)}
+.resource-guard.blocked small{color:var(--danger)}
+.settings-actions .recommend{border-color:oklch(.69 .16 220/.45);background:oklch(.69 .16 220/.08);color:oklch(.76 .12 220)}
+.model-runtime-actions{display:flex;align-items:center;gap:7px}
+.action-divider{display:block;width:1px;height:24px;margin:0 2px;background:var(--border-hi)}
+.settings-actions .runtime-button{position:relative;min-width:112px;display:inline-flex;align-items:center;justify-content:center;gap:7px}
+.settings-actions .runtime-button.start{border-color:oklch(.73 .17 150/.45);background:oklch(.73 .17 150/.08);color:var(--success)}
+.settings-actions .runtime-button.stop{border-color:oklch(.66 .2 25/.44);background:oklch(.66 .2 25/.08);color:var(--danger)}
+.settings-actions .runtime-button.start:hover:not(:disabled){background:oklch(.73 .17 150/.14);border-color:var(--success)}
+.settings-actions .runtime-button.stop:hover:not(:disabled){background:oklch(.66 .2 25/.14);border-color:var(--danger)}
+.settings-actions .runtime-button:disabled{cursor:not-allowed;opacity:.38}
+.settings-actions .runtime-button.loading{min-width:142px;opacity:1;cursor:wait;color:var(--fg);border-color:var(--border-hi);background:var(--surface-3)}
+.button-spinner{display:none;width:12px;height:12px;border:2px solid var(--dim);border-top-color:var(--fg);border-radius:50%}
+.runtime-button.loading .button-spinner{display:block;animation:model-button-spin .72s linear infinite}
+@keyframes model-button-spin{to{transform:rotate(360deg)}}
+.engine-state.stopped .pulse{background:var(--danger);box-shadow:0 0 0 3px oklch(.66 .2 25/.1)}
+@media(max-width:1100px){
+  .settings-actions .runtime-button{min-width:90px;padding-inline:8px}
+  .settings-actions .runtime-button.loading{min-width:118px}
+}
+</style>
+<style id="chat-structural-redesign">
+.chat{padding:12px;grid-template-columns:300px minmax(0,1fr) 330px;gap:12px;background:var(--bg)}
+.chat .chat-sessions-panel,.chat .conversation-panel,.chat .telemetry-panel{display:grid;min-height:0}
+.chat-sessions-panel{grid-template-rows:36px 54px minmax(0,1fr) 66px}
+.session-tools{padding:9px;display:grid;grid-template-columns:minmax(0,1fr) 36px;gap:7px;border-bottom:1px solid var(--border)}
+.session-search{height:36px;display:grid;grid-template-columns:30px 1fr;align-items:center;border:1px solid var(--border-hi);background:var(--bg)}
+.session-search>span{color:var(--dim);text-align:center;font:500 16px var(--mono)}
+.session-search input{min-width:0;width:100%;height:34px;border:0;background:transparent;color:var(--fg);font:500 10px var(--mono);outline:0}
+.new-session{width:36px;height:36px;min-height:36px;padding:0;background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font:600 20px/1 var(--display)}
+.sessions{min-height:0;padding:9px;display:grid;align-content:start;gap:8px;overflow:auto}
+.sessions:empty::before{content:'No conversations yet';padding:18px 10px;color:var(--dim);font:600 9px var(--mono);letter-spacing:.07em;text-align:center;text-transform:uppercase;border:1px dashed var(--border)}
+.session{width:100%;min-height:104px;padding:12px;border:1px solid var(--border);background:var(--bg);text-align:left;display:flex;flex-direction:column;justify-content:space-between}
+.session:hover{border-color:var(--border-hi);background:var(--surface-2)}
+.session.active{border-color:var(--accent-dim);background:linear-gradient(135deg,oklch(.34 .11 298/.16),transparent 60%),var(--surface-2)}
+.session-top{display:grid;grid-template-columns:7px minmax(0,1fr) auto;align-items:center;gap:8px}
+.session-top i{width:6px;height:6px;background:var(--dim)}.session.active .session-top i{background:var(--success);box-shadow:0 0 0 3px oklch(.73 .17 150/.1)}
+.session-top strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:650}
+.session-top em{color:var(--dim);font:700 7px var(--mono);font-style:normal;letter-spacing:.07em;text-transform:uppercase}.session.active .session-top em{color:var(--success)}
+.session p{margin:9px 0;color:var(--muted);font-size:10px;line-height:1.4}
+.session footer{display:flex;justify-content:space-between;gap:8px;color:var(--dim);font:600 8px var(--mono);letter-spacing:.03em;text-transform:uppercase}
+.session-library{padding:11px 13px;border-top:1px solid var(--border);display:grid;grid-template-columns:1fr auto;align-content:center;gap:3px 10px;background:var(--surface-2)}
+.session-library span{color:var(--muted);font:650 8px var(--mono);letter-spacing:.07em;text-transform:uppercase}.session-library strong{font:650 11px var(--mono)}.session-library small{grid-column:1/-1;color:var(--dim);font:500 8px var(--mono)}
+.chat-empty{margin:auto;max-width:420px;padding:28px;text-align:center;color:var(--muted);border:1px dashed var(--border)}.chat-empty strong{display:block;margin-bottom:8px;color:var(--fg);font-size:14px}.chat-empty span{font:500 10px/1.6 var(--mono);color:var(--dim)}
+
+.conversation-panel{grid-template-rows:62px 52px minmax(0,1fr) auto}
+.conversation-head{padding:0 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:18px}
+.conversation-head>div:first-child span{display:block;color:var(--dim);font:650 8px var(--mono);letter-spacing:.08em;text-transform:uppercase}.conversation-head>div:first-child strong{display:block;margin-top:5px;font-size:14px}
+.conversation-engine{display:flex;align-items:center;gap:9px;text-align:right}.conversation-engine>i{width:7px;height:7px;background:var(--success);box-shadow:0 0 0 3px oklch(.73 .17 150/.1)}.conversation-engine span{font:650 10px var(--mono)}.conversation-engine small{display:block;margin-top:3px;color:var(--muted);font:500 8px var(--mono)}
+.conversation-strip{display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid var(--border);background:var(--surface-2)}
+.conversation-strip>span{padding:9px 13px;border-right:1px solid var(--border)}.conversation-strip>span:last-child{border-right:0}.conversation-strip small{display:block;color:var(--dim);font:650 7px var(--mono);letter-spacing:.07em;text-transform:uppercase}.conversation-strip strong{display:block;margin-top:5px;font:650 9px var(--mono)}
+.conversation-panel .messages{min-height:0;padding:22px 20px;overflow:auto;display:flex;flex-direction:column;gap:18px;background:linear-gradient(to right,transparent 0,transparent calc(100% - 1px),oklch(.31 .014 285/.16) calc(100% - 1px))}
+.message-row{width:min(760px,88%);display:grid;grid-template-columns:30px minmax(0,1fr);align-items:start;gap:10px}
+.message-row.user{align-self:flex-end;grid-template-columns:minmax(0,1fr) 30px}.message-row.user .message-avatar{grid-column:2}.message-row.user .message-shell{grid-column:1;grid-row:1}
+.message-avatar{width:30px;height:30px;display:grid;place-items:center;border:1px solid var(--border-hi);background:var(--surface-2);color:var(--muted);font:700 10px var(--mono)}.message-row.assistant .message-avatar{border-color:var(--accent-dim);color:var(--accent)}
+.message-shell{min-width:0;padding:13px 15px;border:1px solid var(--border);background:var(--bg)}.message-row.user .message-shell{background:var(--surface-3);border-color:var(--border-hi)}
+.message-shell header{display:flex;justify-content:space-between;gap:12px}.message-shell header strong{font-size:10px}.message-shell time{color:var(--dim);font:600 8px var(--mono)}
+.message-shell p{margin:9px 0 0;color:var(--fg);font-size:13px;line-height:1.58}
+.message-shell footer{display:flex;align-items:center;gap:6px;margin-top:12px;padding-top:9px;border-top:1px solid var(--border)}.message-shell footer button{height:24px;min-height:24px;padding:0 8px;border-color:var(--border);background:transparent;color:var(--muted);font:600 8px var(--mono);text-transform:uppercase}.message-shell footer span{margin-left:auto;color:var(--dim);font:600 8px var(--mono)}
+.message-row.generating .message-shell p{color:var(--muted);font-family:var(--mono)}
+.thinking-dots{display:inline-flex;gap:4px}.thinking-dots i{width:5px;height:5px;background:var(--accent);animation:chat-thinking 1s infinite ease-in-out}.thinking-dots i:nth-child(2){animation-delay:.15s}.thinking-dots i:nth-child(3){animation-delay:.3s}@keyframes chat-thinking{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:1;transform:translateY(-3px)}}
+.composer-shell{margin:0 16px 16px;border:1px solid var(--border-hi);background:var(--bg);box-shadow:0 8px 24px oklch(0 0 0/.16)}
+.composer-shell textarea{width:100%;height:76px;padding:13px 14px;border:0;background:transparent;color:var(--fg);resize:none;outline:0;font-size:12px;line-height:1.5}
+.composer-bar{min-height:44px;padding:6px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;border-top:1px solid var(--border);background:var(--surface-2)}
+.composer-context{height:27px;padding:0 9px;display:flex;align-items:center;gap:7px;border:1px solid var(--border);color:var(--muted);font:600 8px var(--mono);text-transform:uppercase}.attached-dot{width:5px;height:5px;background:var(--success)}
+.composer-hint{color:var(--dim);font:500 8px var(--mono);text-align:right}
+.conversation-panel .send{width:auto;height:32px;min-height:32px;margin:0;padding:0 11px;display:flex;align-items:center;gap:8px;background:var(--accent);color:var(--accent-ink);font:700 9px var(--mono);text-transform:uppercase}.send b{font:700 13px var(--display)}.send-spinner{display:none;width:11px;height:11px;border:2px solid oklch(.16 .02 298/.35);border-top-color:var(--accent-ink);border-radius:50%}.send.generating .send-spinner{display:block;animation:model-button-spin .72s linear infinite}.send.generating b{display:none}
+
+.telemetry-panel{grid-template-rows:36px minmax(0,1fr)}
+.telemetry-body{min-height:0;padding:11px;display:grid;grid-template-rows:auto auto auto auto;align-content:start;gap:10px;overflow:auto}
+.telemetry-model{padding:13px;border:1px solid var(--border);background:var(--bg)}.telemetry-model span,.telemetry-note span{color:var(--dim);font:650 8px var(--mono);letter-spacing:.07em;text-transform:uppercase}.telemetry-model strong{display:block;margin-top:7px;font-size:14px}.telemetry-model small{display:block;margin-top:5px;color:var(--muted);font:600 8px var(--mono)}
+.telemetry-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.telemetry-grid>div{min-height:92px;padding:11px;border:1px solid var(--border);background:var(--bg);display:flex;flex-direction:column;justify-content:space-between}.telemetry-grid span{color:var(--muted);font:650 8px var(--mono);letter-spacing:.06em;text-transform:uppercase}.telemetry-grid strong{font:540 23px/1 var(--display);letter-spacing:-.035em}.telemetry-grid small{color:var(--dim);font:600 8px var(--mono)}
+.telemetry-path{padding:11px;border:1px solid var(--border);background:var(--bg)}.telemetry-path header{display:flex;justify-content:space-between;gap:8px}.telemetry-path header span{color:var(--muted);font:650 8px var(--mono);text-transform:uppercase}.telemetry-path header strong{color:var(--success);font:700 8px var(--mono);text-transform:uppercase}.telemetry-path>div{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:center;gap:6px;margin-top:12px}.telemetry-path>div>span{padding:7px;border:1px solid var(--border);background:var(--surface);text-align:center}.telemetry-path i{display:inline-block;width:5px;height:5px;margin-right:5px;background:var(--success)}.telemetry-path i.cold{background:var(--dim)}.telemetry-path b{font:700 8px var(--mono)}.telemetry-path small{display:block;margin-top:4px;color:var(--dim);font:600 7px var(--mono)}.telemetry-path em{color:var(--dim);font-style:normal}
+.telemetry-note{padding:12px;border:1px solid var(--border);background:var(--surface-2)}.telemetry-note p{margin:7px 0 0;color:var(--muted);font-size:10px;line-height:1.45}
+@media(max-width:1500px){.chat{grid-template-columns:250px minmax(0,1fr) 290px}.session{min-height:94px}.telemetry-grid>div{min-height:82px}}
+@media(max-width:1100px){.chat{grid-template-columns:220px minmax(0,1fr)}.chat>.telemetry-panel{display:none}.conversation-head{padding-inline:12px}.conversation-panel .messages{padding:16px 14px}.composer-shell{margin:0 12px 12px}.composer-hint{display:none}}
+</style>
+</head>
+<body>
+<div id="app" class="shell">
+  <header class="titlebar" data-od-id="native-titlebar">
+    <div class="mark" aria-label="Siphon Studio"><span>S</span></div>
+    <div class="app-title"><span>Siphon Studio</span><span class="sim-label">Obsidian Console · Simulated telemetry</span></div>
+    <div class="window-tools" aria-label="Window controls"><button class="window-tool" aria-label="Minimize">─</button><button class="window-tool" aria-label="Maximize">□</button><button class="window-tool" aria-label="Close">×</button></div>
+  </header>
+  <div class="workspace">
+    <nav class="rail" aria-label="Primary navigation" data-od-id="primary-navigation">
+      <button class="active" data-tab="dashboard" data-od-id="nav-dashboard" aria-label="Dashboard" title="Dashboard"><svg viewBox="0 0 24 24"><path d="M4 4h6v7H4zM14 4h6v4h-6zM14 12h6v8h-6zM4 15h6v5H4z"/></svg></button>
+      <button data-tab="chat" data-od-id="nav-chat" aria-label="Chat" title="Chat"><svg viewBox="0 0 24 24"><path d="M5 5h14v11H9l-4 3z"/></svg></button>
+      <button data-tab="models" data-od-id="nav-models" aria-label="Models" title="Models"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM4 7.5l8 4.5 8-4.5M12 12v9"/></svg></button>
+      <button aria-label="Storage" title="Storage"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></button>
+      <div class="spacer"></div><button class="avatar" aria-label="Profile">SS</button>
+    </nav>
+    <main class="content">
+      <section class="toolbar" data-od-id="simulation-toolbar">
+        <div class="model-wrap" data-od-id="model-selector"><span class="model-glyph">◇</span><select id="modelSelect" aria-label="Model"><option value="qwen35">Qwen3.6 MoE 35B · Q4_K_M</option><option value="kat">KAT-Coder V2.5 · UD-IQ4_XS</option><option value="coderNext">Qwen3-Coder-Next · Q4_K_M</option></select><span class="chev">⌄</span></div>
+        <div class="engine-state" id="engineState" data-od-id="engine-state"><i class="pulse"></i><span>Engine <span id="engineMode">online</span> · request <b id="requestId">01842</b></span></div>
+        <div class="toolbar-actions"><button class="tool-btn" id="advanceBtn" data-od-id="refresh-telemetry">Refresh telemetry</button><button class="tool-btn primary" id="pauseBtn" data-od-id="pause-resume">Pause stream</button></div>
+      </section>
+
+      <section id="dashboard" class="tab-view active dashboard" data-od-id="dashboard-view">
+        <article class="panel decode-panel" data-od-id="decode-performance">
+          <header class="panel-head"><span><span class="panel-index">01 /</span> Inference throughput</span><span class="live" id="liveLabel">Live sample</span></header>
+          <div class="decode-main">
+            <div class="metric-hero"><div><div class="metric-label">Decode speed · dominant</div><div class="hero-value"><strong id="decodeValue">84.7</strong><span>TOK/S</span></div></div><div class="throughput-graph" aria-label="Overlapping decode and prefill throughput history"><div class="throughput-graph-head"><span class="decode-key"><i></i>decode throughput</span><span class="prefill-key"><i></i>prefill throughput</span></div><svg id="throughputGraph" viewBox="0 0 700 180" preserveAspectRatio="none"><path id="prefillGraphFill" class="graph-fill prefill-fill"></path><path id="decodeGraphFill" class="graph-fill decode-fill"></path><polyline id="prefillGraphLine" class="prefill-line"></polyline><polyline id="decodeGraphLine" class="decode-line"></polyline></svg></div><div class="delta" id="decodeDelta">6.2% above session mean</div></div>
+            <div class="prefill"><div class="metric-label">Prefill speed</div><div><strong id="prefillValue">1,684</strong><div class="unit">TOKENS / SECOND</div></div><div class="micro-note">Prompt <span id="prefillPromptValue">2,816</span> tok<br>Batch factor <span id="prefillBatchValue">1.00×</span></div></div>
+          </div>
+          <footer class="decode-footer">
+            <div class="mini-stat"><label>Draft acceptance</label><output id="acceptValue">71.8%</output><small>speculative / 6-token</small></div>
+            <div class="mini-stat"><label>RAM → VRAM</label><output id="ramVramValue">26.4 GB/s</output><small>pinned transfer lane</small></div>
+            <div class="mini-stat"><label>Context</label><output id="contextValue">12.6K</output><small id="contextLimitLabel">of 32K tokens</small></div>
+            <div class="mini-stat"><label>Active experts</label><output id="expertsValue">8 / 128</output><small>request aggregate</small></div>
+          </footer>
+        </article>
+
+        <section class="hardware-stack" aria-label="Hardware telemetry">
+          <article class="panel hardware" data-od-id="gpu-vram-status"><header class="panel-head"><span><span class="panel-index">02 /</span> GPU fabric</span><span id="gpuDeviceLabel">GPU telemetry unavailable</span></header><div class="hardware-body"><div class="gauge-box"><div class="metric-label">GPU utilization</div><div class="gauge-value" id="gpuValue">93%</div><div class="bar"><i id="gpuBar" style="width:93%"></i></div></div><div class="memory"><div class="memory-row"><label>VRAM residency</label><span class="temperature" id="gpuTemp">67°C</span></div><strong><span class="memory-value" id="vramUsed">22.8</span> <span class="memory-capacity" id="vramCapacity">/ 24.0 GB</span></strong><div class="bar accent"><i id="vramBar" style="width:95%"></i></div></div></div></article>
+          <article class="panel hardware" data-od-id="cpu-ram-status"><header class="panel-head"><span><span class="panel-index">03 /</span> Host compute</span><span id="hostDeviceLabel">Host telemetry unavailable</span></header><div class="hardware-body"><div class="gauge-box"><div class="metric-label">CPU utilization</div><div class="gauge-value" id="cpuValue">41%</div><div class="bar"><i id="cpuBar" style="width:41%"></i></div></div><div class="memory"><div class="memory-row"><label>RAM allocation</label><span class="temperature" id="cpuTemp">58°C</span></div><strong><span class="memory-value" id="ramUsed">41.6</span> <span class="memory-capacity" id="ramCapacity">/ 64.0 GB</span></strong><div class="bar"><i id="ramBar" style="width:65%"></i></div></div></div></article>
+          <article class="panel hardware" data-od-id="gds-storage-speed"><header class="panel-head"><span><span class="panel-index">04 /</span> GDS / NVMe direct storage</span><span id="gdsDeviceLabel">Direct storage telemetry</span></header><div class="gds-body"><div><div class="gds-number"><span class="gds-reading" id="gdsValue">11.2</span> <span class="gds-unit">GB/S</span></div><div class="micro-note">Direct read · 4K random mix</div></div><div class="flow-lines" aria-hidden="true"><i></i><i></i><i></i></div></div></article>
+        </section>
+
+        <article class="panel request-panel" data-od-id="request-telemetry">
+          <header class="panel-head"><span><span class="panel-index">05 /</span> Request-level movement summary</span><span id="elapsedValue">00:18.42 elapsed</span></header>
+          <div class="request-body">
+            <section class="residency"><div class="request-title"><strong>Expert movement · human-readable path</strong><span id="requestModeLabel">WAITING FOR ENGINE</span></div><div class="residency-grid"><div class="res-cell"><div class="status"><i class="dot"></i>L1 / VRAM served</div><strong id="l1Resident">106</strong><small>expert accesses this request</small></div><div class="res-cell"><div class="status"><i class="dot"></i>L2 / RAM served</div><strong id="l2Misses">17 misses</strong><small>experts transferred this request</small></div><div class="res-cell"><div class="status"><i class="dot red" id="coldDot"></i>SSD cold misses</div><strong id="coldMisses">5</strong><small id="coldState">2 transferring</small></div></div></section>
+            <section class="cache"><div class="cache-row"><label>L1 cache hit rate</label><strong id="l1Hit">91.4%</strong><div class="cache-meter"><i id="l1Bar" style="width:91.4%"></i></div></div><div class="cache-row"><label>L2 cache hit rate</label><strong id="l2Hit">96.7%</strong><div class="cache-meter"><i id="l2Bar" style="width:96.7%"></i></div></div></section>
+            <section class="calls"><div class="call"><label>Total streamed data<br>per request</label><strong id="streamedValue">6.84 GB</strong><small>VRAM + RAM + NVMe</small></div><div class="call"><label>Total decode calls<br>per request</label><strong id="decodeCalls">612</strong><small>batched dispatches</small></div><div class="call"><label>Total prefill calls<br>per request</label><strong id="prefillCalls">14</strong><small>chunked ingest</small></div></section>
+          </div>
+        </article>
+      </section>
+
+      <section id="chat" class="tab-view chat" data-od-id="chat-view">
+        <aside class="panel chat-sessions-panel"><header class="panel-head"><span>Inference sessions</span><span id="sessionCount">00 local</span></header><div class="session-tools"><div class="session-search"><span>⌕</span><input id="sessionSearch" type="search" placeholder="Find a session…" aria-label="Find a session"></div><button id="newSession" class="new-session" aria-label="New session">+</button></div><div class="sessions" id="chatSessions"></div><footer class="session-library"><span>Session library</span><strong id="sessionLibraryCount">0 conversations</strong><small>stored locally</small></footer></aside>
+
+        <article class="panel conversation-panel"><header class="conversation-head"><div><span>Active conversation</span><strong>New conversation</strong></div><div class="conversation-engine"><i></i><span id="chatEngineModel">Qwen3.6 MoE 35B<small>engine linked · live telemetry</small></span></div></header><div class="conversation-strip"><span><small>Request</small><strong id="chatRequestStrip">—</strong></span><span><small>Context</small><strong id="chatContextStrip">—</strong></span><span><small>Mode</small><strong id="chatModeStrip">Waiting for engine</strong></span></div><div class="messages" id="messages"><div class="chat-empty"><strong>Start a conversation</strong><span>Send a message below. Real messages and telemetry from this session will appear here.</span></div></div><div class="composer-shell"><textarea id="chatInput" aria-label="Message" placeholder="Ask Siphon about this inference session…"></textarea><div class="composer-bar"><div class="composer-context"><span class="attached-dot"></span>Telemetry attached</div><span class="composer-hint">Enter to send · Shift+Enter for newline</span><button class="send" id="sendBtn" aria-label="Send"><i class="send-spinner"></i><span>Send</span><b>↑</b></button></div></div></article>
+
+        <aside class="panel telemetry-panel"><header class="panel-head"><span>Attached telemetry</span><span class="live">Live</span></header><div class="telemetry-body"><section class="telemetry-model"><span>Active model</span><strong id="chatModel">Qwen3.6 MoE 35B</strong><small id="chatRequest">No active request · Q4_K_M</small></section><section class="telemetry-grid"><div><span>Decode</span><strong id="chatDecode">—</strong><small>tok/s</small></div><div><span>Prefill</span><strong id="chatPrefill">—</strong><small>tok/s</small></div><div><span>GPU</span><strong id="chatGpu">—</strong><small>utilization</small></div><div><span>Context</span><strong id="chatContext">—</strong><small id="chatContextLimit">of —</small></div><div><span>L1 hit</span><strong id="chatL1">—</strong><small>VRAM cache</small></div><div><span>L2 hit</span><strong id="chatL2">—</strong><small>RAM cache</small></div></section><section class="telemetry-path"><header><span>Expert data path</span><strong id="chatPathState">offline</strong></header><div><span><i></i><b>L1</b><small>VRAM</small></span><em>→</em><span><i></i><b>L2</b><small>RAM</small></span><em>→</em><span><i class="cold"></i><b>L3</b><small>NVMe</small></span></div></section><section class="telemetry-note"><span>Current diagnosis</span><p id="chatDiagnosis">No live inference telemetry is available yet.</p></section></div></aside>
+      </section>
+
+      <section id="models" class="tab-view models" data-od-id="models-view">
+        <aside class="panel catalog-panel" data-od-id="model-catalog">
+          <header class="panel-head"><span>Model catalogue</span><span id="catalogCount">03 available</span></header>
+          <div class="catalog-search"><input id="modelSearch" type="search" placeholder="Search models…" aria-label="Search models"><button id="addModel" class="add-model" aria-label="Add GGUF model" title="Add a local GGUF model">+</button></div>
+          <div class="model-list" id="modelList">
+            <button class="model-item active" data-model="qwen35"><strong>Qwen3.6 MoE 35B</strong><span class="model-state">ready</span><small>MoE · 256 experts · 8 active</small><span class="model-cap"><span>Q4_K_M · 21.1 GiB</span><span>41 layers</span></span></button>
+            <button class="model-item" data-model="kat"><strong>KAT-Coder V2.5</strong><span class="model-state">ready</span><small>MoE · 256 experts · 8 active</small><span class="model-cap"><span>UD-IQ4_XS · 17.0 GiB</span><span>41 layers</span></span></button>
+            <button class="model-item" data-model="coderNext"><strong>Qwen3-Coder-Next</strong><span class="model-state">ready</span><small>MoE · 512 experts · 10 active</small><span class="model-cap"><span>Q4_K_M · 45.2 GiB</span><span>48 layers</span></span></button>
+          </div>
+          <footer class="catalog-foot"><span>Library<br><strong>Local models</strong></span><span>Storage<br><strong id="catalogStorage">— used</strong></span></footer>
+        </aside>
+        <section class="panel settings-panel" data-od-id="model-settings">
+          <header class="settings-hero"><div class="settings-title"><div class="eyebrow">Active model · launch profile</div><h2 id="settingsModelName">Qwen3.6 MoE 35B</h2><p id="settingsModelMeta">MoE / 256 experts · Q4_K_M · 21.11 GiB local artifact</p></div><div class="settings-summary"><div class="summary-metric"><label>Architecture</label><strong id="settingsArch">MoE</strong></div><div class="summary-metric"><label>Layers</label><strong id="settingsLayers">41</strong></div><div class="summary-metric"><label>Dense weights</label><strong id="settingsDenseWeights">2.42 GiB</strong></div><div class="summary-metric"><label>Expert weights</label><strong id="settingsExpertWeights">18.68 GiB</strong></div><div class="summary-metric"><label>Native context</label><strong id="settingsNativeContext">256K</strong></div><div class="summary-metric"><label>Residency</label><strong id="settingsResidency">— / —</strong></div></div></header>
+          <span id="settingsNativeK" hidden></span><span id="settingsContext" hidden></span>
+          <div class="settings-layout">
+            <div class="settings-column">
+              <section class="settings-card core-card"><div class="card-head"><div><h3>Context window</h3><p>Choose the working KV capacity within the model's native limit.</p></div><span class="card-tag live" id="contextNativeNote">native 256K</span></div><div class="hero-control"><div class="hero-control-value"><span>Active allocation</span><strong id="contextWindowOut">64K</strong><small>tokens</small></div><div class="hero-control-lane"><div class="lane-scale"><span>4K</span><span>working context</span><span id="contextMaxLabel">256K native</span></div><input id="settingContextLength" type="range" min="4096" max="262144" value="65536" step="1024"><div class="lane-foot"><span>Lower memory pressure</span><output id="contextLengthOut">64K</output><span>Maximum recall</span></div></div></div></section>
+
+              <section class="settings-card runtime-card"><div class="card-head"><div><h3>Runtime shape</h3><p>Batch geometry for prompt ingestion and decode.</p></div><span class="card-tag">compute</span></div><div class="metric-control-grid"><label class="metric-control"><span class="metric-control-name">Logical batch<small>prompt ingestion · --batch-size</small></span><span class="metric-control-input"><input id="settingBatch" type="number" value="512" min="1"><em>tokens</em></span></label><label class="metric-control"><span class="metric-control-name">Microbatch<small>CUDA work unit · --ubatch-size</small></span><span class="metric-control-input"><select id="settingMicro"><option value="64">64</option><option value="128">128</option><option value="256">256</option><option value="512">512</option></select><em>tokens</em></span></label></div></section>
+
+              <section class="settings-card cache-card"><div class="card-head"><div><h3>Expert residency</h3><p>Allocate each memory tier with the same clear model used for context.</p></div><span class="card-tag live">L1 → L2 → SSD</span></div><div class="allocation-stack">
+                <div class="allocation-control allocation-hot"><div class="allocation-readout"><span>L1 / VRAM allocation</span><strong id="vramOut">2.7 GB</strong><small>hot expert cache</small></div><div class="allocation-lane"><div class="allocation-scale"><span>512 MiB</span><span>persistent experts</span><span id="vramMaxLabel">system max</span></div><input id="settingVram" type="range" min="512" max="4096" value="2800" step="128"><div class="allocation-foot"><span>fewer residents</span><output id="vramLaneOut">2.7 GB</output><span>more residents</span></div></div></div>
+                <div class="allocation-control allocation-warm"><div class="allocation-readout"><span>L2 / RAM allocation</span><strong id="pinnedOut">8 GB</strong><small>pinned expert cache</small></div><div class="allocation-lane"><div class="allocation-scale"><span>0 GB</span><span>warm promotion cache</span><span id="pinnedMaxLabel">system max</span></div><input id="settingPinned" type="range" min="0" max="16384" value="8192" step="1024"><div class="allocation-foot"><span>lean host use</span><output id="pinnedLaneOut">8 GB</output><span>fewer SSD misses</span></div></div></div>
+                <div class="allocation-control allocation-prompt"><div class="allocation-readout"><span>Prompt-cache allocation</span><strong id="cacheRamOut">4 GB</strong><small>KV prefix reuse</small></div><div class="allocation-lane"><div class="allocation-scale"><span>0 GB</span><span>prompt / KV cache</span><span id="cacheRamMaxLabel">system max</span></div><input id="settingCacheRam" type="range" min="0" max="32768" value="4096" step="512"><div class="allocation-foot"><span>lower RAM use</span><output id="cacheRamLaneOut">4 GB</output><span>more cached context</span></div></div></div>
+              </div><input id="settingPinnedMeter" type="hidden" value="72" disabled><div class="residency-footer"><div class="cold-source"><span class="tier-chip">L3</span><div><strong>NVMe / GDS cold source</strong><small>Unbounded expert fallback · loaded on demand</small></div><span class="cold-status">direct read</span></div><label class="precision-control"><span>Attention cache precision<small>cache type K / V</small></span><select id="settingKv"><option value="tq3_0">tq3_0</option><option value="q8_0">Q8_0</option><option value="q6_k">Q6_K</option><option value="f16">F16</option></select></label></div></section>
+            </div>
+
+            <div class="settings-column">
+              <section class="settings-card routing-card"><div class="card-head"><div><h3>Expert routing</h3><p>MoE dispatch controls are separate from token sampling.</p></div><span class="card-tag" id="expertKNative">native K 8</span></div><div class="routing-control"><div class="routing-readout"><span>Experts activated</span><strong id="routingValue">4</strong><small>per token</small></div><div class="routing-picker"><label for="settingExpertK">Routing profile</label><select id="settingExpertK"><option value="4">Fast · 4 experts</option><option value="6">Balanced · 6 experts</option><option value="8">Native · 8 experts</option></select><div class="routing-dots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><small>Siphon routing K · independent of sampling top-k</small></div></div></section>
+
+              <section class="settings-card sampling-card"><div class="card-head"><div><h3>Sampling</h3><p>Token distribution controls applied after routing.</p></div><span class="card-tag">decode</span></div><div class="sampling-console"><div class="temperature-control"><div class="temperature-readout"><span>Temperature</span><strong id="temperatureOut">0.70</strong><small>deterministic ←→ creative</small></div><input id="settingTemp" type="range" value="0.70" min="0" max="2" step=".05"><div class="temperature-scale"><span>0</span><span>1</span><span>2</span></div></div><div class="sampling-limits"><label><span>Sampling Top-K<small>candidate tokens · separate from routed experts</small></span><input id="settingSampleTopK" type="number" value="40" min="0"></label><label><span>Top-p<small>probability mass</small></span><input id="settingTopP" type="number" value="0.95" min="0" max="1" step=".01"></label></div></div></section>
+
+              <section class="settings-card spec-card"><div class="card-head"><div><h3>Speculative decoding</h3><p>Configure the proposal path and verification depth.</p></div><span class="card-tag" id="specModeLabel">native MTP</span></div><div class="spec-console"><div class="spec-hero"><div><span>Active strategy</span><strong id="specModeTitle">Native MTP head</strong><small id="specModeHint">Uses NextN tensors embedded in this GGUF.</small></div><span class="spec-badge">model-aware</span></div><div class="spec-control-grid"><label class="spec-control"><span>Execution mode<small>--spec-type</small></span><select id="settingSpecType"><option value="draft-mtp">Native MTP</option><option value="draft-simple">External draft</option><option value="none">Disabled</option></select></label><label class="spec-control"><span>Proposal model<small>draft network</small></span><select id="settingDraft"><option>Native MTP / NextN</option><option>Qwen3 0.6B Q8</option><option>Disabled</option></select></label><label class="spec-control spec-depth"><span>Verification depth<small>draft tokens per step</small></span><div><input id="settingDraftTokens" type="range" min="1" max="8" value="3"><output id="draftTokensOut">3 tok</output></div></label><label class="spec-control"><span>Probability floor<small>minimum draft confidence</small></span><div class="unit-input"><input id="settingAccept" type="number" value="0" min="0" max="1" step=".01"><em>p-min</em></div></label></div></div></section>
+
+              <section class="settings-card io-card"><div class="card-head"><div><h3>Streaming & reuse</h3><p>Control promotion, eviction, and direct-storage concurrency.</p></div><span class="card-tag live">runtime path</span></div><div class="stream-console"><div class="stream-path" aria-label="Expert data path"><div class="path-node"><span>L1</span><strong>VRAM</strong><small>active experts</small></div><i>→</i><div class="path-node"><span>L2</span><strong>RAM</strong><small>warm cache</small></div><i>→</i><div class="path-node"><span>L3</span><strong>NVMe</strong><small>GDS source</small></div></div><div class="stream-control-grid"><div class="stream-control stream-switch"><span>Evict to RAM<small>preserve displaced VRAM experts in L2</small></span><button class="switch on" data-setting="evictToRam" aria-label="Enabled"></button></div><label class="stream-control"><span>Promotion threshold<small>warm hits before VRAM admission</small></span><div class="unit-input"><input id="settingEvictHits" type="number" value="1" min="1" max="1024"><em>hits</em></div></label><label class="stream-control"><span>GDS workers<small>cuFile read concurrency</small></span><div class="unit-input"><input id="settingGdsThreads" type="number" value="20" min="1" max="32"><em>threads</em></div></label><div class="stream-control stream-switch"><span>Prompt cache<small>reuse matching KV prefixes</small></span><button class="switch on" data-setting="promptCache" aria-label="Enabled"></button></div><label class="stream-control stream-wide"><span>Context checkpoints<small>saved states available per server slot</small></span><div class="unit-input"><input id="settingCheckpoints" type="number" value="12" min="0"><em>states</em></div></label></div></div></section>
+            </div>
+
+            <details class="advanced-card"><summary>Advanced placement, sampling & backend controls</summary><div class="advanced-grid"><div class="compact-row"><label>GPU layers<small>--n-gpu-layers</small></label><input id="settingGpuLayers" type="number" value="999" min="0"></div><div class="compact-row"><label>Flash attention<small>fused kernels</small></label><button class="switch on" data-setting="flashAttention" aria-label="Enabled"></button></div><div class="compact-row"><label>RoPE scaling<small>position encoding</small></label><select id="settingRope"><option value="auto">Auto</option><option value="yarn">YaRN</option><option value="none">None</option></select></div><div class="compact-row"><label>Reasoning budget<small>-1 = unlimited</small></label><input id="settingReasoning" type="number" value="0" min="-1"></div></div></details>
+          </div>
+          <footer class="settings-actions"><div class="resource-guard" id="resourceGuard"><span class="dirty" id="settingsDirty">All settings synchronized</span><small id="resourceStatus">Waiting for live resource limits…</small></div><div class="action-set"><div class="model-runtime-actions"><button class="runtime-button start" id="startModel" disabled><i class="button-spinner" aria-hidden="true"></i><span>Start model</span></button><button class="runtime-button stop" id="stopModel"><i class="button-spinner" aria-hidden="true"></i><span>Stop model</span></button></div><i class="action-divider" aria-hidden="true"></i><button class="recommend" id="recommendSettings">Recommended</button><button id="resetSettings">Reset</button><button class="apply" id="applySettings">Apply settings</button></div></footer>
+        </section>
+      </section>
+    </main>
+  </div>
+</div>
+<div class="toast" id="toast" role="status"></div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const desktopHost = Boolean(window.webkit?.messageHandlers?.siphon);
+  if(desktopHost){const runtimeLabel=document.querySelector('.sim-label');if(runtimeLabel)runtimeLabel.textContent='Obsidian Console · Native runtime'}
+  function notifyDesktop(action,payload={}){if(desktopHost)window.webkit.messageHandlers.siphon.postMessage(JSON.stringify({action,...payload}))}
+  window.siphonDesktopEvent = event => {
+    if(!event||!event.type)return;
+    if(event.type==='runtime_complete'&&modelTransition){finishModelTransition(Boolean(event.starting),Boolean(event.ok),event.message||'')}
+    if(event.type==='telemetry'){
+      if(desktopHost)applyDesktopTelemetry(event);
+      if(typeof event.running==='boolean'&&event.running!==modelRunning&&!modelTransition)setModelRunning(event.running);
+      $('chatPathState').textContent=event.running?(event.health||'healthy'):'offline';
+    }
+    if(event.type==='model_info'){applyModelInfo(event);if(event.model_key===key){if(event.config?.rope_scaling&&$('settingRope'))$('settingRope').value=event.config.rope_scaling;const draft=event.config?.spec_type==='none'?'Disabled':event.config?.draft_model?'Qwen3 0.6B Q8':'Native MTP / NextN';if($('settingDraft')&&[...$('settingDraft').options].some(option=>option.value===draft))$('settingDraft').value=draft}}
+    if(event.type==='catalogue')applyCatalogue(event.models||[]);
+    if(event.type==='model_imported'){showToast(event.message||'MODEL IMPORT FINISHED');if(event.ok&&event.model_key)setModel(event.model_key,false)}
+    if(event.type==='settings_applied')handleSettingsApplied(event);
+    if(event.type==='chat_delta')handleChatDelta(event);
+    if(event.type==='chat_complete')handleChatComplete(event);
+    if(event.type==='chat_error')handleChatError(event);
+  };
+  const models = {
+    qwen35:{name:'Qwen3.6 MoE 35B',arch:'MoE',meta:'MoE / 256 experts · Q4_K_M · 21.1 GiB local artifact',layers:41,denseWeights:'2.4 GiB',expertWeights:'18.7 GiB',nativeContext:262144,context:'64K',contextTokens:65536,nativeK:8,expertK:8,l1Cache:2800,l2Cache:8192,cacheRam:4096,residency:'— / —',decode:84.7,prefill:1684,gpu:93,vram:22.8,cpu:41,ram:41.6,gds:11.2,accept:71.8,transfer:26.4,l1:91.4,l2:96.7,resident:106,l2miss:17,cold:5,streamed:6.84,dcalls:612,pcalls:14},
+    kat:{name:'KAT-Coder V2.5',arch:'MoE',meta:'MoE / 256 experts · UD-IQ4_XS · 17.0 GiB local artifact',layers:41,denseWeights:'2.4 GiB',expertWeights:'14.5 GiB',nativeContext:262144,context:'32K',contextTokens:32768,nativeK:8,expertK:8,l1Cache:2500,l2Cache:8192,cacheRam:4096,residency:'— / —',decode:84.7,prefill:1684,gpu:93,vram:22.8,cpu:41,ram:41.6,gds:11.2,accept:71.8,transfer:26.4,l1:91.4,l2:96.7,resident:106,l2miss:17,cold:5,streamed:6.84,dcalls:612,pcalls:14},
+    coderNext:{name:'Qwen3-Coder-Next',arch:'MoE',meta:'MoE / 512 experts · Q4_K_M · 45.2 GiB local artifact',layers:48,denseWeights:'1.6 GiB',expertWeights:'43.6 GiB',nativeContext:262144,context:'32K',contextTokens:32768,nativeK:10,expertK:10,l1Cache:2816,l2Cache:4096,cacheRam:2048,residency:'— / —',decode:84.7,prefill:1684,gpu:93,vram:22.8,cpu:41,ram:41.6,gds:11.2,accept:71.8,transfer:26.4,l1:91.4,l2:96.7,resident:106,l2miss:17,cold:5,streamed:6.84,dcalls:612,pcalls:14}
+  };
+  function emptyModel(name='Inspecting model…'){return {name,arch:'MoE',meta:'Reading GGUF metadata…',layers:null,denseWeights:'—',expertWeights:'—',nativeContext:32768,contextTokens:32768,nativeK:null,expertK:1,l1Cache:0,l2Cache:0,cacheRam:0,residency:'— / —'}}
+  function bindModelItem(item){item.addEventListener('click',()=>{setModel(item.dataset.model);syncVisualControls()})}
+  function applyCatalogue(entries){const list=$('modelList'),select=$('modelSelect'),seen=new Set(entries.map(entry=>entry.model_key));entries.forEach(entry=>{const modelKey=entry.model_key;if(!models[modelKey])models[modelKey]=emptyModel();let item=list.querySelector(`.model-item[data-model="${CSS.escape(modelKey)}"]`);if(!item){item=document.createElement('button');item.className='model-item';item.dataset.model=modelKey;item.innerHTML='<strong>Inspecting model…</strong><span class="model-state">reading</span><small>Reading GGUF metadata</small><span class="model-cap"><span>local artifact</span><span>— layers</span></span>';bindModelItem(item);list.appendChild(item)}if(![...select.options].some(option=>option.value===modelKey)){const option=document.createElement('option');option.value=modelKey;option.textContent=models[modelKey].name;select.appendChild(option)}notifyDesktop('inspect_model',{model:modelKey})});list.querySelectorAll('.model-item').forEach(item=>{if(!seen.has(item.dataset.model))item.remove()});[...select.options].forEach(option=>{if(!seen.has(option.value))option.remove()});$('catalogCount').textContent=`${entries.length} available`;if(!seen.has(key)&&entries.length)setModel(entries[0].model_key,false)}
+  let key='qwen35', paused=false, modelRunning=!desktopHost, modelTransition=null, generationTimer=null, chatGenerating=false, chatPendingRow=null, chatGenerationId=null, request=1842, activeContextLimit=0, tick=0, history=[77,79,81,80,82,83,82,84,85,83,84,86,85,84.7], prefillHistory=[1510,1548,1498,1582,1604,1576,1628,1642,1618,1665,1644,1680,1658,1684], lastDecodeSample=null, lastPrefillSample=null, resourceState=null, recommendedSettings=null, resourceBlocked=false, resourceNeedsSave=false;
+  const fmt=(n,d=1)=>Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+  const contextLabel=n=>{const value=Number(n);return value>=1024?`${(value/1024).toFixed(value>=10240?1:2).replace(/\.0+$/,'').replace(/(\.\d)0$/,'$1')}K`:`${Math.round(value)} tokens`};
+  const memoryLabel=mib=>{const value=Number(mib);if(value===0)return '0 GB';return value>=1024?((value/1024)%1?(value/1024).toFixed(1):(value/1024).toFixed(0))+' GB':value+' MiB'};
+  const isNumber=value=>typeof value==='number'&&Number.isFinite(value);
+  const setValue=(id,value,format=String)=>{const node=$(id);if(!node)return;node.textContent=isNumber(value)?format(value):'—'};
+  const clampPct=value=>Math.max(0,Math.min(100,Number(value)||0));
+  function updateSystemCapacity(vramGb,ramGb){
+    const update=(inputId,labelId,totalGb,step)=>{
+      const input=$(inputId),label=$(labelId);if(!input||!label||!isNumber(totalGb)||totalGb<=0)return;
+      const totalMib=totalGb*1024,max=Math.max(Number(input.min||0),Math.floor(totalMib/step)*step);
+      input.max=String(max);if(Number(input.value)>max)input.value=String(max);
+      label.textContent=`${totalGb.toFixed(1)} GB system`;
+    };
+    update('settingVram','vramMaxLabel',vramGb,128);
+    update('settingPinned','pinnedMaxLabel',ramGb,1024);
+    update('settingCacheRam','cacheRamMaxLabel',ramGb,512);
+    syncVisualControls();
+  }
+  function setResourceState(source){
+    const resources=source?.resources||source||{};
+    const ramAvailable=isNumber(resources.ram_available_gb)?resources.ram_available_gb:null;
+    const vramAvailable=isNumber(resources.vram_available_gb)?resources.vram_available_gb:null;
+    if(ramAvailable===null&&vramAvailable===null)return;
+    resourceState={
+      ramAvailable,
+      vramAvailable,
+      ramSafe:isNumber(resources.ram_safe_mib)?resources.ram_safe_mib:Math.max(0,(ramAvailable||0)*1024-2048),
+      vramSafe:isNumber(resources.vram_safe_mib)?resources.vram_safe_mib:Math.max(0,(vramAvailable||0)*1024-512),
+      ramHeadroom:isNumber(resources.ram_headroom_mib)?resources.ram_headroom_mib:2048,
+      vramHeadroom:isNumber(resources.vram_headroom_mib)?resources.vram_headroom_mib:512,
+      gdsMax:isNumber(resources.gds_threads_max)?resources.gds_threads_max:32
+    };
+    $('settingGdsThreads').max=String(resourceState.gdsMax);
+    if(Number($('settingGdsThreads').value)>resourceState.gdsMax){$('settingGdsThreads').value=String(resourceState.gdsMax);resourceNeedsSave=true}
+    constrainResourceSettings('',true);
+  }
+  function resourceCheck(){
+    if(!resourceState)return {ok:false,message:'Waiting for live RAM and VRAM availability…'};
+    const pinned=Number($('settingPinned').value)||0,prompt=Number($('settingCacheRam').value)||0,vram=Number($('settingVram').value)||0;
+    if(resourceState.ramAvailable!==null&&pinned+prompt>resourceState.ramSafe+1)return {ok:false,message:`RAM request ${memoryLabel(pinned+prompt)} exceeds safe ${memoryLabel(resourceState.ramSafe)} (2 GB headroom required).`};
+    if(resourceState.vramAvailable!==null&&!$('settingVram').disabled&&vram>resourceState.vramSafe+1)return {ok:false,message:`VRAM request ${memoryLabel(vram)} exceeds safe ${memoryLabel(resourceState.vramSafe)}.`};
+    return {ok:true,message:`Safe budget · RAM ${memoryLabel(pinned+prompt)} / ${memoryLabel(resourceState.ramSafe)} · VRAM ${memoryLabel(vram)} / ${memoryLabel(resourceState.vramSafe)}`};
+  }
+  function renderResourceStatus(message='',kind=''){
+    const check=resourceCheck(),guard=$('resourceGuard');resourceBlocked=!check.ok;
+    const pending=resourceNeedsSave&&check.ok;
+    guard.classList.remove('safe','warning','blocked');guard.classList.add(kind||(pending?'warning':check.ok?'safe':'blocked'));
+    $('resourceStatus').textContent=message||(pending?'Resource settings changed. Apply them before starting the model.':check.message);
+    updateRuntimeButtons();
+  }
+  function constrainResourceSettings(changedId='',announce=false){
+    if(!resourceState)return;
+    const vram=$('settingVram'),pinned=$('settingPinned'),prompt=$('settingCacheRam');let adjusted=false;
+    const vramMax=Math.max(0,Math.floor(resourceState.vramSafe/128)*128);
+    vram.max=String(Math.max(Number(vram.min)||0,vramMax));
+    if(Number(vram.value)>vramMax){vram.value=String(vramMax);adjusted=true}
+    const ramSafe=Math.max(0,Math.floor(resourceState.ramSafe/512)*512);
+    // L2 and prompt cache share one host-RAM ceiling, but they are otherwise
+    // independent controls. Keep each slider's native range at the full safe
+    // budget and constrain only the control the user is actively changing.
+    // This prevents WebKit from silently clamping the untouched sibling when
+    // its temporary DOM `max` becomes smaller than its current value.
+    pinned.max=String(Math.max(0,Math.floor(ramSafe/1024)*1024));
+    prompt.max=String(ramSafe);
+    if(changedId==='settingPinned'){
+      const allowed=Math.max(0,Math.floor((ramSafe-Number(prompt.value||0))/1024)*1024);if(Number(pinned.value)>allowed){pinned.value=String(allowed);adjusted=true}
+    }else if(changedId==='settingCacheRam'){
+      const allowed=Math.max(0,Math.floor((ramSafe-Number(pinned.value||0))/512)*512);if(Number(prompt.value)>allowed){prompt.value=String(allowed);adjusted=true}
+    }else if(Number(pinned.value)+Number(prompt.value)>ramSafe){
+      // Availability changed in the background. Preserve the expert cache
+      // first and trim prompt reuse only as much as required for headroom.
+      const promptAllowed=Math.max(0,Math.floor((ramSafe-Number(pinned.value||0))/512)*512);prompt.value=String(promptAllowed);adjusted=true;
+      if(Number(pinned.value)>ramSafe){pinned.value=String(Math.max(0,Math.floor(ramSafe/1024)*1024))}
+    }
+    $('vramMaxLabel').textContent=`${memoryLabel(vramMax)} safe now`;
+    $('pinnedMaxLabel').textContent=`${memoryLabel(ramSafe)} shared safe`;
+    $('cacheRamMaxLabel').textContent=`${memoryLabel(ramSafe)} shared safe`;
+    syncVisualControls();
+    if(adjusted)resourceNeedsSave=true;
+    renderResourceStatus(adjusted&&announce?'Allocation reduced to preserve live system headroom. Apply settings before starting.':'',adjusted?'warning':'');
+    if(adjusted&&announce)showToast('RESOURCE LIMIT APPLIED');
+  }
+  function clearDesktopRuntimeTelemetry(){
+    ['decodeValue','prefillValue','acceptValue','ramVramValue','contextValue','expertsValue','gpuValue','vramUsed','cpuValue','ramUsed','gdsValue','l1Hit','l2Hit','l1Resident','l2Misses','coldMisses','streamedValue','decodeCalls','prefillCalls','chatDecode','chatPrefill','chatGpu','chatContext','chatL1','chatL2'].forEach(id=>{if($(id))$(id).textContent='—'});
+    ['gpuTemp','cpuTemp','prefillPromptValue','prefillBatchValue'].forEach(id=>{if($(id))$(id).textContent='—'});
+    ['gpuBar','vramBar','cpuBar','ramBar','l1Bar','l2Bar'].forEach(id=>{if($(id))$(id).style.width='0%'});
+    if($('vramCapacity'))$('vramCapacity').textContent='/ —';
+    if($('ramCapacity'))$('ramCapacity').textContent='/ —';
+    activeContextLimit=0;if($('contextLimitLabel'))$('contextLimitLabel').textContent='of —';
+    if($('chatContextLimit'))$('chatContextLimit').textContent='of —';
+    ['vramMaxLabel','pinnedMaxLabel','cacheRamMaxLabel'].forEach(id=>{if($(id))$(id).textContent='system max'});
+    if($('decodeDelta'))$('decodeDelta').textContent='Waiting for live telemetry';
+    if($('coldState'))$('coldState').textContent='waiting for request data';
+    if($('requestModeLabel'))$('requestModeLabel').textContent='WAITING FOR ENGINE';
+    if($('requestId'))$('requestId').textContent='—';
+    if($('elapsedValue'))$('elapsedValue').textContent='— elapsed';
+    if($('gpuDeviceLabel'))$('gpuDeviceLabel').textContent='GPU telemetry unavailable';
+    if($('hostDeviceLabel'))$('hostDeviceLabel').textContent='Host telemetry unavailable';
+    if($('gdsDeviceLabel'))$('gdsDeviceLabel').textContent='Direct storage telemetry';
+    if($('chatRequest'))$('chatRequest').textContent='No active request';
+    if($('chatModel'))$('chatModel').textContent=models[key]?.name||'—';
+    if($('chatRequestStrip'))$('chatRequestStrip').textContent='—';
+    if($('chatContextStrip'))$('chatContextStrip').textContent='—';
+    if($('chatModeStrip'))$('chatModeStrip').textContent='Waiting for engine';
+    if($('initialDiagnosis'))$('initialDiagnosis').textContent='Waiting for live telemetry from the inference engine.';
+    if($('initialSpeed'))$('initialSpeed').textContent='— tok/s';
+    if($('chatDiagnosis'))$('chatDiagnosis').textContent='No live inference telemetry is available yet.';
+    history=[];prefillHistory=[];lastDecodeSample=null;lastPrefillSample=null;
+    if($('decodeGraphLine'))$('decodeGraphLine').setAttribute('points','');
+    if($('prefillGraphLine'))$('prefillGraphLine').setAttribute('points','');
+    if($('decodeGraphFill'))$('decodeGraphFill').setAttribute('d','');
+    if($('prefillGraphFill'))$('prefillGraphFill').setAttribute('d','');
+  }
+  function applyDesktopTelemetry(event){
+    const running=Boolean(event.running),requestState=event.request_state||'idle';
+    if(event.recommended)recommendedSettings=event.recommended;
+    updateSystemCapacity(event.vram_total_gb,event.ram_total_gb);
+    setResourceState(event);
+    const percent=value=>`${fmt(value,0)}%`;
+    // While inference is active, a transport that has not produced a field
+    // yet must not erase a live value supplied by the SSE stream or a prior
+    // telemetry poll. Offline/idle states still clear unavailable fields.
+    const setTelemetryValue=(id,value,format=String)=>{
+      if(isNumber(value)||requestState!=='active')setValue(id,value,format)
+    };
+    setTelemetryValue('decodeValue',event.decode_tps,fmt);setTelemetryValue('chatDecode',event.decode_tps,fmt);setTelemetryValue('initialSpeed',event.decode_tps,value=>`${fmt(value)} tok/s`);
+    setTelemetryValue('prefillValue',event.prefill_tps,value=>Math.round(value).toLocaleString('en-US'));setTelemetryValue('chatPrefill',event.prefill_tps,value=>Math.round(value).toLocaleString('en-US'));
+    setTelemetryValue('acceptValue',event.draft_accept_pct,fmt);if(isNumber(event.draft_accept_pct))$('acceptValue').textContent+= '%';
+    setTelemetryValue('ramVramValue',event.ram_vram_gbs,value=>`${fmt(value)} GB/s`);
+    setTelemetryValue('gpuValue',event.gpu_util,percent);if(isNumber(event.gpu_util))$('gpuBar').style.width=clampPct(event.gpu_util)+'%';
+    setTelemetryValue('gpuTemp',event.gpu_temp,value=>`${fmt(value,0)}°C`);
+    setTelemetryValue('vramUsed',event.vram_used_gb, value=>fmt(value,1));if(isNumber(event.vram_total_gb)){$('vramCapacity').textContent=`/ ${fmt(event.vram_total_gb,1)} GB`;$('vramBar').style.width=clampPct(event.vram_used_gb/event.vram_total_gb*100)+'%'}
+    setTelemetryValue('cpuValue',event.cpu_util,percent);if(isNumber(event.cpu_util))$('cpuBar').style.width=clampPct(event.cpu_util)+'%';
+    setTelemetryValue('cpuTemp',event.cpu_temp,value=>`${fmt(value,0)}°C`);setTelemetryValue('ramUsed',event.ram_used_gb,value=>fmt(value,1));if(isNumber(event.ram_total_gb)){$('ramCapacity').textContent=`/ ${fmt(event.ram_total_gb,1)} GB`;$('ramBar').style.width=clampPct(event.ram_used_gb/event.ram_total_gb*100)+'%'}
+    setTelemetryValue('gdsValue',event.gds_gbs,value=>fmt(value,1));
+    setTelemetryValue('l1Hit',event.l1_hit_pct,fmt);if(isNumber(event.l1_hit_pct))$('l1Hit').textContent+='%';if(isNumber(event.l1_hit_pct))$('l1Bar').style.width=clampPct(event.l1_hit_pct)+'%';
+    setTelemetryValue('l2Hit',event.l2_hit_pct,fmt);if(isNumber(event.l2_hit_pct))$('l2Hit').textContent+='%';if(isNumber(event.l2_hit_pct))$('l2Bar').style.width=clampPct(event.l2_hit_pct)+'%';
+    setTelemetryValue('streamedValue',event.streamed_gb,value=>`${fmt(value,2)} GB`);setTelemetryValue('decodeCalls',event.decode_calls,value=>Math.round(value).toLocaleString('en-US'));setTelemetryValue('prefillCalls',event.prefill_calls,value=>Math.round(value).toLocaleString('en-US'));
+    setTelemetryValue('expertsValue',event.active_experts,value=>`${Math.round(value)} / token`);
+    setTelemetryValue('l1Resident',event.l1_resident,value=>Math.round(value).toLocaleString('en-US'));setTelemetryValue('l2Misses',event.l2_resident,value=>Math.round(value).toLocaleString('en-US'));setTelemetryValue('coldMisses',event.cold_misses,value=>Math.round(value).toLocaleString('en-US'));if(isNumber(event.cold_misses)){$('coldState').textContent=event.cold_misses>0?'loaded from SSD this request':'no SSD reloads this request';$('coldDot').classList.toggle('red',event.cold_misses>0)}
+    if(activeContextLimit){const limit=contextLabel(activeContextLimit);$('contextLimitLabel').textContent=`of ${limit} tokens`;$('chatContextLimit').textContent=`of ${limit}`}
+    if(isNumber(event.n_prompt)&&event.n_prompt>0){const context=contextLabel(event.n_prompt);$('contextValue').textContent=context;$('chatContext').textContent=context;$('prefillPromptValue').textContent=Math.round(event.n_prompt).toLocaleString('en-US');$('chatContextStrip').textContent=`${context} / ${activeContextLimit?contextLabel(activeContextLimit):'—'}`}
+    if(event.gpu_name)$('gpuDeviceLabel').textContent=event.gpu_name;
+    if(event.cpu_name)$('hostDeviceLabel').textContent=event.cpu_name;
+    if(!running){$('requestModeLabel').textContent='WAITING FOR ENGINE';$('chatModeStrip').textContent='Waiting for engine';$('chatRequest').textContent='No active request';$('chatDiagnosis').textContent='No live inference telemetry is available while the engine is offline.';$('contextValue').textContent='—';$('chatContext').textContent='—';$('prefillPromptValue').textContent='—';if(history.length||prefillHistory.length){history=[];prefillHistory=[];lastDecodeSample=null;lastPrefillSample=null;$('decodeGraphLine').setAttribute('points','');$('prefillGraphLine').setAttribute('points','');$('decodeGraphFill').setAttribute('d','');$('prefillGraphFill').setAttribute('d','')}if($('decodeDelta'))$('decodeDelta').textContent='Waiting for live telemetry';if($('liveLabel')){$('liveLabel').textContent='Engine stopped';$('liveLabel').style.color='var(--danger)'}}
+    else if(requestState==='active'){$('requestModeLabel').textContent='LIVE / CURRENT REQUEST';$('chatModeStrip').textContent='Telemetry attached';$('chatRequest').textContent='Active request';$('chatDiagnosis').textContent='Live inference telemetry is attached to this conversation.';if($('liveLabel')){$('liveLabel').textContent='Live request';$('liveLabel').style.color='var(--success)'}}
+    else if(requestState==='completed'){$('requestModeLabel').textContent='LAST COMPLETED REQUEST';$('chatModeStrip').textContent='Latest request summary';$('chatRequest').textContent='Latest completed request';$('chatDiagnosis').textContent='Metrics below belong to the most recent request in this model session.';if($('decodeDelta'))$('decodeDelta').textContent='Latest request · real telemetry';if($('liveLabel')){$('liveLabel').textContent='Request complete';$('liveLabel').style.color='var(--success)'}}
+    else{$('requestModeLabel').textContent='ENGINE READY / NO REQUEST';$('chatModeStrip').textContent='Ready for a request';$('chatRequest').textContent='No active request';$('chatDiagnosis').textContent='The model is loaded. Request-level telemetry will appear when inference begins.';if($('decodeDelta'))$('decodeDelta').textContent='Waiting for the first request';if($('coldState'))$('coldState').textContent='waiting for request data';if($('liveLabel')){$('liveLabel').textContent='Engine ready';$('liveLabel').style.color='var(--success)'}}
+    // A graph point represents an advancing engine counter, not a UI polling
+    // tick. This prevents flat, fabricated-looking history from repeated
+    // copies of one completed-request gauge.
+    if(isNumber(event.decode_tps)&&isNumber(event.decode_sample)&&event.decode_sample!==lastDecodeSample){history.push(event.decode_tps);lastDecodeSample=event.decode_sample;if(history.length>28)history.shift()}
+    if(isNumber(event.prefill_tps)&&isNumber(event.prefill_sample)&&event.prefill_sample!==lastPrefillSample){prefillHistory=[0,event.prefill_tps,0];lastPrefillSample=event.prefill_sample}
+    if(history.length||prefillHistory.length)updateThroughputGraphs();
+  }
+  function applyModelInfo(event){
+    const base=models[event.model_key]||(models[event.model_key]=emptyModel());
+    if(event.model_key===key&&event.resources)setResourceState(event.resources);
+    if(event.model_key===key&&event.recommended)recommendedSettings=event.recommended;
+    if(isNumber(event.library_storage_gib)&&$('catalogStorage'))$('catalogStorage').textContent=`${event.library_storage_gib.toFixed(2)} GiB used`;
+    if(isNumber(event.library_count)&&$('catalogCount'))$('catalogCount').textContent=`${event.library_count} available`;
+    const config=event.config||{};
+    if(!event.available){base.name='Model unavailable';base.meta='No configured launcher profile or GGUF artifact found';base.residency='— / —';if(event.model_key===key){renderModelSettings();syncVisualControls()}return}
+    if(event.phase==='profile'){
+      base.config=config;base.contextTokens=config.context||base.contextTokens;base.expertK=config.expert_k||base.expertK;base.l1Cache=config.l1_cache||base.l1Cache;base.l2Cache=config.l2_cache||base.l2Cache;base.cacheRam=config.cache_ram||base.cacheRam;
+      if(event.model_key===key){activeContextLimit=Number(config.context||0);const limit=activeContextLimit?`of ${contextLabel(activeContextLimit)} tokens`:'of —';$('contextLimitLabel').textContent=limit;$('chatContextLimit').textContent=limit.replace(' tokens','');renderModelSettings();syncVisualControls();constrainResourceSettings('',true)}
+      return;
+    }
+    const architecture=Number(event.expert_count||0)>0?'MoE':'Dense';
+    base.name=event.name||base.name;base.arch=architecture;base.layers=event.layers||null;base.nativeContext=event.native_context||base.nativeContext;base.contextTokens=config.context||base.contextTokens;base.config=config;base.nativeK=event.expert_used_count||null;base.expertK=config.expert_k||event.expert_used_count||null;base.l1Cache=config.l1_cache||0;base.l2Cache=config.l2_cache||0;base.cacheRam=config.cache_ram||0;base.residency='— / —';base.denseWeights=isNumber(event.dense_gib)?`${event.dense_gib.toFixed(2)} GiB`:'—';base.expertWeights=Number(event.expert_count||0)>0&&isNumber(event.expert_gib)?`${event.expert_gib.toFixed(2)} GiB`:'—';base.meta=architecture==='MoE'?`${architecture} / ${event.expert_count} experts · ${event.expert_used_count} native active · ${event.artifact_gib} GiB local artifact`:`${architecture} / ${event.layers} layers · ${event.artifact_gib} GiB local artifact`;
+    const item=document.querySelector(`#modelList .model-item[data-model="${CSS.escape(event.model_key)}"]`);if(item){const title=item.querySelector('strong'),state=item.querySelector('.model-state'),summary=item.querySelector('small'),caps=item.querySelectorAll('.model-cap span');if(title)title.textContent=base.name;if(state){state.textContent='ready';state.style.color='var(--success)'}if(summary)summary.textContent=architecture==='MoE'?`${architecture} · ${event.expert_count} experts · ${event.expert_used_count} active`:`${architecture} · ${event.layers} layers`;if(caps[0])caps[0].textContent=`${event.artifact_gib} GiB artifact`;if(caps[1])caps[1].textContent=`${event.layers} layers`}const option=[...$('modelSelect').options].find(option=>option.value===event.model_key);if(option)option.textContent=base.name;
+    if(event.model_key===key){activeContextLimit=Number(config.context||0);const limit=activeContextLimit?`of ${contextLabel(activeContextLimit)} tokens`:'of —';$('contextLimitLabel').textContent=limit;$('chatContextLimit').textContent=limit.replace(' tokens','');$('chatModel').textContent=base.name;if($('chatEngineModel'))$('chatEngineModel').firstChild.textContent=base.name;renderModelSettings();syncVisualControls();constrainResourceSettings('',true)}
+  }
+  function handleSettingsApplied(event){
+    if(event.ok){resourceNeedsSave=false;$('settingsDirty').textContent=event.message||'Settings saved';$('settingsDirty').style.color=event.restart_required?'var(--warning)':'var(--success)';renderResourceStatus();showToast(event.restart_required?'SETTINGS SAVED · RESTART REQUIRED':'SETTINGS SAVED')}
+    else{$('settingsDirty').textContent=event.message||'Could not save settings';$('settingsDirty').style.color='var(--danger)';showToast('SETTINGS NOT SAVED')}
+  }
+  function collectSettings(){
+    const enabled=name=>Boolean(document.querySelector(`[data-setting="${name}"]`)?.classList.contains('on'));
+    return {context:Number($('settingContextLength').value),batch:Number($('settingBatch').value),microbatch:Number($('settingMicro').value),gpu_layers:Number($('settingGpuLayers').value),expert_k:Number($('settingExpertK').value),vram_cache:Number($('settingVram').value),pinned_cache:Number($('settingPinned').value),cache_ram:Number($('settingCacheRam').value),cache_type:$('settingKv').value,rope_scaling:$('settingRope').value.toLowerCase(),spec_type:$('settingSpecType').value,draft_model:$('settingDraft').value,draft_tokens:Number($('settingDraftTokens').value),draft_probability:Number($('settingAccept').value),gds_threads:Number($('settingGdsThreads').value),checkpoints:Number($('settingCheckpoints').value),promotion_hits:Number($('settingEvictHits').value),reasoning_budget:Number($('settingReasoning').value),temperature:Number($('settingTemp').value),top_k:Number($('settingSampleTopK').value),top_p:Number($('settingTopP').value),evict_to_ram:enabled('evictToRam'),prompt_cache:enabled('promptCache'),flash_attention:enabled('flashAttention')};
+  }
+  function collectChatHistory(){
+    return Array.from(document.querySelectorAll('#messages .message-row')).map(row=>{const role=row.classList.contains('user')?'user':'assistant',body=row.querySelector('p')?.textContent?.trim()||'';return {role,content:body}}).filter(item=>item.content&&!item.content.startsWith('Waiting for live telemetry')&&!item.content.startsWith('No live inference telemetry'));
+  }
+  function handleChatDelta(event){
+    if(!chatGenerating||event.generation_id!==chatGenerationId||!chatPendingRow)return;
+    const body=chatPendingRow.querySelector('p');if(body)body.textContent=event.text||event.thought||'';chatPendingRow.classList.remove('generating');
+    // Dashboard metrics are owned by applyDesktopTelemetry(), which reads
+    // the engine's live /metrics gauges.  Do not overwrite them with the
+    // first-token/stream-chunk estimates carried by chat_delta (especially
+    // the old 1 / first-token-latency prefill approximation). The response
+    // footer is also left untouched until the completed request telemetry is
+    // available, so an SSE estimate cannot flash over the live value.
+    $('messages').scrollTop=$('messages').scrollHeight;
+  }
+  function handleChatComplete(event){
+    if(event.generation_id!==chatGenerationId)return;
+    chatGenerating=false;setGenerating(false);if(chatPendingRow){chatPendingRow.classList.remove('generating');const body=chatPendingRow.querySelector('p');if(body)body.textContent=event.text||event.thought||(event.stopped?'Generation stopped.':'No response content returned.');addMessageActions(chatPendingRow)}chatPendingRow=null;chatGenerationId=null;
+    // In the native app, the following telemetry poll owns all metric DOM
+    // nodes. The SSE completion timings can use a different averaging window
+    // than /metrics, so writing them here causes visible value oscillation.
+    if(!desktopHost){
+      if(isNumber(event.decode_tps)){$('decodeValue').textContent=fmt(event.decode_tps);$('chatDecode').textContent=fmt(event.decode_tps);$('initialSpeed').textContent=`${fmt(event.decode_tps)} tok/s`;history.push(event.decode_tps);if(history.length>28)history.shift()}
+      if(isNumber(event.prefill_tps)){$('prefillValue').textContent=Math.round(event.prefill_tps).toLocaleString('en-US');$('chatPrefill').textContent=Math.round(event.prefill_tps).toLocaleString('en-US');prefillHistory.push(event.prefill_tps);if(prefillHistory.length>28)prefillHistory.shift()}
+      if(isNumber(event.draft_accept_pct))$('acceptValue').textContent=fmt(event.draft_accept_pct)+'%';
+      if(isNumber(event.n_prompt)&&event.n_prompt>0){const context=contextLabel(event.n_prompt);$('contextValue').textContent=context;$('chatContext').textContent=context;$('prefillPromptValue').textContent=Math.round(event.n_prompt).toLocaleString('en-US');$('chatContextStrip').textContent=`${context} / ${activeContextLimit?contextLabel(activeContextLimit):'—'}`}
+      if(isNumber(event.decode_tps)||isNumber(event.prefill_tps))updateThroughputGraphs();
+    }
+    if(desktopHost){$('requestModeLabel').textContent='LAST COMPLETED REQUEST';$('chatModeStrip').textContent='Latest request summary';$('chatRequest').textContent='Latest completed request';$('chatDiagnosis').textContent='Metrics below belong to the most recent request in this model session.';if($('liveLabel')){$('liveLabel').textContent='Request complete';$('liveLabel').style.color='var(--success)'}}
+    $('messages').scrollTop=$('messages').scrollHeight;
+  }
+  function handleChatError(event){
+    if(event.generation_id!==chatGenerationId)return;
+    chatGenerating=false;setGenerating(false);if(chatPendingRow){chatPendingRow.classList.remove('generating');const body=chatPendingRow.querySelector('p');if(body)body.textContent=event.message||'Chat request failed.';addMessageActions(chatPendingRow)}chatPendingRow=null;chatGenerationId=null;$('messages').scrollTop=$('messages').scrollHeight;showToast('CHAT REQUEST FAILED');
+  }
+  function throughputBounds(series){
+    const finite=series.flat().filter(value=>Number.isFinite(value));
+    if(!finite.length)return null;
+    let min=Math.min(...finite),max=Math.max(...finite),span=max-min;
+    // Each trace uses its own visual scale because prefill throughput can be
+    // thousands of times higher than decode throughput. The labels retain
+    // the exact measured values; the graph communicates each phase's shape.
+    const padding=Math.max(span*.18,Math.abs((min+max)/2)*.08,1);
+    min-=padding;max+=padding;span=Math.max(max-min,1);
+    return {min,max,span};
+  }
+  function seriesPoints(values,bounds,w=700,h=180){
+    if(!values.length||!bounds)return '';
+    const {min,max,span}=bounds;
+    const point=value=>{const safe=Number.isFinite(value)?value:min;return Math.max(0,Math.min(h,h-(safe-min)/span*h))};
+    if(values.length===1){const y=point(values[0]);return `0,${y} ${w},${y}`}
+    const denominator=values.length-1;
+    return values.map((value,i)=>`${i*w/denominator},${point(value)}`).join(' ')
+  }
+  function updateThroughputGraphs(){const w=700,h=180,decodeBounds=throughputBounds([history]),prefillBounds=throughputBounds([prefillHistory]),decodePts=seriesPoints(history,decodeBounds,w,h),prefillPts=seriesPoints(prefillHistory,prefillBounds,w,h);$('decodeGraphLine').setAttribute('points',decodePts);$('prefillGraphLine').setAttribute('points',prefillPts);$('decodeGraphFill').setAttribute('d',decodePts?`M0,${h} L${decodePts.replaceAll(' ',' L')} L${w},${h} Z`:'' );$('prefillGraphFill').setAttribute('d',prefillPts?`M0,${h} L${prefillPts.replaceAll(' ',' L')} L${w},${h} Z`:'' )}
+  function renderModelSettings(){const base=models[key],isMoe=base.arch==='MoE',native=Number(base.nativeContext||32768),active=Math.min(Number(base.contextTokens||32768),native),config=base.config||{};$('settingsModelName').textContent=base.name;$('settingsModelMeta').textContent=base.meta;$('settingsArch').textContent=base.arch;$('settingsNativeK').textContent=base.nativeK?base.nativeK:'—';$('settingsLayers').textContent=base.layers||'—';$('settingsDenseWeights').textContent=base.denseWeights||'—';$('settingsExpertWeights').textContent=base.expertWeights||'—';$('settingsNativeContext').textContent=contextLabel(native);$('contextNativeNote').textContent='native '+contextLabel(native);$('expertKNative').textContent=base.nativeK?'native K '+base.nativeK:'dense model';$('settingsContext').textContent=contextLabel(active);$('settingsResidency').textContent=base.residency||'—';$('settingVram').value=base.l1Cache||512;$('vramOut').textContent=base.l1Cache?(base.l1Cache/1024).toFixed(1)+' GB':'n/a';$('settingPinned').value=String(base.l2Cache||2048);$('settingCacheRam').value=base.cacheRam||8192;$('settingContextLength').max=String(native);$('settingContextLength').value=String(active);$('contextLengthOut').textContent=contextLabel(active);$('contextWindowOut').textContent=contextLabel(active);$('settingExpertK').value=String(base.expertK||4);$('settingExpertK').disabled=!isMoe;$('settingVram').disabled=!isMoe;$('settingPinned').disabled=!isMoe;$('settingPinnedMeter').disabled=true;if(config.batch)$('settingBatch').value=config.batch;if(config.microbatch&&[...$('settingMicro').options].some(option=>option.value===String(config.microbatch)))$('settingMicro').value=String(config.microbatch);if(config.gpu_layers!==undefined)$('settingGpuLayers').value=config.gpu_layers;if(config.expert_k)$('settingExpertK').value=config.expert_k;if(config.cache_type&&[...$('settingKv').options].some(option=>option.value===config.cache_type))$('settingKv').value=config.cache_type;if(config.reasoning_budget!==undefined)$('settingReasoning').value=config.reasoning_budget;if(config.temperature!==undefined)$('settingTemp').value=config.temperature;if(config.top_k!==undefined)$('settingSampleTopK').value=config.top_k;if(config.top_p!==undefined)$('settingTopP').value=config.top_p;if(config.spec_type)$('settingSpecType').value=config.spec_type;if(config.draft_tokens!==undefined)$('settingDraftTokens').value=Math.max(1,config.draft_tokens);$('draftTokensOut').textContent=($('settingDraftTokens').value||'—')+' tok';if(config.draft_probability!==undefined)$('settingAccept').value=config.draft_probability;if(config.gds_threads)$('settingGdsThreads').value=config.gds_threads;if(config.promotion_hits)$('settingEvictHits').value=config.promotion_hits;[['evictToRam',config.evict_to_ram],['promptCache',config.prompt_cache],['flashAttention',config.flash_attention]].forEach(([name,enabled])=>{const toggle=document.querySelector(`[data-setting="${name}"]`);if(toggle&&typeof enabled==='boolean'){toggle.classList.toggle('on',enabled);toggle.setAttribute('aria-label',enabled?'Enabled':'Disabled')}});$('specModeTitle').textContent=isMoe?'Native MTP head':'No native MoE speculation';$('specModeHint').textContent=isMoe?'Uses model-native NextN tensors when present.':'Dense model: choose an external draft model or disable speculation.';$('specModeLabel').textContent=isMoe?'native MTP':'external / off';document.querySelectorAll('#modelList .model-item').forEach(item=>item.classList.toggle('active',item.dataset.model===key))}
+  function setModel(next,toast=true){key=next;recommendedSettings=null;if(desktopHost){clearDesktopRuntimeTelemetry()}else{history=Array.from({length:18},(_,i)=>models[key].decode-5+Math.sin(i*.7)*2+i*.22);prefillHistory=Array.from({length:18},(_,i)=>models[key].prefill-90+Math.sin(i*.7)*24+i*5);apply(models[key]);updateThroughputGraphs()}$('modelSelect').value=key;$('chatModel').textContent=models[key].name;if($('chatEngineModel'))$('chatEngineModel').firstChild.textContent=models[key].name;renderModelSettings();constrainResourceSettings('',true);notifyDesktop('select_model',{model:key});if(toast)showToast(models[key].name.toUpperCase()+' ACTIVE')}
+  function markSettingsDirty(){ $('settingsDirty').textContent='Unsaved changes'; $('settingsDirty').style.color='var(--warning)' }
+  function syncVisualControls(){const base=models[key],isMoe=Boolean(base.nativeK),expertCount=isMoe?Number($('settingExpertK').value):0,vram=memoryLabel($('settingVram').value),pinned=memoryLabel($('settingPinned').value),prompt=memoryLabel($('settingCacheRam').value);$('contextMaxLabel').textContent=contextLabel(base.nativeContext||32768)+' native';$('routingValue').textContent=expertCount||'—';document.querySelectorAll('.routing-dots i').forEach((dot,index)=>dot.classList.toggle('active',index<expertCount));$('temperatureOut').textContent=Number($('settingTemp').value).toFixed(2);$('vramOut').textContent=isMoe?vram:'n/a';$('vramLaneOut').textContent=isMoe?vram:'disabled';$('pinnedOut').textContent=isMoe?pinned:'n/a';$('pinnedLaneOut').textContent=isMoe?pinned:'disabled';$('cacheRamOut').textContent=prompt;$('cacheRamLaneOut').textContent=prompt}
+  function decorateNumberInputs(){document.querySelectorAll('#models input[type=number]').forEach(input=>{if(input.closest('.numeric-stepper'))return;const stepper=document.createElement('div');stepper.className='numeric-stepper';const minus=document.createElement('button'),plus=document.createElement('button');minus.type=plus.type='button';minus.className=plus.className='step-button';minus.textContent='−';plus.textContent='+';minus.setAttribute('aria-label','Decrease '+input.id);plus.setAttribute('aria-label','Increase '+input.id);input.before(stepper);stepper.append(minus,input,plus);minus.addEventListener('click',()=>{if(input.disabled)return;input.stepDown();input.dispatchEvent(new Event('input',{bubbles:true}))});plus.addEventListener('click',()=>{if(input.disabled)return;input.stepUp();input.dispatchEvent(new Event('input',{bubbles:true}))})})}
+  const settingHelp=[
+    ['#settingContextLength','Context window','Maximum tokens retained for the active request. Larger values improve long-context recall but consume more KV-cache memory and can reduce speed.'],
+    ['#settingBatch','Logical batch','Prompt tokens processed together. Larger batches can improve prefill throughput, but require more VRAM and may increase latency.'],
+    ['#settingMicro','Microbatch','The smaller GPU work unit used inside a logical batch. Too large can exhaust VRAM; too small can leave the GPU underused.'],
+    ['#settingExpertK','Routed experts','Number of MoE experts activated for each token. Higher values increase compute and memory traffic and may change model quality.'],
+    ['#settingTemp','Temperature','Controls sampling randomness. Lower values are more predictable; higher values are more varied and can become less reliable.'],
+    ['#settingSampleTopK','Sampling Top-K','Limits sampling to the K most likely tokens. This is not the MoE routed-expert K setting. Lower values are more focused; higher values allow more variety.'],
+    ['#settingTopP','Top-P','Keeps the smallest token set whose combined probability reaches this value. Lower values reduce randomness.'],
+    ['#settingVram','L1 / VRAM allocation','Reserves GPU memory for hot experts. More allocation reduces transfer stalls but leaves less VRAM for context and other buffers.'],
+    ['#settingPinned','L2 / RAM allocation','Reserves pinned host RAM for warm experts. More allocation reduces SSD reads but increases locked system-memory usage.'],
+    ['#settingCacheRam','Prompt-cache allocation','Reserves RAM for reusable prompt and KV prefixes. Larger caches improve repeated prompts but increase host-memory consumption.'],
+    ['#settingKv','Cache precision','Controls how attention keys and values are stored. Lower precision saves memory but may slightly affect output quality.'],
+    ['#settingSpecType','Speculation mode','Selects how draft tokens are proposed. Native MTP is model-aware; external draft requires a compatible smaller model.'],
+    ['#settingDraft','Proposal model','The model or embedded head that proposes tokens before verification. A poor match can lower acceptance and reduce performance.'],
+    ['#settingDraftTokens','Verification depth','Maximum draft tokens proposed per verification step. More tokens can accelerate decode when acceptance is high, but waste work when it is low.'],
+    ['#settingAccept','Probability floor','Rejects draft tokens below this confidence. Raising it is safer but can reduce speculative-decoding gains.'],
+    ['[data-setting="evictToRam"]','Evict to RAM','Keeps experts displaced from VRAM in the pinned-RAM tier. This reduces future SSD reads but uses additional host memory.'],
+    ['#settingEvictHits','Promotion threshold','Warm-cache hits required before promoting an expert to VRAM. Low values react quickly; high values avoid unnecessary transfers.'],
+    ['#settingGdsThreads','GDS workers','Parallel direct-storage read workers. More threads can improve SSD throughput until CPU, queue, or device contention becomes the bottleneck.'],
+    ['[data-setting="promptCache"]','Prompt cache','Reuses matching prompt prefixes across requests. It improves repeated workloads but retains additional KV data in memory.'],
+    ['#settingCheckpoints','Context checkpoints','Saved context states per server slot. More checkpoints improve reuse and recovery while consuming additional memory.'],
+    ['#settingGpuLayers','GPU layers','Number of model layers placed on the GPU. More layers are usually faster but require more VRAM.'],
+    ['[data-setting="flashAttention"]','Flash attention','Uses fused attention kernels to reduce memory traffic and improve speed. Disable only for compatibility or debugging.'],
+    ['#settingRope','RoPE scaling','Controls position scaling beyond the trained context range. Incorrect settings can significantly reduce long-context quality.'],
+    ['#settingReasoning','Reasoning budget','Limits internal reasoning tokens when supported. Larger budgets may improve difficult answers but increase latency and token use.']
+  ];
+  function settingHelpAnchor(target){const routes=[['.hero-control','.hero-control-value>span'],['.metric-control','.metric-control-name'],['.routing-control','.routing-picker>label'],['.temperature-control','.temperature-readout>span'],['.sampling-limits label',':scope>span'],['.allocation-control','.allocation-readout>span'],['.precision-control',':scope>span'],['.spec-control',':scope>span'],['.stream-control',':scope>span'],['.advanced-grid .compact-row',':scope>label']];for(const [containerSelector,anchorSelector] of routes){const container=target.closest(containerSelector);if(container){const anchor=container.querySelector(anchorSelector);if(anchor)return anchor}}return target.closest('label')}
+  function decorateSettingHelp(){const popover=document.createElement('div');popover.className='setting-help-popover';popover.setAttribute('role','tooltip');popover.innerHTML='<strong></strong><p></p>';document.body.appendChild(popover);let active=null;const hide=()=>{popover.classList.remove('show');if(active)active.setAttribute('aria-expanded','false');active=null};const show=(button,name,description)=>{active=button;popover.querySelector('strong').textContent=name;popover.querySelector('p').textContent=description;button.setAttribute('aria-expanded','true');popover.classList.add('show');const rect=button.getBoundingClientRect(),width=popover.offsetWidth,height=popover.offsetHeight;let left=Math.min(window.innerWidth-width-12,Math.max(12,rect.left-width/2+rect.width/2)),top=rect.bottom+8;if(top+height>window.innerHeight-12)top=Math.max(12,rect.top-height-8);popover.style.left=left+'px';popover.style.top=top+'px'};settingHelp.forEach(([selector,name,description])=>{const target=document.querySelector(selector),anchor=target&&settingHelpAnchor(target);if(!anchor)return;anchor.classList.add('setting-help-anchor');const button=document.createElement('button');button.type='button';button.className='setting-help';button.textContent='i';button.setAttribute('aria-label','About '+name);button.setAttribute('aria-expanded','false');button.addEventListener('mouseenter',()=>show(button,name,description));button.addEventListener('mouseleave',hide);button.addEventListener('focus',()=>show(button,name,description));button.addEventListener('blur',hide);button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();active===button?hide():show(button,name,description)});const descriptor=anchor.querySelector(':scope > small');descriptor?descriptor.before(button):anchor.appendChild(button)});document.addEventListener('click',hide);window.addEventListener('resize',hide)}
+  function apply(base,jitter=0){
+    const v=(n,a=0)=>n+(jitter?Math.sin(tick*.83+a)*jitter:0); const decode=v(base.decode,1.4), prefill=v(base.prefill,21);
+    $('decodeValue').textContent=fmt(decode);$('prefillValue').textContent=Math.round(prefill).toLocaleString();$('acceptValue').textContent=fmt(v(base.accept,.5))+'%';$('ramVramValue').textContent=fmt(v(base.transfer,.35))+' GB/s';
+    $('gpuValue').textContent=Math.round(v(base.gpu,2))+'%';$('gpuBar').style.width=Math.round(v(base.gpu,2))+'%';$('vramUsed').textContent=fmt(v(base.vram,.08));$('vramBar').style.width=(base.vram/24*100)+'%';$('gpuTemp').textContent=Math.round(66+base.gpu/30)+'°C';
+    $('cpuValue').textContent=Math.round(v(base.cpu,3))+'%';$('cpuBar').style.width=Math.round(v(base.cpu,3))+'%';$('ramUsed').textContent=fmt(v(base.ram,.12));$('ramBar').style.width=(base.ram/64*100)+'%';$('cpuTemp').textContent=Math.round(53+base.cpu/9)+'°C';$('gdsValue').textContent=fmt(v(base.gds,.22));
+    $('l1Hit').textContent=fmt(base.l1)+'%';$('l1Bar').style.width=base.l1+'%';$('l2Hit').textContent=fmt(base.l2)+'%';$('l2Bar').style.width=base.l2+'%';$('l1Resident').textContent=base.resident;$('l2Misses').textContent=base.l2miss+' misses';$('coldMisses').textContent=base.cold;
+    $('streamedValue').textContent=fmt(base.streamed,2)+' GB';$('decodeCalls').textContent=base.dcalls+tick;$('prefillCalls').textContent=base.pcalls;$('chatModel').textContent=base.name;$('chatDecode').textContent=fmt(decode);$('chatPrefill').textContent=Math.round(prefill).toLocaleString();$('chatGpu').textContent=Math.round(v(base.gpu,2))+'%';$('chatL1').textContent=fmt(base.l1)+'%';$('chatL2').textContent=fmt(base.l2)+'%';
+    if(jitter){history.push(decode);if(history.length>28)history.shift();prefillHistory.push(prefill);if(prefillHistory.length>28)prefillHistory.shift();updateThroughputGraphs()}
+  }
+  function showToast(msg){$('toast').textContent=msg;$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),1600)}
+  function updateRuntimeButtons(){const busy=Boolean(modelTransition);$('startModel').disabled=busy||modelRunning||resourceBlocked||resourceNeedsSave;$('stopModel').disabled=busy||!modelRunning;$('applySettings').disabled=busy||resourceBlocked}
+  function setModelRunning(running){modelRunning=running;$('engineState').classList.toggle('stopped',!running);const activeItem=document.querySelector('#modelList .model-item.active .model-state');if(activeItem)activeItem.textContent=running?'loaded':'ready';if(running){setPaused(false);$('pauseBtn').disabled=false}else{$('engineMode').textContent='offline';$('liveLabel').textContent='Engine stopped';$('liveLabel').style.color='var(--danger)';$('pauseBtn').disabled=true}updateRuntimeButtons()}
+  function finishModelTransition(starting,success=true,message=''){if(!modelTransition)return;clearTimeout(modelTransition.timeout);const button=$(starting?'startModel':'stopModel'),label=button.querySelector('span');button.classList.remove('loading');button.removeAttribute('aria-busy');label.textContent=starting?'Start model':'Stop model';modelTransition=null;$('modelSelect').disabled=false;$('resetSettings').disabled=false;$('applySettings').disabled=false;document.querySelectorAll('#modelList .model-item').forEach(item=>item.disabled=false);setModelRunning(success?starting:!starting);$('settingsDirty').textContent=success?'All settings synchronized':(message||'Model action failed');$('settingsDirty').style.color=success?'var(--dim)':'var(--danger)';showToast(success?(starting?'MODEL STARTED':'MODEL STOPPED'):'MODEL ACTION FAILED')}
+  function transitionModel(starting){if(modelTransition||starting===modelRunning)return;if(starting){const check=resourceCheck();if(!check.ok){renderResourceStatus(check.message,'blocked');showToast('UNSAFE RESOURCE ALLOCATION');return}}if(starting&&desktopHost)clearDesktopRuntimeTelemetry();const button=$(starting?'startModel':'stopModel'),label=button.querySelector('span');modelTransition={kind:starting?'starting':'stopping',timeout:null};button.classList.add('loading');button.setAttribute('aria-busy','true');label.textContent=starting?'Loading weights…':'Unloading weights…';$('settingsDirty').textContent=starting?'Loading model weights into memory…':'Unloading model weights from memory…';$('settingsDirty').style.color='var(--muted)';$('modelSelect').disabled=true;$('resetSettings').disabled=true;$('applySettings').disabled=true;document.querySelectorAll('#modelList .model-item').forEach(item=>item.disabled=true);updateRuntimeButtons();notifyDesktop(starting?'start_model':'stop_model',{model:key});modelTransition.timeout=setTimeout(()=>finishModelTransition(starting,false,'Timed out waiting for the model runtime.'),desktopHost?660000:(starting?2600:1900));}
+  function setPaused(next){paused=next;$('pauseBtn').textContent=paused?'Resume stream':'Pause stream';$('engineState').classList.toggle('paused',paused);$('engineMode').textContent=paused?'paused':'online';$('requestId').textContent=desktopHost?'—':String(request).padStart(5,'0');$('liveLabel').textContent=paused?'Sample held':'Live sample';$('liveLabel').style.color=paused?'var(--warning)':'var(--success)';notifyDesktop('pause_telemetry',{paused})}
+  function advance(){if(desktopHost){notifyDesktop('refresh_telemetry',{model:key});showToast('TELEMETRY REFRESHED');return}request++;tick=0;const b=models[key];b.dcalls=Math.max(420,Math.round(b.dcalls*(.91+Math.random()*.16)));b.pcalls=Math.max(8,Math.round(b.pcalls*(.88+Math.random()*.2)));b.streamed=Math.max(3.8,b.streamed*(.9+Math.random()*.16));$('chatRequest').textContent='REQ-'+String(request).padStart(5,'0');$('engineState').querySelector('b').textContent=String(request).padStart(5,'0');$('coldState').textContent=b.cold?'2 transferring':'all resident';$('coldDot').classList.toggle('red',b.cold>0);apply(b);showToast('REQUEST '+String(request).padStart(5,'0')+' LOADED')}
+  document.querySelectorAll('.rail [data-tab]').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('.rail [data-tab]').forEach(x=>x.classList.toggle('active',x===btn));document.querySelectorAll('.tab-view').forEach(x=>x.classList.toggle('active',x.id===btn.dataset.tab))}));
+  $('modelSelect').addEventListener('change',e=>setModel(e.target.value));
+  document.querySelectorAll('#modelList .model-item').forEach(item=>item.addEventListener('click',()=>setModel(item.dataset.model)));
+  $('modelSelect').addEventListener('change',syncVisualControls);
+  document.querySelectorAll('#modelList .model-item').forEach(item=>item.addEventListener('click',syncVisualControls));
+  $('modelSearch').addEventListener('input',e=>{const query=e.target.value.toLowerCase();document.querySelectorAll('#modelList .model-item').forEach(item=>item.hidden=!item.textContent.toLowerCase().includes(query))});
+  $('addModel').addEventListener('click',()=>{if(!desktopHost){showToast('AVAILABLE IN THE DESKTOP APP');return}notifyDesktop('add_model');showToast('SELECT A GGUF MODEL')});
+  document.querySelectorAll('#models input,#models select').forEach(control=>['change','input'].forEach(eventName=>control.addEventListener(eventName,()=>{if(control.id==='settingVram')$('vramOut').textContent=(Number(control.value)/1024).toFixed(1)+' GB';if(control.id==='settingDraftTokens')$('draftTokensOut').textContent=control.value+' tok';if(control.id==='settingSpecType'){$('specModeLabel').textContent=control.value==='draft-mtp'?'native MTP':control.value==='draft-simple'?'external draft':'disabled';$('specModeTitle').textContent=control.value==='draft-mtp'?'Native MTP head':control.value==='draft-simple'?'External draft model':'Speculation disabled'}markSettingsDirty()})));
+  $('settingContextLength').addEventListener('input',e=>{const label=contextLabel(e.target.value);$('contextLengthOut').textContent=label;$('contextWindowOut').textContent=label;$('settingsContext').textContent=label;markSettingsDirty()});
+  $('settingExpertK').addEventListener('change',syncVisualControls);
+  $('settingTemp').addEventListener('input',syncVisualControls);
+  ['settingVram','settingPinned','settingCacheRam'].forEach(id=>$(id).addEventListener('input',()=>{resourceNeedsSave=true;constrainResourceSettings(id,true);syncVisualControls();updateRuntimeButtons()}));
+  document.querySelectorAll('#models .switch').forEach(toggle=>toggle.addEventListener('click',()=>{toggle.classList.toggle('on');toggle.setAttribute('aria-label',toggle.classList.contains('on')?'Enabled':'Disabled');markSettingsDirty()}));
+  $('applySettings').addEventListener('click',()=>{const check=resourceCheck();if(!check.ok){renderResourceStatus(check.message,'blocked');showToast('UNSAFE RESOURCE ALLOCATION');return}if(desktopHost){$('settingsDirty').textContent='Saving settings…';$('settingsDirty').style.color='var(--muted)';notifyDesktop('apply_settings',{model:key,settings:collectSettings()})}else{$('settingsDirty').textContent='Settings synchronized';$('settingsDirty').style.color='var(--success)';showToast('MODEL SETTINGS APPLIED')}});
+  $('recommendSettings').addEventListener('click',()=>{if(!recommendedSettings){showToast('RECOMMENDATION STILL LOADING');return}if(isNumber(recommendedSettings.vram_cache))$('settingVram').value=recommendedSettings.vram_cache;if(isNumber(recommendedSettings.pinned_cache))$('settingPinned').value=recommendedSettings.pinned_cache;if(isNumber(recommendedSettings.cache_ram))$('settingCacheRam').value=recommendedSettings.cache_ram;if(isNumber(recommendedSettings.context)&&recommendedSettings.context>0)$('settingContextLength').value=recommendedSettings.context;if(isNumber(recommendedSettings.expert_k)&&recommendedSettings.expert_k>0)$('settingExpertK').value=String(recommendedSettings.expert_k);if(isNumber(recommendedSettings.gds_threads))$('settingGdsThreads').value=recommendedSettings.gds_threads;resourceNeedsSave=true;constrainResourceSettings('',false);syncVisualControls();const label=contextLabel($('settingContextLength').value);$('contextLengthOut').textContent=label;$('contextWindowOut').textContent=label;markSettingsDirty();renderResourceStatus('Recommended settings fit the live budget. Apply settings before starting.','safe');showToast('RECOMMENDED SETTINGS APPLIED')});
+  $('startModel').addEventListener('click',()=>transitionModel(true));
+  $('stopModel').addEventListener('click',()=>transitionModel(false));
+  $('resetSettings').addEventListener('click',()=>{
+    document.querySelectorAll('#models .switch').forEach(toggle=>{
+      toggle.classList.add('on');
+      toggle.setAttribute('aria-label','Enabled');
+    });
+    $('settingGpuLayers').value=999;
+    $('settingDraftTokens').value=3;
+    $('draftTokensOut').textContent='3 tok';
+    renderModelSettings();
+    resourceNeedsSave=false;
+    constrainResourceSettings('',true);
+    syncVisualControls();
+    if(!resourceNeedsSave){$('settingsDirty').textContent='All settings synchronized';$('settingsDirty').style.color='var(--dim)'}
+    showToast('SETTINGS RESET');
+  });
+  $('pauseBtn').addEventListener('click',()=>setPaused(!paused));$('advanceBtn').addEventListener('click',advance);
+  function createChatMessage(role,text,generating=false){const row=document.createElement('div');row.className='message-row '+role+(generating?' generating':'');const avatar=document.createElement('div');avatar.className='message-avatar';avatar.textContent=role==='user'?'Y':'S';const shell=document.createElement('div');shell.className='message-shell';const header=document.createElement('header'),name=document.createElement('strong'),time=document.createElement('time'),body=document.createElement('p');name.textContent=role==='user'?'You':'Siphon';time.textContent='now';header.append(name,time);if(generating)body.innerHTML='<span class="thinking-dots"><i></i><i></i><i></i></span>';else body.textContent=text;shell.append(header,body);row.append(avatar,shell);return row}
+  function addMessageActions(row){const shell=row.querySelector('.message-shell'),footer=document.createElement('footer'),copy=document.createElement('button'),retry=document.createElement('button'),speed=document.createElement('span');copy.textContent='Copy';retry.textContent='Retry';speed.textContent=$('chatDecode').textContent+' tok/s';copy.addEventListener('click',()=>showToast('RESPONSE COPIED'));retry.addEventListener('click',()=>showToast('RETRY QUEUED'));footer.append(copy,retry,speed);shell.appendChild(footer)}
+  function setGenerating(active){const button=$('sendBtn');button.classList.toggle('generating',active);button.querySelector('span').textContent=active?'Stop':'Send';button.setAttribute('aria-label',active?'Stop generation':'Send')}
+  function send(){if(desktopHost&&chatGenerating){notifyDesktop('chat_stop',{generation_id:chatGenerationId});return}if(generationTimer){clearTimeout(generationTimer);generationTimer=null;document.querySelector('.message-row.generating')?.remove();setGenerating(false);showToast('GENERATION STOPPED');return}const text=$('chatInput').value.trim();if(!text||!modelRunning)return;if(!$('chatSessions').querySelector('.session'))$('newSession').click();$('messages').querySelector('.chat-empty')?.remove();const user=createChatMessage('user',text),pending=createChatMessage('assistant','',true);$('messages').append(user,pending);$('chatInput').value='';$('messages').scrollTop=$('messages').scrollHeight;if(desktopHost){chatGenerating=true;chatPendingRow=pending;chatGenerationId=`chat-${Date.now()}`;setGenerating(true);notifyDesktop('chat_send',{model:key,prompt:text,history:collectChatHistory(),generation_id:chatGenerationId});return}setGenerating(true);generationTimer=setTimeout(()=>{pending.classList.remove('generating');pending.querySelector('p').textContent='Telemetry attached. '+models[key].name+' is decoding at '+$('chatDecode').textContent+' tok/s with '+$('chatL1').textContent+' L1 cache hits. The current request remains compute-bound with no critical storage pressure.';addMessageActions(pending);generationTimer=null;setGenerating(false);$('messages').scrollTop=$('messages').scrollHeight},700)}
+  $('sessionSearch').addEventListener('input',event=>{const query=event.target.value.toLowerCase();document.querySelectorAll('#chatSessions .session').forEach(session=>session.hidden=!session.textContent.toLowerCase().includes(query))});
+  document.querySelectorAll('#chatSessions .session').forEach(session=>session.addEventListener('click',()=>{document.querySelectorAll('#chatSessions .session').forEach(item=>item.classList.toggle('active',item===session));document.querySelector('.conversation-head>div:first-child strong').textContent=session.querySelector('.session-top strong').textContent}));
+  $('newSession').addEventListener('click',()=>{document.querySelectorAll('#chatSessions .session').forEach(item=>item.classList.remove('active'));const session=document.createElement('button');session.className='session active';session.innerHTML='<div class="session-top"><i></i><strong>Untitled inference session</strong><em>live</em></div><p>New telemetry-linked conversation.</p><footer><span>0 context</span><span>now</span></footer>';$('chatSessions').prepend(session);const count=$('chatSessions').querySelectorAll('.session').length;$('sessionCount').textContent=String(count).padStart(2,'0')+' local';$('sessionLibraryCount').textContent=count+' '+(count===1?'conversation':'conversations');document.querySelector('.conversation-head>div:first-child strong').textContent='Untitled inference session';$('messages').replaceChildren();showToast('NEW SESSION CREATED')});
+  $('sendBtn').addEventListener('click',send);$('chatInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
+  document.querySelectorAll('.window-tool').forEach(button=>button.addEventListener('click',()=>{const label=button.getAttribute('aria-label');notifyDesktop('window_action',{name:label==='Minimize'?'minimize':label==='Maximize'?'maximize':'close'})}));
+  decorateNumberInputs();decorateSettingHelp();renderModelSettings();syncVisualControls();if(desktopHost){clearDesktopRuntimeTelemetry();setModelRunning(false)}else{apply(models[key]);updateThroughputGraphs()}updateRuntimeButtons();notifyDesktop('page_ready',{model:key});setInterval(()=>{if(paused||!modelRunning)return;tick++;if(!desktopHost){apply(models[key],1);$('elapsedValue').textContent='00:'+(18.42+tick*.8).toFixed(2).padStart(5,'0')+' elapsed';if(tick%7===0){$('coldState').textContent='all resident';$('coldDot').classList.remove('red')}}},800);
+})();
+</script>
+</body>
+</html>

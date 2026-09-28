@@ -1,0 +1,185 @@
+{
+ "n_blocks": 16,
+ "text": "server-0 config (deploy id a7f300009c2)\napi.endpoint=https://svc-0.internal.example.com/v2\nmax_retries=5\nip_pool=['10.1.0.1', '10.1.0.2', '10.1.0.3', '10.1.0.4']\nchecksum_sha256=199299f98f6613be6e39b6fb10809b953110f3180cafeff91fb648dc8800c896\ntoken_rate=1497/min\nserver-1 config (deploy id a7f300019c2)\napi.endpoint=https://svc-1.internal.example.com/v2\nmax_retries=5\nip_pool=['10.1.1.1', '10.1.1.2', '10.1.1.3', '10.1.1.4']\nchecksum_sha256=da97a96fd0afac0ec42680d295b8494dd8ec7927a5d11e65308c471fe7734745\ntoken_rate=4007/min\nserver-2 config (deploy id a7f300029c2)\napi.endpoint=https://svc-2.internal.example.com/v2\nmax_retries=4\nip_pool=['10.1.2.1', '10.1.2.2', '10.1.2.3', '10.1.2.4']\nchecksum_sha256=c2d912d02fd3ef17e6baddc407af35782687a9e9cf442c69fad4cc0dd177b9b2\ntoken_rate=9869/min\nserver-3 config (deploy id a7f300039c2)\napi.endpoint=https://svc-3.internal.example.com/v2\nmax_retries=9\nip_pool=['10.1.3.1', '10.1.3.2', '10.1.3.3', '10.1.3.4']\nchecksum_sha256=809cb698af6ecb001c4d2b9a5cfb037e88d3e3fe2c447f1046987f58804fa7fa\ntoken_rate=7399/min\nserver-4 config (deploy id a7f300049c2)\napi.endpoint=https://svc-4.internal.example.com/v2\nmax_retries=4\nip_pool=['10.1.4.1', '10.1.4.2', '10.1.4.3', '10.1.4.4']\nchecksum_sha256=8290dc1609808cc6e491183a392ae1168aa75986d61cc2b71bbb600ff8217b7e\ntoken_rate=1713/min\nserver-5 config (deploy id a7f300059c2)\napi.endpoint=https://svc-5.internal.example.com/v2\nmax_retries=5\nip_pool=['10.1.5.1', '10.1.5.2', '10.1.5.3', '10.1.5.4']\nchecksum_sha256=c0ffcc0e0b848760401072abbbc040dac614b38d25c734a8c3ed7d5e65e16986\ntoken_rate=9838/min\nserver-6 config (deploy id a7f300069c2)\napi.endpoint=https://svc-6.internal.example.com/v2\nmax_retries=8\nip_pool=['10.1.6.1', '10.1.6.2', '10.1.6.3', '10.1.6.4']\nchecksum_sha256=dce0e1ab375d3764bec2b8d3bdd6d29241cec29db33443df1047428ee65bee18\ntoken_rate=6035/min\nserver-7 config (deploy id a7f300079c2)\napi.endpoint=https://svc-7.internal.example.com/v2\nmax_retries=7\nip_pool=['10.1.7.1', '10.1.7.2', '10.1.7.3', '10.1.7.4']\nchecksum_sha256=882e66c12d40c524eabac582d11da2be7326cd23b27aed03d6888afc4ac1a058\ntoken_rate=7081/min\nserver-8 config (deploy id a7f300089c2)\napi.endpoint=https://svc-8.internal.example.com/v2\nmax_retries=3\nip_pool=['10.1.8.1', '10.1.8.2', '10.1.8.3', '10.1.8.4']\nchecksum_sha256=42bdadf1076197c4f4e3a43e2451dbb2dce45587cb5e7c344b9f780670ce87db\ntoken_rate=5169/min\nserver-9 config (deploy id a7f300099c2)\napi.endpoint=https://svc-9.internal.example.com/v2\nmax_retries=9\nip_pool=['10.1.9.1', '10.1.9.2', '10.1.9.3', '10.1.9.4']\nchecksum_sha256=c2cf40d0e12d75c2d38efbda14ec773ad39e4da8ab536f64c83a028b5d91f912\ntoken_rate=7617/min\nserver-10 config (deploy id a7f300109c2)\napi.endpoint=https://svc-10.internal.example.com/v2\nmax_retries=9\nip_pool=['10.1.10.1', '10.1.10.2', '10.1.10.3', '10.1.10.4']\nchecksum_sha256=59778c7e8edbc9ae290b5a13dcde282feb2716f8f9fdd4b9cefca848e4b5de70\ntoken_rate=9541/min\nserver-11 config (deploy id a7f300119c2)\napi.endpoint=https://svc-11.internal.example.com/v2\nmax_retries=6\nip_pool=['10.1.11.1', '10.1.11.2', '10.1.11.3', '10.1.11.4']\nchecksum_sha256=36886fd01ef395693b9445a4767e00f23f564a3467c5a6633ed9c41a15c40fd7\ntoken_rate=7860/min\nserver-12 config (deploy id a7f300129c2)\napi.endpoint=https://svc-12.internal.example.com/v2\nmax_retries=5\nip_pool=['10.1.12.1', '10.1.12.2', '10.1.12.3', '10.1.12.4']\nchecksum_sha256=badabab247af3a8d39c717e42a84ee714ba74315d3bebae8d9f1ff259616e390\ntoken_rate=2602/min\nserver-13 config (deploy id a7f300139c2)\napi.endpoint=https://svc-13.internal.example.com/v2\nmax_retries=6\nip_pool=['10.1.13.1', '10.1.13.2', '10.1.13.3', '10.1.13.4']\nchecksum_sha256=fe5396bbcdee68f1e91fd4bee67ba3f2528733a06318bd038eb2a813a9889389\ntoken_rate=410/min\nserver-14 config (deploy id a7f300149c2)\napi.endpoint=https://svc-14.internal.example.com/v2\nmax_retries=9\nip_pool=['10.1.14.1', '10.1.14.2', '10.1.14.3', '10.1.14.4']\nchecksum_sha256=226e0bb62e71c0522d1cec768dc0505ddafa1f29bace0a61c46ab9e076409df7\ntoken_rate=5888/min\nserver-15 config (deploy id a7f300159c2)\napi.endpoint=https://svc-15.internal.example.com/v2\nmax_retries=2\nip_pool=['10.1.15.1', '10.1.15.2', '10.1.15.3', '10.1.15.4']\nchecksum_sha256=4edabb521bd828aeba3461e29f9be737b28ca298b97b8efe4c8235f805a1a33d\ntoken_rate=535/min\n",
+ "truth": {
+  "count": 16,
+  "blocks": {
+   "0": {
+    "checksum": "199299f98f6613be6e39b6fb10809b953110f3180cafeff91fb648dc8800c896",
+    "max_retries": 5,
+    "ip_pool": [
+     "10.1.0.1",
+     "10.1.0.2",
+     "10.1.0.3",
+     "10.1.0.4"
+    ],
+    "token_rate": 1497
+   },
+   "1": {
+    "checksum": "da97a96fd0afac0ec42680d295b8494dd8ec7927a5d11e65308c471fe7734745",
+    "max_retries": 5,
+    "ip_pool": [
+     "10.1.1.1",
+     "10.1.1.2",
+     "10.1.1.3",
+     "10.1.1.4"
+    ],
+    "token_rate": 4007
+   },
+   "2": {
+    "checksum": "c2d912d02fd3ef17e6baddc407af35782687a9e9cf442c69fad4cc0dd177b9b2",
+    "max_retries": 4,
+    "ip_pool": [
+     "10.1.2.1",
+     "10.1.2.2",
+     "10.1.2.3",
+     "10.1.2.4"
+    ],
+    "token_rate": 9869
+   },
+   "3": {
+    "checksum": "809cb698af6ecb001c4d2b9a5cfb037e88d3e3fe2c447f1046987f58804fa7fa",
+    "max_retries": 9,
+    "ip_pool": [
+     "10.1.3.1",
+     "10.1.3.2",
+     "10.1.3.3",
+     "10.1.3.4"
+    ],
+    "token_rate": 7399
+   },
+   "4": {
+    "checksum": "8290dc1609808cc6e491183a392ae1168aa75986d61cc2b71bbb600ff8217b7e",
+    "max_retries": 4,
+    "ip_pool": [
+     "10.1.4.1",
+     "10.1.4.2",
+     "10.1.4.3",
+     "10.1.4.4"
+    ],
+    "token_rate": 1713
+   },
+   "5": {
+    "checksum": "c0ffcc0e0b848760401072abbbc040dac614b38d25c734a8c3ed7d5e65e16986",
+    "max_retries": 5,
+    "ip_pool": [
+     "10.1.5.1",
+     "10.1.5.2",
+     "10.1.5.3",
+     "10.1.5.4"
+    ],
+    "token_rate": 9838
+   },
+   "6": {
+    "checksum": "dce0e1ab375d3764bec2b8d3bdd6d29241cec29db33443df1047428ee65bee18",
+    "max_retries": 8,
+    "ip_pool": [
+     "10.1.6.1",
+     "10.1.6.2",
+     "10.1.6.3",
+     "10.1.6.4"
+    ],
+    "token_rate": 6035
+   },
+   "7": {
+    "checksum": "882e66c12d40c524eabac582d11da2be7326cd23b27aed03d6888afc4ac1a058",
+    "max_retries": 7,
+    "ip_pool": [
+     "10.1.7.1",
+     "10.1.7.2",
+     "10.1.7.3",
+     "10.1.7.4"
+    ],
+    "token_rate": 7081
+   },
+   "8": {
+    "checksum": "42bdadf1076197c4f4e3a43e2451dbb2dce45587cb5e7c344b9f780670ce87db",
+    "max_retries": 3,
+    "ip_pool": [
+     "10.1.8.1",
+     "10.1.8.2",
+     "10.1.8.3",
+     "10.1.8.4"
+    ],
+    "token_rate": 5169
+   },
+   "9": {
+    "checksum": "c2cf40d0e12d75c2d38efbda14ec773ad39e4da8ab536f64c83a028b5d91f912",
+    "max_retries": 9,
+    "ip_pool": [
+     "10.1.9.1",
+     "10.1.9.2",
+     "10.1.9.3",
+     "10.1.9.4"
+    ],
+    "token_rate": 7617
+   },
+   "10": {
+    "checksum": "59778c7e8edbc9ae290b5a13dcde282feb2716f8f9fdd4b9cefca848e4b5de70",
+    "max_retries": 9,
+    "ip_pool": [
+     "10.1.10.1",
+     "10.1.10.2",
+     "10.1.10.3",
+     "10.1.10.4"
+    ],
+    "token_rate": 9541
+   },
+   "11": {
+    "checksum": "36886fd01ef395693b9445a4767e00f23f564a3467c5a6633ed9c41a15c40fd7",
+    "max_retries": 6,
+    "ip_pool": [
+     "10.1.11.1",
+     "10.1.11.2",
+     "10.1.11.3",
+     "10.1.11.4"
+    ],
+    "token_rate": 7860
+   },
+   "12": {
+    "checksum": "badabab247af3a8d39c717e42a84ee714ba74315d3bebae8d9f1ff259616e390",
+    "max_retries": 5,
+    "ip_pool": [
+     "10.1.12.1",
+     "10.1.12.2",
+     "10.1.12.3",
+     "10.1.12.4"
+    ],
+    "token_rate": 2602
+   },
+   "13": {
+    "checksum": "fe5396bbcdee68f1e91fd4bee67ba3f2528733a06318bd038eb2a813a9889389",
+    "max_retries": 6,
+    "ip_pool": [
+     "10.1.13.1",
+     "10.1.13.2",
+     "10.1.13.3",
+     "10.1.13.4"
+    ],
+    "token_rate": 410
+   },
+   "14": {
+    "checksum": "226e0bb62e71c0522d1cec768dc0505ddafa1f29bace0a61c46ab9e076409df7",
+    "max_retries": 9,
+    "ip_pool": [
+     "10.1.14.1",
+     "10.1.14.2",
+     "10.1.14.3",
+     "10.1.14.4"
+    ],
+    "token_rate": 5888
+   },
+   "15": {
+    "checksum": "4edabb521bd828aeba3461e29f9be737b28ca298b97b8efe4c8235f805a1a33d",
+    "max_retries": 2,
+    "ip_pool": [
+     "10.1.15.1",
+     "10.1.15.2",
+     "10.1.15.3",
+     "10.1.15.4"
+    ],
+    "token_rate": 535
+   }
+  }
+ }
+}

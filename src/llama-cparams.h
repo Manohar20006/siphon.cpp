@@ -3,6 +3,7 @@
 #include "llama.h"
 
 #include <cstdint>
+#include <vector>
 
 #define LLAMA_MAX_SEQ 256
 
@@ -49,6 +50,12 @@ struct llama_cparams {
 
     enum llama_context_type ctx_type;
     enum llama_pooling_type pooling_type;
+
+    // other context, used by draft models (dflash etc.) to borrow the target model's weights
+    llama_context * ctx_other = nullptr;
+
+    // [n_layer()] extract input embeddings for layer (dflash target harness)
+    std::vector<bool> embeddings_layer_inp;
 
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;

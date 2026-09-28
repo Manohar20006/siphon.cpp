@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Siphon Studio — Inference Console</title>
+  <style>
+    :root {
+      --bg: oklch(13.5% 0.014 275);
+      --surface: oklch(17.5% 0.016 275);
+      --surface-subtle: oklch(15.5% 0.015 275);
+      --fg: oklch(92% 0.012 275);
+      --muted: oklch(68% 0.018 275);
+      --faint: oklch(52% 0.018 275);
+      --border: oklch(25% 0.018 275);
+      --border-strong: oklch(32% 0.022 275);
+      --accent: oklch(70% 0.19 302);
+      --accent-soft: oklch(25% 0.075 302);
+      --accent-faint: oklch(20.5% 0.04 302);
+      --success: oklch(73% 0.15 145);
+      --success-soft: oklch(23% 0.055 145);
+      --warn: oklch(78% 0.14 78);
+      --warn-soft: oklch(24% 0.05 78);
+      --danger: oklch(70% 0.18 28);
+      --danger-soft: oklch(23% 0.06 28);
+      --display: 'SF Pro Display', 'Helvetica Neue', 'Segoe UI', sans-serif;
+      --body: 'SF Pro Text', 'Helvetica Neue', 'Segoe UI', sans-serif;
+      --mono: 'SF Mono', 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+      --radius: 8px;
+      --hairline: 1px solid var(--border);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      color: var(--fg);
+      background: var(--bg);
+      font-family: var(--body);
+      font-size: 13px;
+      line-height: 1.45;
+      font-variant-numeric: tabular-nums;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+    .app-shell {
+      height: 100%;
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr);
+      min-width: 980px;
+    }
+    .rail {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px 0 14px;
+      border-right: var(--hairline);
+      background: var(--surface-subtle);
+    }
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      margin-bottom: 30px;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-family: var(--mono);
+      font-weight: 700;
+      letter-spacing: -0.08em;
+      line-height: 1;
+    }
+    .rail-nav { display: grid; gap: 10px; }
+    .rail-button {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--faint);
+      transition: background .18s ease, color .18s ease, border-color .18s ease, transform .18s ease;
+    }
+    .rail-button:hover { color: var(--fg); background: var(--surface); border-color: var(--border); }
+    .rail-button:active { transform: scale(.96); }
+    .rail-button.active { color: var(--accent); background: var(--accent-soft); border-color: oklch(42% 0.10 302); }
+    .rail-button svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .rail-bottom { margin-top: auto; display: grid; gap: 12px; justify-items: center; }
+    .presence { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+    .rail-version { color: var(--faint); font: 10px var(--mono); writing-mode: vertical-rl; letter-spacing: .08em; }
+
+    .main-frame { min-width: 0; min-height: 0; display: grid; grid-template-rows: 66px 48px minmax(0, 1fr) 34px; }
+    .titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 22px 0 24px;
+      border-bottom: var(--hairline);
+      background: var(--surface);
+    }
+    .title-cluster { display: flex; align-items: center; gap: 13px; min-width: 0; }
+    .title-cluster h1 { margin: 0; font-family: var(--display); font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
+    .crumb { color: var(--faint); font-family: var(--mono); font-size: 11px; }
+    .title-divider { width: 1px; height: 16px; background: var(--border); }
+    .sim-badge, .status-badge, .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      width: fit-content;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .sim-badge { color: var(--accent); background: var(--accent-soft); }
+    .sim-badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    .title-actions { display: flex; align-items: center; gap: 8px; }
+    .shortcut { color: var(--faint); font: 11px var(--mono); }
+    .icon-button { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); }
+    .icon-button:hover { border-color: var(--border); background: var(--surface-subtle); color: var(--fg); }
+    .icon-button svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding: 0 22px 0 24px;
+      border-bottom: var(--hairline);
+      background: var(--surface-subtle);
+    }
+    .toolbar-group { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .toolbar-label { color: var(--faint); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .select-wrap { position: relative; }
+    .select-wrap select { appearance: none; min-width: 182px; height: 30px; padding: 0 28px 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); font-size: 12px; font-weight: 550; }
+    .select-wrap svg { position: absolute; top: 8px; right: 9px; width: 13px; height: 13px; pointer-events: none; stroke: var(--muted); fill: none; stroke-width: 1.8; }
+    .engine-state { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border: var(--hairline); border-radius: 6px; color: var(--success); background: var(--surface); font-family: var(--mono); font-size: 11px; }
+    .engine-state i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .toolbar-spacer { flex: 1; }
+    .run-controls { display: flex; align-items: center; gap: 6px; }
+    .control-button { height: 30px; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--fg); font-size: 11px; font-weight: 550; }
+    .control-button:hover { border-color: var(--accent); background: var(--accent-faint); }
+    .control-button.primary { border-color: var(--accent); background: var(--accent); color: oklch(98% 0.01 302); }
+    .control-button.primary:hover { background: oklch(64% 0.19 302); }
+    .control-button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+
+    .workspace { min-height: 0; overflow: hidden; padding: 14px 20px; display: grid; grid-template-columns: minmax(370px, 1.26fr) minmax(310px, .97fr) minmax(270px, .82fr); gap: 12px; }
+    .column { min-width: 0; min-height: 0; display: grid; gap: 12px; }
+    .column-left { grid-template-rows: minmax(320px, 1.22fr) minmax(180px, .78fr); }
+    .column-middle { grid-template-rows: repeat(2, minmax(0, 1fr)); }
+    .column-right { grid-template-rows: minmax(175px, .68fr) minmax(250px, 1.22fr) minmax(118px, .5fr); }
+    .panel { min-width: 0; min-height: 0; overflow: hidden; border: var(--hairline); border-radius: var(--radius); background: var(--surface); box-shadow: 0 1px 2px oklch(5% 0.01 275 / .28); }
+    .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 15px 16px 0; }
+    .eyebrow { color: var(--faint); font: 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+    .panel-title { margin: 3px 0 0; font-family: var(--display); font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+    .panel-note { color: var(--muted); font-size: 11px; }
+    .live-dot { display: inline-flex; align-items: center; gap: 5px; color: var(--success); font: 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+    .live-dot::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+
+    .decode-panel { display: grid; grid-template-rows: auto minmax(150px, 1fr) auto; }
+    .decode-main { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(190px, .88fr); gap: 12px; align-items: center; padding: 8px 16px 0; }
+    .hero-label { color: var(--muted); font-size: 12px; }
+    .hero-number { margin: 2px 0 0; color: var(--fg); font-family: var(--mono); font-size: clamp(40px, 4.8vw, 68px); font-weight: 550; letter-spacing: -0.08em; line-height: .98; white-space: nowrap; }
+    .hero-number span { margin-left: 6px; color: var(--muted); font-size: 15px; font-weight: 450; letter-spacing: -0.01em; }
+    .hero-subline { display: flex; align-items: center; gap: 10px; margin-top: 14px; color: var(--muted); font-size: 12px; }
+    .trend-up { color: var(--success); font-family: var(--mono); font-size: 11px; }
+    .mini-chart { min-width: 0; }
+    .mini-chart svg { display: block; width: 100%; height: 94px; }
+    .chart-grid { stroke: var(--border); stroke-width: 1; }
+    .chart-fill { fill: var(--accent-faint); }
+    .chart-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .chart-dot { fill: var(--surface); stroke: var(--accent); stroke-width: 2; }
+    .chart-label { fill: var(--faint); font: 9px var(--mono); }
+    .secondary-metric { margin-top: 8px; padding-top: 11px; border-top: var(--hairline); }
+    .secondary-metric .metric-value { margin-top: 2px; font: 600 22px var(--mono); letter-spacing: -0.05em; }
+    .secondary-metric .metric-value small { color: var(--muted); font-size: 11px; letter-spacing: 0; }
+    .metric-strip { display: grid; grid-template-columns: repeat(3, 1fr); border-top: var(--hairline); }
+    .metric-cell { padding: 12px 16px 13px; border-right: var(--hairline); }
+    .metric-cell:last-child { border-right: 0; }
+    .metric-name { color: var(--muted); font-size: 11px; }
+    .metric-value-small { margin-top: 3px; font: 600 15px var(--mono); }
+    .metric-caption { margin-top: 1px; color: var(--faint); font-size: 10px; }
+
+    .telemetry-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    .telemetry-body { display: grid; grid-template-columns: .92fr 1.08fr; gap: 18px; align-items: center; padding: 12px 16px 16px; }
+    .telemetry-block + .telemetry-block { border-left: var(--hairline); padding-left: 18px; }
+    .micro-label { color: var(--muted); font-size: 11px; }
+    .micro-value { margin-top: 4px; font: 600 20px var(--mono); letter-spacing: -0.05em; }
+    .micro-value small { color: var(--muted); font-size: 11px; letter-spacing: 0; }
+    .progress { height: 5px; margin-top: 12px; overflow: hidden; border-radius: 99px; background: var(--surface-subtle); }
+    .progress > i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+    .progress.green > i { background: var(--success); }
+    .telemetry-sub { display: flex; justify-content: space-between; margin-top: 6px; color: var(--faint); font: 10px var(--mono); }
+    .telemetry-viz { display: none; min-width: 0; align-self: center; padding-left: 18px; border-left: var(--hairline); }
+    .telemetry-viz-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .telemetry-viz-head strong { font: 550 10px var(--mono); color: var(--muted); }
+    .telemetry-bars { display: grid; gap: 11px; margin-top: 12px; }
+    .telemetry-bar-row { display: grid; grid-template-columns: 72px minmax(0,1fr) auto; align-items: center; gap: 8px; color: var(--muted); font-size: 10px; }
+    .telemetry-bar-track { height: 7px; overflow: hidden; border-radius: 99px; background: var(--surface-subtle); }
+    .telemetry-bar-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+    .telemetry-bar-track .bar-green { background: var(--success); }
+    .telemetry-bar-row strong { color: var(--fg); font: 550 10px var(--mono); }
+    .packet-list { display: grid; gap: 8px; margin-top: 13px; }
+    .packet-row { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 7px; border-bottom: var(--hairline); }
+    .packet-row:last-child { padding-bottom: 0; border-bottom: 0; }
+    .packet-row span:first-child { color: var(--muted); font-size: 11px; }
+    .packet-row strong { font: 550 11px var(--mono); }
+
+    .resource-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    .resource-body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 12px 16px 16px; }
+    .ring { position: relative; width: 98px; height: 98px; }
+    .ring svg { display: block; width: 100%; height: 100%; transform: rotate(-90deg); }
+    .ring-track { fill: none; stroke: var(--surface-subtle); stroke-width: 8; }
+    .ring-value { fill: none; stroke: var(--accent); stroke-width: 8; stroke-linecap: round; stroke-dasharray: 250; }
+    .ring-value.green { stroke: var(--success); }
+    .ring-center { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; }
+    .ring-number { font: 600 22px var(--mono); letter-spacing: -0.06em; }
+    .ring-unit { color: var(--muted); font-size: 10px; }
+    .resource-stats { width: 100%; min-width: 0; }
+    .resource-total { margin: 4px 0 2px; font: 600 22px var(--mono); letter-spacing: -0.05em; }
+    .resource-total small { color: var(--muted); font-size: 11px; letter-spacing: 0; }
+    .resource-copy { color: var(--muted); font-size: 11px; }
+    .resource-foot { display: flex; justify-content: space-between; margin-top: 14px; padding-top: 10px; border-top: var(--hairline); color: var(--muted); font-size: 11px; }
+    .resource-foot strong { color: var(--fg); font: 550 11px var(--mono); }
+    .resource-chart, .memory-composition { display: none; }
+    .resource-chart { margin-top: 10px; }
+    .resource-chart svg { display: block; width: 100%; height: 34px; }
+    .resource-chart .chart-line { stroke: var(--success); stroke-width: 1.7; }
+    .resource-chart .chart-fill { fill: var(--success-soft); }
+    .memory-composition { margin-top: 12px; }
+    .composition-head { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }
+    .composition-head strong { color: var(--fg); font: 550 10px var(--mono); }
+    .composition-bar { display: flex; height: 6px; margin-top: 7px; overflow: hidden; border-radius: 99px; background: var(--surface-subtle); }
+    .composition-bar i { display: block; height: 100%; }
+    .composition-bar .weights { background: var(--accent); }
+    .composition-bar .cache { background: oklch(70% 0.09 302); }
+    .composition-bar .free { background: var(--border-strong); }
+    .composition-legend { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--faint); font: 9px var(--mono); }
+    .composition-legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .composition-legend i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+    .composition-legend .cache-dot { background: oklch(70% 0.09 302); }
+    .composition-legend .free-dot { background: var(--border-strong); }
+
+    .storage-panel { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+    .storage-value { padding: 10px 16px 0; font: 600 clamp(28px, 3vw, 40px) var(--mono); letter-spacing: -0.08em; }
+    .storage-value small { color: var(--muted); font-size: 12px; letter-spacing: -0.02em; }
+    .storage-chart { padding: 0 16px; align-self: center; }
+    .storage-chart svg { width: 100%; height: 54px; display: block; }
+    .storage-meta { display: grid; grid-template-columns: 1fr 1fr; border-top: var(--hairline); }
+    .storage-meta div { padding: 10px 16px 11px; }
+    .storage-meta div + div { border-left: var(--hairline); }
+    .storage-meta strong { display: block; margin-top: 2px; font: 550 13px var(--mono); }
+    .storage-meta span { color: var(--muted); font-size: 10px; }
+
+    .request-panel { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+    .request-id { display: flex; align-items: baseline; gap: 8px; padding: 12px 16px 0; }
+    .request-id strong { font: 600 14px var(--mono); }
+    .request-id span { color: var(--muted); font: 10px var(--mono); }
+    .flow-list { display: grid; gap: 0; padding: 14px 16px 0; }
+    .flow-row { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 9px; align-items: center; padding: 9px 0; border-bottom: var(--hairline); }
+    .flow-row:last-child { border-bottom: 0; }
+    .flow-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+    .flow-dot.transfer { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+    .flow-dot.waiting { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+    .flow-label strong { display: block; font-size: 11px; font-weight: 550; }
+    .flow-label span { display: block; margin-top: 1px; color: var(--muted); font-size: 10px; }
+    .flow-status { color: var(--muted); font: 10px var(--mono); }
+    .flow-status.arrived { color: var(--success); }
+    .flow-status.transferring { color: var(--danger); }
+    .request-foot { align-self: end; margin: 10px 16px 16px; padding: 10px; border: var(--hairline); border-radius: 6px; background: var(--surface-subtle); }
+    .request-foot-head { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }
+    .request-foot-head strong { color: var(--fg); font: 550 10px var(--mono); }
+    .request-bar { height: 4px; margin-top: 9px; overflow: hidden; border-radius: 99px; background: var(--border); }
+    .request-bar i { display: block; width: 68%; height: 100%; border-radius: inherit; background: var(--success); }
+
+    .status-panel { display: grid; grid-template-columns: 1fr 1fr; align-items: center; }
+    .status-item { padding: 12px 16px; }
+    .status-item + .status-item { border-left: var(--hairline); }
+    .status-item strong { display: block; margin-top: 3px; font: 600 16px var(--mono); letter-spacing: -0.04em; }
+    .status-item span { color: var(--muted); font-size: 10px; }
+    .status-item .tag { margin-top: 4px; padding: 2px 6px; font-size: 9px; }
+    .kernel-path { display: none; grid-column: 1 / -1; align-items: center; gap: 6px; padding: 8px 16px 10px; border-top: var(--hairline); }
+    .kernel-step { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font: 10px var(--mono); white-space: nowrap; }
+    .kernel-step i { width: 6px; height: 6px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+    .kernel-step strong { color: var(--fg); font-weight: 550; }
+    .kernel-arrow { flex: 1; height: 1px; min-width: 12px; background: var(--border-strong); }
+    .tag.green { color: var(--success); background: var(--success-soft); }
+    .tag.red { color: var(--danger); background: var(--danger-soft); }
+
+    .statusbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 20px 0 24px; border-top: var(--hairline); background: var(--surface); color: var(--faint); font: 10px var(--mono); }
+    .statusbar-left, .statusbar-right { display: flex; align-items: center; gap: 13px; min-width: 0; }
+    .statusbar .separator { width: 1px; height: 12px; background: var(--border); }
+    .statusbar strong { color: var(--muted); font-weight: 550; }
+    .toast { position: fixed; right: 20px; bottom: 48px; max-width: 330px; padding: 10px 12px; border: var(--border-strong); border-radius: 6px; background: var(--fg); color: var(--surface); font-size: 11px; opacity: 0; transform: translateY(5px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
+    .toast.visible { opacity: 1; transform: translateY(0); }
+
+    @media (max-width: 1380px) {
+      .workspace { grid-template-columns: minmax(330px, 1.15fr) minmax(285px, .94fr) minmax(250px, .8fr); padding-inline: 14px; gap: 10px; }
+      .panel-head { padding-inline: 13px; }
+      .decode-main, .telemetry-body, .resource-body, .storage-chart, .storage-value, .flow-list, .request-id { padding-left: 13px; padding-right: 13px; }
+      .metric-cell { padding-inline: 13px; }
+      .request-foot { margin-inline: 13px; }
+      .hero-number { font-size: clamp(36px, 4.4vw, 56px); }
+    }
+    @media (max-height: 840px) {
+      .main-frame { grid-template-rows: 54px 42px minmax(0, 1fr) 28px; }
+      .titlebar { padding-inline: 18px; }
+      .toolbar { padding-inline: 18px; }
+      .workspace { padding: 8px 12px; gap: 8px; }
+      .column { gap: 8px; }
+      .column-left { grid-template-rows: minmax(270px, 1.16fr) minmax(145px, .84fr); }
+      .column-right { grid-template-rows: minmax(142px, .62fr) minmax(220px, 1.14fr) minmax(88px, .44fr); }
+      .panel-head { padding: 10px 12px 0; }
+      .panel-title { font-size: 13px; }
+      .decode-panel { grid-template-rows: auto minmax(118px, 1fr) auto; }
+      .decode-main { grid-template-columns: minmax(0, 1.08fr) minmax(150px, .92fr); padding: 3px 12px 0; }
+      .hero-number { font-size: clamp(34px, 4.2vw, 52px); }
+      .hero-subline { margin-top: 8px; }
+      .mini-chart svg { height: 68px; }
+      .secondary-metric { margin-top: 7px; padding-top: 8px; }
+      .secondary-metric .metric-value { font-size: 19px; }
+      .metric-cell { padding: 9px 12px 10px; }
+      .metric-value-small { font-size: 14px; }
+      .telemetry-body, .resource-body { padding: 7px 12px 10px; }
+      .telemetry-body { gap: 12px; }
+      .micro-value { font-size: 18px; }
+      .packet-list { gap: 6px; margin-top: 9px; }
+      .packet-row { padding-bottom: 5px; }
+      .resource-body { gap: 8px; }
+      .ring { width: 74px; height: 74px; }
+      .ring-number { font-size: 17px; }
+      .resource-total { font-size: 18px; }
+      .resource-foot { margin-top: 8px; padding-top: 7px; }
+      .resource-chart { margin-top: 6px; }
+      .storage-value { padding: 5px 12px 0; font-size: clamp(25px, 2.8vw, 34px); }
+      .storage-chart { padding: 0 12px; }
+      .storage-chart svg { height: 34px; }
+      .storage-meta div { padding: 7px 12px 8px; }
+      .request-id { padding: 8px 12px 0; }
+      .flow-list { padding: 5px 12px 0; }
+      .flow-row { padding: 5px 0; }
+      .request-foot { margin: 7px 12px 10px; padding: 8px; }
+      .status-item { padding: 8px 12px; }
+      .status-item strong { font-size: 14px; }
+      .statusbar { padding-inline: 18px; }
+    }
+    @media (max-height: 740px) {
+      .main-frame { grid-template-rows: 50px 40px minmax(0, 1fr) 26px; }
+      .titlebar { padding-inline: 14px; }
+      .toolbar { padding-inline: 14px; }
+      .shortcut { display: none; }
+      .workspace { padding: 6px 10px; gap: 7px; }
+      .column { gap: 7px; }
+      .column-left { grid-template-rows: minmax(245px, 1.15fr) minmax(132px, .85fr); }
+      .column-right { grid-template-rows: minmax(126px, .6fr) minmax(205px, 1.15fr) minmax(78px, .4fr); }
+      .panel-head { padding: 8px 10px 0; }
+      .decode-panel { grid-template-rows: auto minmax(104px, 1fr) auto; }
+      .decode-main { padding-inline: 10px; }
+      .hero-number { font-size: clamp(31px, 4vw, 46px); }
+      .hero-subline { font-size: 10px; }
+      .mini-chart svg { height: 58px; }
+      .metric-cell { padding: 7px 10px 8px; }
+      .telemetry-body, .resource-body { padding: 5px 10px 8px; }
+      .resource-body { gap: 7px; }
+      .ring { width: 64px; height: 64px; }
+      .ring-number { font-size: 15px; }
+      .resource-total { font-size: 16px; }
+      .storage-value { padding-inline: 10px; }
+      .storage-chart { padding-inline: 10px; }
+      .storage-meta div { padding-inline: 10px; }
+      .request-id, .flow-list { padding-inline: 10px; }
+      .request-foot { margin-inline: 10px; }
+      .status-item { padding-inline: 10px; }
+      .statusbar { padding-inline: 14px; }
+      .statusbar-right { display: none; }
+    }
+    @media (min-width: 1600px) and (min-height: 950px) {
+      .workspace { padding: 18px 22px; gap: 14px; }
+      .column { gap: 14px; }
+      .column-left { grid-template-rows: minmax(0, 1.22fr) minmax(250px, .78fr); }
+      .column-right { grid-template-rows: minmax(218px, .7fr) minmax(0, 1.25fr) minmax(132px, .42fr); }
+      .panel-head { padding: 18px 22px 0; }
+      .panel-title { font-size: 15px; }
+      .decode-main { grid-template-columns: .88fr 1.12fr; gap: 24px; padding: 18px 22px 12px; }
+      .hero-number { font-size: clamp(64px, 5.2vw, 92px); }
+      .hero-subline { margin-top: 17px; }
+      .secondary-metric { margin-top: 20px; padding-top: 14px; }
+      .secondary-metric .metric-value { font-size: 26px; }
+      .mini-chart svg { height: 156px; }
+      .metric-cell { padding: 16px 20px 17px; }
+      .metric-value-small { font-size: 17px; }
+      .telemetry-body { grid-template-columns: .72fr .78fr 1fr; gap: 24px; padding: 20px 22px 22px; }
+      .telemetry-viz { display: block; }
+      .telemetry-bars { gap: 15px; margin-top: 18px; }
+      .packet-list { gap: 10px; margin-top: 15px; }
+      .packet-row { padding-bottom: 9px; }
+      .resource-body { gap: 12px; padding: 18px 22px 22px; }
+      .ring { width: 116px; height: 116px; }
+      .ring-number { font-size: 25px; }
+      .resource-total { font-size: 26px; }
+      .resource-foot { margin-top: 18px; padding-top: 11px; }
+      .memory-composition { display: block; }
+      .resource-chart { display: block; margin-top: 14px; }
+      .resource-chart svg { height: 48px; }
+      .storage-value { padding: 16px 22px 0; font-size: clamp(38px, 3.4vw, 52px); }
+      .storage-chart { padding: 0 22px; }
+      .storage-chart svg { height: 86px; }
+      .storage-meta div { padding: 14px 22px 15px; }
+      .storage-meta strong { font-size: 14px; }
+      .request-panel { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+      .request-id { padding: 14px 22px 0; }
+      .flow-list { grid-template-rows: repeat(4, minmax(62px, 1fr)); padding: 16px 22px 0; }
+      .flow-row { padding: 12px 0; gap: 12px; }
+      .flow-label strong { font-size: 12px; }
+      .flow-label span { font-size: 11px; }
+      .request-foot { margin: 13px 22px 18px; padding: 12px; }
+      .status-panel { grid-template-rows: auto 1fr; align-items: stretch; }
+      .status-item { padding: 15px 22px; }
+      .kernel-path { display: flex; }
+      .statusbar { padding-inline: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell" data-od-id="siphon-app-shell">
+    <aside class="rail" data-od-id="primary-navigation">
+      <div class="brand-mark" data-od-id="siphon-mark" aria-label="Siphon Studio">S/</div>
+      <nav class="rail-nav" aria-label="Workspace navigation">
+        <button class="rail-button active" data-tab="dashboard" data-od-id="nav-dashboard" aria-label="Dashboard" aria-current="page">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/></svg>
+        </button>
+        <button class="rail-button" data-tab="chat" data-od-id="nav-chat" aria-label="Chat">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6a2.5 2.5 0 0 1-2.5 2.5H11l-4.5 4v-4.1A2.5 2.5 0 0 1 5 12.5z"/><path d="M8.5 8.5h7M8.5 11.5h4"/></svg>
+        </button>
+        <button class="rail-button" data-tab="runs" data-od-id="nav-runs" aria-label="Runs">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/><circle cx="18" cy="18" r="2.5"/></svg>
+        </button>
+      </nav>
+      <div class="rail-bottom">
+        <div class="presence" title="Local runtime connected"></div>
+        <div class="rail-version">SIPHON 0.9.4</div>
+      </div>
+    </aside>
+
+    <main class="main-frame" data-od-id="dashboard-main">
+      <header class="titlebar" data-od-id="desktop-titlebar">
+        <div class="title-cluster">
+          <h1 data-od-id="page-title">Inference console</h1>
+          <span class="title-divider" aria-hidden="true"></span>
+          <span class="crumb" data-od-id="workspace-name">studio / local</span>
+          <span class="sim-badge" data-od-id="simulation-badge">simulated</span>
+        </div>
+        <div class="title-actions">
+          <span class="shortcut">⌘ K command palette</span>
+          <button class="icon-button" data-od-id="settings-button" aria-label="Open settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="m19 13 .7 1.1-1.7 2.9-1.3-.3a7.4 7.4 0 0 1-1.7 1l-.3 1.3H11l-.3-1.3a7.4 7.4 0 0 1-1.7-1l-1.3.3L6 14.1l.7-1.1a7 7 0 0 1 0-2L6 9.9 7.7 7l1.3.3a7.4 7.4 0 0 1 1.7-1l.3-1.3h3.6l.3 1.3a7.4 7.4 0 0 1 1.7 1l1.3-.3 1.7 2.9-.7 1.1a7 7 0 0 1 0 2Z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <section class="toolbar" data-od-id="simulation-toolbar" aria-label="Simulation controls">
+        <div class="toolbar-group">
+          <span class="toolbar-label">model</span>
+          <label class="select-wrap">
+            <span class="sr-only">Select model</span>
+            <select id="model-select" data-od-id="model-selector">
+              <option value="qwen-32b">Qwen 2.5 32B · 4-bit</option>
+              <option value="qwen-72b">Qwen 2.5 72B · 4-bit</option>
+              <option value="siphon-lab">Siphon Lab 14B · 8-bit</option>
+            </select>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
+          </label>
+        </div>
+        <div class="toolbar-group">
+          <span class="toolbar-label">engine</span>
+          <span class="engine-state" data-od-id="engine-state"><i></i><span id="engine-label">ready · vLLM / CUDA</span></span>
+        </div>
+        <div class="toolbar-spacer"></div>
+        <div class="run-controls">
+          <button class="control-button" id="pause-button" data-od-id="pause-resume-button">
+            <svg id="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M16 6v12"/></svg>
+            <span id="pause-label">Pause</span>
+          </button>
+          <button class="control-button primary" id="advance-button" data-od-id="advance-request-button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/><path d="M4 12h10"/></svg>
+            <span>Advance request</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="workspace" data-od-id="operations-workspace">
+        <div class="column column-left" data-od-id="performance-column">
+          <section class="panel decode-panel" data-od-id="decode-speed-panel">
+            <div class="panel-head">
+              <div><div class="eyebrow">01 / throughput</div><h2 class="panel-title" data-od-id="decode-speed-heading">Decode speed</h2></div>
+              <span class="live-dot" id="decode-live">streaming</span>
+            </div>
+            <div class="decode-main">
+              <div>
+                <div class="hero-label">Current generation rate</div>
+                <div class="hero-number" id="decode-value" data-od-id="decode-speed-value">48.7<span>tok/s</span></div>
+                <div class="hero-subline"><span id="decode-delta" class="trend-up">+4.2% vs last request</span><span>·</span><span id="request-count">request 023</span></div>
+                <div class="secondary-metric"><div class="metric-name">Prefill speed</div><div class="metric-value" id="prefill-value" data-od-id="prefill-speed-value">1,284 <small>tok/s</small></div></div>
+              </div>
+              <div class="mini-chart" data-od-id="decode-trend-chart" aria-label="Decode speed trend">
+                <svg viewBox="0 0 240 108" role="img">
+                  <line class="chart-grid" x1="0" y1="20" x2="240" y2="20"/><line class="chart-grid" x1="0" y1="52" x2="240" y2="52"/><line class="chart-grid" x1="0" y1="84" x2="240" y2="84"/>
+                  <path class="chart-fill" d="M4 84 L4 75 L28 67 L51 72 L74 51 L97 57 L120 43 L143 48 L166 31 L189 38 L212 21 L236 27 L236 84Z"/>
+                  <path class="chart-line" id="decode-line" d="M4 75 L28 67 L51 72 L74 51 L97 57 L120 43 L143 48 L166 31 L189 38 L212 21 L236 27"/>
+                  <circle class="chart-dot" cx="236" cy="27" r="3.5"/>
+                  <text class="chart-label" x="0" y="104">−60s</text><text class="chart-label" x="215" y="104">now</text>
+                </svg>
+              </div>
+            </div>
+            <div class="metric-strip" data-od-id="quality-metrics">
+              <div class="metric-cell" data-od-id="l1-cache-card"><div class="metric-name">L1 cache hit</div><div class="metric-value-small" id="l1-value">94.2%</div><div class="metric-caption">VRAM residents</div></div>
+              <div class="metric-cell" data-od-id="l2-cache-card"><div class="metric-name">L2 cache hit</div><div class="metric-value-small" id="l2-value">88.6%</div><div class="metric-caption">RAM residents</div></div>
+              <div class="metric-cell" data-od-id="draft-acceptance-card"><div class="metric-name">Draft acceptance</div><div class="metric-value-small" id="draft-value">72.4%</div><div class="metric-caption">speculative decode</div></div>
+            </div>
+          </section>
+
+          <section class="panel telemetry-panel" data-od-id="request-telemetry-panel">
+            <div class="panel-head"><div><div class="eyebrow">02 / request budget</div><h2 class="panel-title">Request telemetry</h2></div><span class="panel-note">per request</span></div>
+            <div class="telemetry-body">
+              <div class="telemetry-block">
+                <div class="micro-label">Streamed data</div>
+                <div class="micro-value" id="streamed-value" data-od-id="streamed-data-value">1.84 <small>GB</small></div>
+                <div class="progress"><i id="streamed-progress" style="width: 64%"></i></div>
+                <div class="telemetry-sub"><span>budget 2.8 GB</span><span id="streamed-percent">64%</span></div>
+              </div>
+              <div class="telemetry-block">
+                <div class="micro-label">Call profile</div>
+                <div class="packet-list">
+                  <div class="packet-row"><span>Decode calls</span><strong id="decode-calls" data-od-id="decode-calls-value">412</strong></div>
+                  <div class="packet-row"><span>Prefill calls</span><strong id="prefill-calls" data-od-id="prefill-calls-value">4</strong></div>
+                  <div class="packet-row"><span>Tokens emitted</span><strong id="tokens-emitted">1,006</strong></div>
+                </div>
+              </div>
+              <div class="telemetry-viz" data-od-id="telemetry-visualization">
+                <div class="telemetry-viz-head"><span class="micro-label">Budget shape</span><strong id="telemetry-request-id">request q-023</strong></div>
+                <div class="telemetry-bars">
+                  <div class="telemetry-bar-row"><span>streamed</span><div class="telemetry-bar-track"><i id="streamed-bar" style="width: 64%"></i></div><strong id="streamed-bar-label">64%</strong></div>
+                  <div class="telemetry-bar-row"><span>decode</span><div class="telemetry-bar-track"><i id="decode-bar" class="bar-green" style="width: 69%"></i></div><strong id="decode-bar-label">412</strong></div>
+                  <div class="telemetry-bar-row"><span>prefill</span><div class="telemetry-bar-track"><i id="prefill-bar" style="width: 50%"></i></div><strong id="prefill-bar-label">4</strong></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="column column-middle" data-od-id="resource-column">
+          <section class="panel resource-panel" data-od-id="gpu-panel">
+            <div class="panel-head"><div><div class="eyebrow">03 / accelerator</div><h2 class="panel-title">GPU utilization</h2></div><span class="status-badge tag green">online</span></div>
+            <div class="resource-body">
+              <div class="ring" data-od-id="gpu-utilization-ring" aria-label="GPU utilization 87 percent">
+                <svg viewBox="0 0 100 100"><circle class="ring-track" cx="50" cy="50" r="40"/><circle id="gpu-ring" class="ring-value" cx="50" cy="50" r="40" pathLength="250" stroke-dashoffset="32.5"/></svg>
+                <div class="ring-center"><div class="ring-number" id="gpu-util">87%</div><div class="ring-unit">utilization</div></div>
+              </div>
+              <div class="resource-stats">
+                <div class="micro-label">VRAM status</div>
+                <div class="resource-total" id="vram-value" data-od-id="vram-status-value">21.4 <small>/ 24 GB</small></div>
+                <div class="resource-copy">Resident weights + active KV cache</div>
+                <div class="progress"><i id="vram-progress" style="width: 89%"></i></div>
+                <div class="resource-foot"><span>temperature</span><strong id="gpu-temp">68° C</strong></div>
+                <div class="memory-composition" data-od-id="vram-composition">
+                  <div class="composition-head"><span>VRAM composition</span><strong id="vram-composition-total">21.4 / 24 GB</strong></div>
+                  <div class="composition-bar" aria-label="VRAM composition"><i id="vram-weights" class="weights" style="width: 70%"></i><i id="vram-cache" class="cache" style="width: 19%"></i><i id="vram-free" class="free" style="width: 11%"></i></div>
+                  <div class="composition-legend"><span><i></i>weights</span><span><i class="cache-dot"></i>KV cache</span><span><i class="free-dot"></i>free</span></div>
+                </div>
+                <div class="resource-chart" data-od-id="gpu-history-chart" aria-label="GPU utilization history">
+                  <svg viewBox="0 0 260 42" role="img"><line class="chart-grid" x1="0" y1="12" x2="260" y2="12"/><line class="chart-grid" x1="0" y1="30" x2="260" y2="30"/><path class="chart-fill" d="M2 36 L2 29 L28 24 L54 28 L80 18 L106 21 L132 15 L158 19 L184 10 L210 14 L236 8 L258 12 L258 36Z"/><path class="chart-line" d="M2 29 L28 24 L54 28 L80 18 L106 21 L132 15 L158 19 L184 10 L210 14 L236 8 L258 12"/></svg>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel resource-panel" data-od-id="cpu-panel">
+            <div class="panel-head"><div><div class="eyebrow">04 / host</div><h2 class="panel-title">CPU utilization</h2></div><span class="status-badge tag green">stable</span></div>
+            <div class="resource-body">
+              <div class="ring" data-od-id="cpu-utilization-ring" aria-label="CPU utilization 34 percent">
+                <svg viewBox="0 0 100 100"><circle class="ring-track" cx="50" cy="50" r="40"/><circle id="cpu-ring" class="ring-value green" cx="50" cy="50" r="40" pathLength="250" stroke-dashoffset="165"/></svg>
+                <div class="ring-center"><div class="ring-number" id="cpu-util">34%</div><div class="ring-unit">utilization</div></div>
+              </div>
+              <div class="resource-stats">
+                <div class="micro-label">RAM status</div>
+                <div class="resource-total" id="ram-value" data-od-id="ram-status-value">29.1 <small>/ 64 GB</small></div>
+                <div class="resource-copy">Model staging + L2 residents</div>
+                <div class="progress green"><i id="ram-progress" style="width: 45%"></i></div>
+                <div class="resource-foot"><span>host temp</span><strong id="cpu-temp">54° C</strong></div>
+                <div class="memory-composition" data-od-id="ram-composition">
+                  <div class="composition-head"><span>RAM composition</span><strong id="ram-composition-total">29.1 / 64 GB</strong></div>
+                  <div class="composition-bar" aria-label="RAM composition"><i id="ram-l2" class="weights" style="width: 21%"></i><i id="ram-stage" class="cache" style="width: 24%"></i><i id="ram-free" class="free" style="width: 55%"></i></div>
+                  <div class="composition-legend"><span><i></i>L2 residents</span><span><i class="cache-dot"></i>staging</span><span><i class="free-dot"></i>free</span></div>
+                </div>
+                <div class="resource-chart" data-od-id="cpu-history-chart" aria-label="CPU utilization history">
+                  <svg viewBox="0 0 260 42" role="img"><line class="chart-grid" x1="0" y1="12" x2="260" y2="12"/><line class="chart-grid" x1="0" y1="30" x2="260" y2="30"/><path class="chart-fill" d="M2 36 L2 28 L28 31 L54 25 L80 29 L106 21 L132 23 L158 17 L184 20 L210 14 L236 18 L258 12 L258 36Z"/><path class="chart-line" d="M2 28 L28 31 L54 25 L80 29 L106 21 L132 23 L158 17 L184 20 L210 14 L236 18 L258 12"/></svg>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="column column-right" data-od-id="request-column">
+          <section class="panel storage-panel" data-od-id="storage-panel">
+            <div class="panel-head"><div><div class="eyebrow">05 / direct storage</div><h2 class="panel-title">GDS / NVMe speed</h2></div><span class="live-dot">gds link</span></div>
+            <div>
+              <div class="storage-value" id="storage-value" data-od-id="gds-speed-value">5.6 <small>GB/s</small></div>
+              <div class="storage-chart" data-od-id="storage-trend-chart" aria-label="GDS speed trend">
+                <svg viewBox="0 0 250 65" role="img"><line class="chart-grid" x1="0" y1="15" x2="250" y2="15"/><line class="chart-grid" x1="0" y1="42" x2="250" y2="42"/><path class="chart-line" id="storage-line" d="M3 49 L31 43 L58 46 L86 30 L114 34 L142 26 L170 31 L198 18 L226 22 L247 16"/><circle class="chart-dot" cx="247" cy="16" r="3"/></svg>
+              </div>
+            </div>
+            <div class="storage-meta"><div><span>RAM → VRAM</span><strong id="ram-vram-value" data-od-id="ram-to-vram-value">42.8 GB/s</strong></div><div><span>queue depth</span><strong id="queue-value">02</strong></div></div>
+          </section>
+
+          <section class="panel request-panel" data-od-id="request-flow-panel">
+            <div class="panel-head"><div><div class="eyebrow">06 / residency</div><h2 class="panel-title">Request flow</h2></div><span class="panel-note">human-readable</span></div>
+            <div class="request-id"><strong id="flow-request-id">q-023</strong><span id="flow-request-type">chat completion · 1,006 tokens</span></div>
+            <div class="flow-list" data-od-id="request-flow-list">
+              <div class="flow-row" data-od-id="flow-l1"><i class="flow-dot"></i><div class="flow-label"><strong>L1 / VRAM residents</strong><span id="resident-value">38 layers resident</span></div><span class="flow-status arrived">arrived</span></div>
+              <div class="flow-row" data-od-id="flow-l2"><i class="flow-dot"></i><div class="flow-label"><strong>L2 / RAM misses</strong><span id="ram-miss-value">7 blocks fetched</span></div><span class="flow-status arrived">arrived</span></div>
+              <div class="flow-row" id="flow-ssd" data-od-id="flow-ssd"><i class="flow-dot transfer"></i><div class="flow-label"><strong>SSD / cold misses</strong><span id="cold-miss-value">2 blocks · 84 MB</span></div><span class="flow-status transferring" id="ssd-status">transferring</span></div>
+              <div class="flow-row" data-od-id="flow-kv"><i class="flow-dot waiting"></i><div class="flow-label"><strong>KV cache window</strong><span id="kv-window-value">32k context · 68% full</span></div><span class="flow-status" id="kv-status">warming</span></div>
+            </div>
+            <div class="request-foot"><div class="request-foot-head"><span>request completion</span><strong id="completion-value">68%</strong></div><div class="request-bar"><i id="completion-bar"></i></div></div>
+          </section>
+
+          <section class="panel status-panel" data-od-id="runtime-status-panel">
+            <div class="status-item"><span>kernel</span><strong id="kernel-value">flash-attn</strong><span class="tag green">fused</span></div>
+            <div class="status-item"><span>sync</span><strong id="sync-value">12 ms</strong><span class="tag green">local</span></div>
+            <div class="kernel-path" data-od-id="kernel-path"><div class="kernel-step"><i></i><strong>flash-attn</strong></div><span class="kernel-arrow"></span><div class="kernel-step"><i></i><strong>KV cache</strong></div><span class="kernel-arrow"></span><div class="kernel-step"><i></i><strong>local sync</strong></div></div>
+          </section>
+        </div>
+      </section>
+
+      <footer class="statusbar" data-od-id="runtime-statusbar">
+        <div class="statusbar-left"><span>runtime <strong id="runtime-status">running</strong></span><span class="separator"></span><span>last tick <strong id="last-tick">14:32:08</strong></span><span class="separator"></span><span>seed <strong id="seed-value">siphon-qwen-023</strong></span></div>
+        <div class="statusbar-right"><span>all metrics simulated</span><span class="separator"></span><span>local only</span></div>
+      </footer>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    (() => {
+      const $ = (id) => document.getElementById(id);
+      const base = {
+        'qwen-32b': { decode: 48.7, prefill: 1284, gpu: 87, vram: 21.4, ram: 29.1, cpu: 34, gds: 5.6, ramVram: 42.8, l1: 94.2, l2: 88.6, draft: 72.4, streamed: 1.84, decodeCalls: 412, prefillCalls: 4, tokens: 1006, cold: 2, queue: '02', completion: 68, tempGpu: 68, tempCpu: 54 },
+        'qwen-72b': { decode: 31.9, prefill: 892, gpu: 93, vram: 23.1, ram: 48.6, cpu: 42, gds: 7.2, ramVram: 38.4, l1: 91.1, l2: 84.9, draft: 66.8, streamed: 2.48, decodeCalls: 367, prefillCalls: 6, tokens: 812, cold: 4, queue: '04', completion: 54, tempGpu: 74, tempCpu: 59 },
+        'siphon-lab': { decode: 62.3, prefill: 1518, gpu: 71, vram: 15.7, ram: 18.4, cpu: 27, gds: 4.1, ramVram: 51.2, l1: 96.7, l2: 92.8, draft: 79.6, streamed: 1.22, decodeCalls: 504, prefillCalls: 3, tokens: 1240, cold: 1, queue: '01', completion: 81, tempGpu: 61, tempCpu: 49 }
+      };
+      let selected = localStorage.getItem('siphon-model') || 'qwen-32b';
+      let request = Number(localStorage.getItem('siphon-request') || '23');
+      let running = true;
+      let tick = 0;
+      const modelSelect = $('model-select');
+      modelSelect.value = selected;
+      const toast = (message) => { const t = $('toast'); t.textContent = message; t.classList.add('visible'); clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove('visible'), 2200); };
+      const setText = (id, value) => { $(id).textContent = value; };
+      const setRing = (id, pct) => { $(id).style.strokeDashoffset = String(250 - (250 * pct / 100)); };
+      const setWidth = (id, pct) => { $(id).style.width = Math.max(0, Math.min(100, pct)) + '%'; };
+      const timeString = () => new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date());
+
+      function render() {
+        const raw = base[selected];
+        const phase = Math.sin(tick / 2.2) * 0.65;
+        const d = { ...raw, decode: raw.decode + phase, gpu: Math.max(8, raw.gpu + Math.round(Math.sin(tick / 2) * 2)), cpu: Math.max(8, raw.cpu + Math.round(Math.cos(tick / 2.4) * 2)) };
+        setText('decode-value', d.decode.toFixed(1) + ' tok/s');
+        setText('prefill-value', d.prefill.toLocaleString() + ' tok/s');
+        setText('request-count', 'request ' + String(request).padStart(3, '0'));
+        setText('l1-value', d.l1.toFixed(1) + '%'); setText('l2-value', d.l2.toFixed(1) + '%'); setText('draft-value', d.draft.toFixed(1) + '%');
+        setText('gpu-util', d.gpu + '%'); setText('cpu-util', d.cpu + '%'); setRing('gpu-ring', d.gpu); setRing('cpu-ring', d.cpu);
+        setText('vram-value', d.vram.toFixed(1) + ' / 24 GB'); setText('ram-value', d.ram.toFixed(1) + ' / 64 GB');
+        const vramPct = d.vram / 24 * 100; const vramCachePct = Math.min(22, Math.max(13, vramPct * .22)); const vramWeightsPct = Math.max(0, vramPct - vramCachePct); const vramFreePct = Math.max(0, 100 - vramWeightsPct - vramCachePct);
+        const ramPct = d.ram / 64 * 100; const ramL2Pct = Math.min(36, ramPct * .46); const ramStagePct = Math.min(24, Math.max(12, ramPct - ramL2Pct)); const ramFreePct = Math.max(0, 100 - ramL2Pct - ramStagePct);
+        setWidth('vram-progress', vramPct); setWidth('ram-progress', ramPct); setText('vram-composition-total', d.vram.toFixed(1) + ' / 24 GB'); setText('ram-composition-total', d.ram.toFixed(1) + ' / 64 GB');
+        setWidth('vram-weights', vramWeightsPct); setWidth('vram-cache', vramCachePct); setWidth('vram-free', vramFreePct); setWidth('ram-l2', ramL2Pct); setWidth('ram-stage', ramStagePct); setWidth('ram-free', ramFreePct);
+        setText('gpu-temp', d.tempGpu + '° C'); setText('cpu-temp', d.tempCpu + '° C');
+        setText('storage-value', d.gds.toFixed(1) + ' GB/s'); setText('ram-vram-value', d.ramVram.toFixed(1) + ' GB/s'); setText('queue-value', d.queue);
+        setText('streamed-value', d.streamed.toFixed(2) + ' GB'); const streamPct = Math.round(d.streamed / 2.8 * 100); setWidth('streamed-progress', streamPct); setWidth('streamed-bar', streamPct); setText('streamed-percent', streamPct + '%'); setText('streamed-bar-label', streamPct + '%');
+        setText('decode-calls', String(d.decodeCalls)); setText('prefill-calls', String(d.prefillCalls)); setText('tokens-emitted', d.tokens.toLocaleString());
+        const decodePct = Math.round(d.decodeCalls / 600 * 100); const prefillPct = Math.round(d.prefillCalls / 8 * 100); setWidth('decode-bar', decodePct); setWidth('prefill-bar', prefillPct); setText('decode-bar-label', String(d.decodeCalls)); setText('prefill-bar-label', String(d.prefillCalls)); setText('telemetry-request-id', 'request q-' + String(request).padStart(3, '0'));
+        setText('flow-request-id', 'q-' + String(request).padStart(3, '0')); setText('flow-request-type', 'chat completion · ' + d.tokens.toLocaleString() + ' tokens');
+        setText('cold-miss-value', d.cold + ' blocks · ' + (d.cold * 42) + ' MB'); setText('completion-value', d.completion + '%'); $('completion-bar').style.width = d.completion + '%';
+        setText('seed-value', selected + '-' + String(request).padStart(3, '0'));
+        setText('runtime-status', running ? 'running' : 'paused'); setText('last-tick', timeString());
+        $('pause-label').textContent = running ? 'Pause' : 'Resume'; $('pause-icon').innerHTML = running ? '<path d="M8 6v12M16 6v12"/>' : '<path d="m9 6 7 6-7 6Z"/>';
+        $('decode-live').textContent = running ? 'streaming' : 'held'; $('decode-live').style.color = running ? 'var(--success)' : 'var(--warn)';
+        $('ssd-status').textContent = request % 3 === 0 ? 'arrived' : 'transferring'; $('ssd-status').className = 'flow-status ' + (request % 3 === 0 ? 'arrived' : 'transferring'); $('flow-ssd').querySelector('.flow-dot').className = 'flow-dot ' + (request % 3 === 0 ? '' : 'transfer');
+        setText('kv-status', running ? 'warming' : 'held');
+      }
+      function advance() { request = request >= 99 ? 1 : request + 1; localStorage.setItem('siphon-request', String(request)); tick += 1; render(); toast('Advanced to request q-' + String(request).padStart(3, '0')); }
+      $('pause-button').addEventListener('click', () => { running = !running; render(); toast(running ? 'Simulation resumed' : 'Simulation paused'); });
+      $('advance-button').addEventListener('click', advance);
+      modelSelect.addEventListener('change', (event) => { selected = event.target.value; localStorage.setItem('siphon-model', selected); tick += 1; render(); toast('Loaded ' + event.target.options[event.target.selectedIndex].text.split(' · ')[0]); });
+      document.querySelectorAll('.rail-button').forEach((button) => button.addEventListener('click', () => {
+        const tab = button.dataset.tab;
+        document.querySelectorAll('.rail-button').forEach((item) => { item.classList.toggle('active', item === button); item.toggleAttribute('aria-current', item === button); });
+        if (tab !== 'dashboard') toast(tab === 'chat' ? 'Chat is a separate surface — dashboard state is preserved.' : 'Run history is outside this simulated frame.');
+      }));
+      render();
+      setInterval(() => { if (running) { tick += 1; render(); } }, 2200);
+    })();
+  </script>
+</body>
+</html>

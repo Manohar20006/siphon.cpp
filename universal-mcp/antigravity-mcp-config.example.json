@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "universal-worker-bridge": {
+      "serverUrl": "https://your-mcp-host.example/mcp",
+      "headers": {
+        "Authorization": "Bearer REPLACE_WITH_UNIVERSAL_MCP_HTTP_TOKEN"
+      },
+      "disabled": false
+    }
+  }
+}

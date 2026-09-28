@@ -94,6 +94,18 @@ llama_context::llama_context(
     cparams.pooling_type            = params.pooling_type;
     cparams.warmup                  = false;
 
+    cparams.embeddings_layer_inp.resize(hparams.n_layer(), false);
+    embd_layer_inp.resize(hparams.n_layer());
+
+    if (model.arch == LLM_ARCH_DFLASH) {
+        if (model.tok_embd == nullptr || model.output == nullptr) {
+            if (params.ctx_other == nullptr) {
+                throw std::runtime_error(model.arch_name() + " requires ctx_other to be set (this warning is normal during memory fitting)");
+            }
+            cparams.ctx_other = params.ctx_other;
+        }
+    }
+
 
     cparams.n_ctx            = params.n_ctx           == 0    ? hparams.n_ctx_train           : params.n_ctx;
     cparams.rope_freq_base   = params.rope_freq_base  == 0.0f ? hparams.rope_freq_base_train  : params.rope_freq_base;
@@ -229,7 +241,7 @@ llama_context::llama_context(
     const char * moe_routing_trace_path = std::getenv("LLAMA_MOE_ROUTING_TRACE");
     const bool moe_routing_trace_requested =
             moe_routing_trace_path != nullptr && moe_routing_trace_path[0] != '\0';
-    if (moe_routing_trace_requested && model.arch != LLM_ARCH_QWEN35MOE) {
+    if (moe_routing_trace_requested && model.arch != LLM_ARCH_QWEN35MOE && model.arch != LLM_ARCH_QWEN3MOE && model.arch != LLM_ARCH_QWEN3NEXT) {
         throw std::runtime_error(
                 "LLAMA_MOE_ROUTING_TRACE currently supports only Qwen3.5/3.6 MoE models");
     }
@@ -1200,6 +1212,25 @@ void llama_context::set_causal_attn(bool value) {
     sched_need_reserve = true;
 }
 
+void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
+    LLAMA_LOG_DEBUG("%s: lid = %d, enable = %d\n", __func__, lid, enable);
+
+    GGML_ASSERT(lid < model.hparams.n_layer());
+
+    cparams.embeddings_layer_inp[lid] = enable;
+
+    // note: without this reserve, the draft acceptance drops to zero. not sure why - this is unexpected
+    sched_need_reserve = true;
+}
+
+float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
+    output_reorder();
+
+    GGML_ASSERT(lid < embd_layer_inp.size() && embd_layer_inp[lid].has_data());
+
+    return embd_layer_inp[lid].data;
+}
+
 void llama_context::set_warmup(bool value) {
     LLAMA_LOG_DEBUG("%s: value = %d\n", __func__, value);
 
@@ -1417,7 +1448,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
 
     const auto & hparams = model.hparams;
 
-    const int64_t n_embd  = hparams.n_embd_inp();
+    const int64_t n_embd  = hparams.n_embd_inp_enc();
     const int64_t n_vocab = model.vocab.n_tokens();
 
     // note: during encode, we always pass the full sequence starting from pos = 0
@@ -1992,6 +2023,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
             }
         }
 
+        extract_layer_inputs(res, n_tokens_prev, ubatch.n_tokens);
+
         // extract nextn embeddings before
         // only meaningful in LLAMA_POOLING_TYPE_NONE (per-token); other pooling modes are ignored.
         {
@@ -2112,6 +2145,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 
     size_t backend_float_count = 0;
     size_t backend_token_count = 0;
+    size_t embd_layer_inp_float_count = 0;
 
     logits.size     = has_logits     ? n_vocab*n_outputs_max     : 0;
     embd.size       = has_embd       ? n_embd_out*n_outputs_max  : 0;
@@ -2121,6 +2155,12 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
         // unmasked: nextn row exists for every token in the batch, not just
         // those flagged via batch.logits[i] -> size by token count instead.
         embd_nextn.size = (size_t) n_embd * n_batch;
+    }
+
+    for (bool enabled : cparams.embeddings_layer_inp) {
+        if (enabled) {
+            embd_layer_inp_float_count += (size_t) n_embd * n_batch;
+        }
     }
 
     // Allocate backend sampling output buffers if there are backend samplers configured.
@@ -2137,7 +2177,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 
     const size_t prev_size = buf_output ? ggml_backend_buffer_get_size(buf_output.get()) : 0;
     const size_t new_size  =
-        (logits.size + embd.size + embd_nextn.size + backend_float_count) * sizeof(float) +
+        (logits.size + embd.size + embd_nextn.size + embd_layer_inp_float_count + backend_float_count) * sizeof(float) +
         (                                               backend_token_count) * sizeof(llama_token);
 
     // alloc only when more than the current capacity is required
@@ -2155,6 +2195,9 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
             logits.data = nullptr;
             embd.data = nullptr;
             embd_nextn.data = nullptr;
+            for (auto & layer_inp : embd_layer_inp) {
+                layer_inp = {nullptr, 0};
+            }
         }
 
         auto * buft = ggml_backend_cpu_buffer_type();
@@ -2185,6 +2228,15 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 
     embd_nextn = has_embd_nextn ? buffer_view<float>{(float *) (base + offset), embd_nextn.size} : buffer_view<float>{nullptr, 0};
     offset += embd_nextn.size * sizeof(float);
+
+    for (uint32_t il = 0; il < embd_layer_inp.size(); ++il) {
+        if (cparams.embeddings_layer_inp[il]) {
+            embd_layer_inp[il] = buffer_view<float>{(float *) (base + offset), (size_t) n_embd * n_batch};
+            offset += embd_layer_inp[il].size * sizeof(float);
+        } else {
+            embd_layer_inp[il] = buffer_view<float>{nullptr, 0};
+        }
+    }
 
     if (has_sampling) {
         sampling.logits = {(float *) (base + offset), (size_t)(n_vocab*n_outputs_max)};
@@ -2230,6 +2282,34 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     GGML_ASSERT(n_outputs_max <= cparams.n_outputs_max);
 
     return n_outputs_max;
+}
+
+void llama_context::extract_layer_inputs(const llm_graph_result * res, size_t token_offset, size_t n_tokens) {
+    for (uint32_t il = 0; il < cparams.embeddings_layer_inp.size(); ++il) {
+        if (!cparams.embeddings_layer_inp[il]) {
+            continue;
+        }
+        if (!embd_layer_inp[il].has_data()) {
+            GGML_ABORT("output layer input buffer not allocated");
+        }
+        ggml_tensor * t = res->get_layer_inp((int) il);
+        if (!t) {
+            GGML_ABORT("layer input tensor not found");
+        }
+
+        const size_t nbytes = ggml_nbytes(t);
+        const size_t nfloats = nbytes / sizeof(float);
+        GGML_ASSERT(n_tokens > 0);
+        GGML_ASSERT(nfloats % n_tokens == 0);
+
+        const size_t row_floats = nfloats / n_tokens;
+        const size_t dst_offset = token_offset * row_floats;
+        GGML_ASSERT(dst_offset + nfloats <= embd_layer_inp[il].size);
+
+        ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), t);
+        GGML_ASSERT(backend != nullptr);
+        ggml_backend_tensor_get_async(backend, t, embd_layer_inp[il].data + dst_offset, 0, nbytes);
+    }
 }
 
 void llama_context::output_reorder() {
@@ -4258,6 +4338,7 @@ llama_context_params llama_context_default_params() {
         /*.kv_unified                  =*/ false,
         /*.dstorage_moe                =*/ false,
         /*.dstorage_moe_prefetch       =*/ false,
+        /*.ctx_other                   =*/ nullptr,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
     };
@@ -4492,6 +4573,20 @@ float * llama_get_embeddings_nextn_ith(llama_context * ctx, int32_t i) {
     ctx->synchronize();
 
     return ctx->get_embeddings_nextn_ith(i);
+}
+
+void llama_set_embeddings_layer_inp(llama_context * ctx, uint32_t lid, bool value) {
+    ctx->set_embeddings_layer_inp(lid, value);
+}
+
+llama_context * llama_get_ctx_other(llama_context * ctx) {
+    return ctx->get_ctx_other();
+}
+
+float * llama_get_embeddings_layer_inp(llama_context * ctx, uint32_t lid) {
+    ctx->synchronize();
+
+    return ctx->get_embeddings_layer_inp(lid);
 }
 
 bool llama_set_sampler(llama_context * ctx, llama_seq_id seq_id, llama_sampler * smpl) {

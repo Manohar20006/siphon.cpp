@@ -1,0 +1,591 @@
+/* ==========================================================================
+   siphon-studio — polished single-screen TUI theme
+   Complete Dashboard: Header + Strip + Models + Detail + Metrics + Log + Foot
+   ========================================================================== */
+
+Screen {
+    background: #0A0E14;
+    color: #C5CBD6;
+    overflow: hidden;
+    padding: 0 1;
+}
+
+/* ---------- header bar ---------- */
+#header-box {
+    border: solid #232D3F;
+    background: #0A0E14;
+    height: 3;
+    padding: 0 1;
+    margin-bottom: 0;
+}
+#header-content {
+    height: 1;
+    width: 100%;
+}
+
+/* ---------- tabs bar ---------- */
+#tabs-bar {
+    border: solid #232D3F;
+    background: #0A0E14;
+    height: 3;
+    padding: 0 1;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+#tabs-content {
+    height: 1;
+    width: 100%;
+}
+
+/* ---------- system strip ---------- */
+#sysstrip-box {
+    border: solid #232D3F;
+    background: #0A0E14;
+    height: 5;
+    padding: 0 1;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+#sysstrip-content {
+    height: 3;
+    width: 100%;
+}
+
+/* ---------- main split ---------- */
+#main-split {
+    height: 1fr;
+    min-height: 16;
+    margin-top: 0;
+    padding: 0;
+}
+#left-col {
+    width: 55%;
+    height: 100%;
+}
+#right-col {
+    width: 45%;
+    height: 100%;
+}
+
+/* ---------- generic panel ---------- */
+.panel {
+    border: solid #232D3F;
+    background: #0A0E14;
+    padding: 0 1;
+    margin: 0;
+}
+.panel.focused {
+    border: solid #7C83F5;
+}
+
+/* ---------- model table panel ---------- */
+#panel-table {
+    height: 100%;
+    width: 100%;
+    background: #0A0E14;
+    padding: 0 1;
+}
+#table-header-row {
+    color: #5E6A7E;
+    height: 1;
+    border-bottom: solid #232D3F;
+    padding: 0;
+}
+#model-rows {
+    height: auto;
+    padding: 0;
+    margin-top: 0;
+}
+#table-hint {
+    color: #5E6A7E;
+    height: 1;
+    margin-top: 1;
+}
+
+/* ---------- detail panel ---------- */
+#panel-detail {
+    height: 100%;
+    width: 100%;
+    background: #0A0E14;
+    padding: 0 1;
+}
+
+/* distinct top status card */
+#status-box {
+    border: solid #232D3F;
+    background: #0A0E14;
+    height: 6;
+    padding: 0 1;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+#detail-dl {
+    height: 4;
+    padding: 0;
+}
+
+/* continuous scrollable config */
+#cfg-scroll {
+    height: 1fr;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #2B3650 #0A0E14;
+    padding: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+.cfg-sec-divider {
+    height: 1;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+.cfg-row-full {
+    height: 1;
+    align-vertical: middle;
+}
+.cfg-row-split {
+    height: 1;
+    align-vertical: middle;
+}
+.cfg-half {
+    width: 1fr;
+    height: 1;
+    align-vertical: middle;
+}
+.cfg-split-gap {
+    width: 1;
+}
+.cfg-label-full {
+    color: #5E6A7E;
+    width: 12;
+}
+.cfg-label-half {
+    color: #5E6A7E;
+    width: 10;
+}
+.bracket {
+    color: #5E6A7E;
+    width: 1;
+}
+.unused-tag {
+    color: #5E6A7E;
+    width: auto;
+    margin-left: 1;
+}
+
+Input {
+    background: #0F1520;
+    color: #C5CBD6;
+    border: none;
+    height: 1;
+    padding: 0 1;
+    width: 1fr;
+}
+Input:focus {
+    background: #151D2E;
+    color: #FFFFFF;
+    border: none;
+}
+
+/* detail foot enclosed card */
+.detail-foot {
+    border: solid #232D3F;
+    background: #0A0E14;
+    height: 4;
+    padding: 0 1;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+#action-row {
+    height: 1;
+    margin-top: 0;
+}
+.btn {
+    width: auto;
+    height: 1;
+    padding: 0 0;
+    margin-right: 1;
+}
+.btn-start {
+    background: #3FB950;
+    color: #0A0E14;
+    text-style: bold;
+}
+.btn-start:hover {
+    background: #56D364;
+}
+.btn-stop {
+    background: #F85149;
+    color: #0A0E14;
+    text-style: bold;
+}
+.btn-stop:hover {
+    background: #FF7B72;
+}
+.btn-stop.armed {
+    background: #FF443A;
+    color: #FFFFFF;
+    text-style: bold;
+}
+.btn-apply {
+    background: #7C83F5;
+    color: #0A0E14;
+    text-style: bold;
+}
+.btn-apply:hover {
+    background: #969CFA;
+}
+.btn-revert {
+    background: #151D2E;
+    color: #C5CBD6;
+}
+.btn-revert:hover {
+    background: #252F48;
+    color: #FFFFFF;
+}
+.btn-reset {
+    background: #2A1F10;
+    color: #D29922;
+}
+.btn-reset:hover {
+    background: #3A2B14;
+    color: #E3B341;
+}
+
+#cfg-status {
+    color: #5E6A7E;
+    height: 1;
+    padding: 0;
+}
+
+/* ---------- metrics panel ---------- */
+#panel-metrics {
+    height: 7;
+    margin-top: 0;
+    padding: 0 1;
+}
+#metrics-grid {
+    height: 5;
+    padding: 0;
+}
+
+/* ---------- log panel ---------- */
+#panel-log {
+    height: 6;
+    margin-top: 0;
+    padding: 0 1;
+}
+#log-lines {
+    height: 4;
+    padding: 0;
+}
+
+
+/* ---------- generic ---------- */
+Static {
+    color: #C5CBD6;
+}
+
+/* ==========================================================================
+   chat tab — OpenCode terminal design system
+   ========================================================================== */
+#view-dashboard {
+    height: 1fr;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+#view-chat {
+    height: 1fr;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    border: solid #232D3F;
+    background: #0A0E14;
+    display: none;
+}
+
+/* State A: Welcome View */
+#chat-welcome-view {
+    height: 100%;
+    width: 100%;
+}
+
+#chat-welcome-center-box {
+    height: 1fr;
+    width: 100%;
+    align: center middle;
+}
+
+#chat-welcome-logo {
+    width: 76;
+    height: 3;
+    margin-bottom: 2;
+    content-align: center middle;
+    text-align: center;
+    color: #F8FAFC;
+}
+
+#chat-welcome-card {
+    width: 76;
+    height: auto;
+    background: #121822;
+    border: none;
+    border-left: wide #7C83F5;
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
+#chat-welcome-input {
+    background: #121822;
+    border: none;
+    height: 1;
+    color: #F8FAFC;
+    padding: 0;
+    margin-bottom: 1;
+}
+
+#chat-welcome-meta-row {
+    height: 1;
+    width: 100%;
+    padding: 0;
+}
+
+#chat-meta-badge {
+    color: #38BDF8;
+    text-style: bold;
+    width: auto;
+    margin-right: 1;
+}
+
+.chat-meta-badge {
+    color: #38BDF8;
+    text-style: bold;
+    width: auto;
+    margin-right: 1;
+}
+
+.chat-meta-dot {
+    color: #475569;
+    width: auto;
+    margin-right: 1;
+}
+
+#chat-welcome-model-name {
+    color: #CBD5E1;
+    width: auto;
+    margin-right: 1;
+}
+
+.chat-think-badge {
+    width: auto;
+    margin-right: 1;
+    padding: 0 1;
+    background: #182232;
+    color: #A78BFA;
+}
+
+.chat-think-badge:hover {
+    background: #25334A;
+    color: #F8FAFC;
+}
+
+
+
+#chat-welcome-shortcuts-row {
+    width: 76;
+    height: 1;
+    align-horizontal: right;
+    color: #64748B;
+    margin-bottom: 2;
+}
+
+#chat-welcome-tip-row {
+    width: 76;
+    height: 1;
+    content-align: center middle;
+    color: #94A3B8;
+}
+
+#chat-welcome-footer-row {
+    height: 1;
+    width: 100%;
+    padding: 0 2;
+    color: #475569;
+}
+#chat-welcome-foot-path {
+    width: 1fr;
+    color: #64748B;
+}
+#chat-welcome-foot-ver {
+    width: auto;
+    color: #64748B;
+}
+
+/* State B: Active Stream View */
+#chat-stream-view {
+    height: 100%;
+    width: 100%;
+    padding: 0;
+    display: none;
+}
+
+#chat-messages-scroll {
+    height: 1fr;
+    width: 100%;
+    overflow-y: auto;
+    padding: 1 2 0 2;
+}
+
+#chat-messages-container {
+    height: auto;
+    width: 100%;
+}
+
+.chat-user-card {
+    width: 100%;
+    height: auto;
+    background: #131A26;
+    border-left: wide #7C83F5;
+    padding: 1 2;
+    margin-bottom: 1;
+    color: #F8FAFC;
+}
+
+.chat-thought-line {
+    color: #F59E0B;
+    text-style: bold;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+.chat-assistant-body {
+    width: 100%;
+    height: auto;
+    color: #CBD5E1;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+.chat-code-block {
+    width: 100%;
+    height: auto;
+    background: #0D121B;
+    border: solid #1E293B;
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
+.chat-assistant-meta {
+    color: #64748B;
+    margin-bottom: 2;
+    padding: 0 1;
+}
+
+/* Docked Bottom Input Card */
+#chat-docked-card {
+    height: auto;
+    width: 100%;
+    background: #121822;
+    border: none;
+    border-left: wide #7C83F5;
+    padding: 1 2;
+    margin: 0 1 1 1;
+}
+
+#chat-docked-input {
+    background: #121822;
+    border: none;
+    height: 1;
+    color: #F8FAFC;
+    padding: 0;
+    margin-bottom: 1;
+}
+
+#chat-docked-meta-row {
+    height: 1;
+    width: 100%;
+    padding: 0;
+}
+
+.chat-meta-model {
+    color: #CBD5E1;
+    width: auto;
+    margin-right: 1;
+}
+
+
+
+.chat-shortcut {
+    color: #64748B;
+    width: auto;
+    margin-right: 1;
+}
+
+.chat-shortcut-stop {
+    color: #EF4444;
+    width: auto;
+}
+.chat-shortcut-stop:hover {
+    color: #F87171;
+}
+
+#chat-status-bar {
+    height: 1;
+    width: 100%;
+    padding: 0 2;
+    color: #94A3B8;
+    margin-bottom: 0;
+}
+#chat-status-path {
+    width: 1fr;
+    color: #64748B;
+}
+#chat-status-metrics {
+    width: auto;
+    color: #94A3B8;
+}
+
+/* Slash Command Autocomplete Popups */
+.chat-cmd-popup {
+    display: none;
+    height: auto;
+    max-height: 12;
+    background: #0D121B;
+    border: tall #222E42;
+    border-left: wide #7C83F5;
+    padding: 0 1;
+}
+
+#chat-welcome-cmd-popup {
+    width: 76;
+    margin-bottom: 1;
+}
+
+#chat-docked-cmd-popup {
+    width: 100%;
+    margin: 0 1 1 1;
+}
+
+/* Expandable Reasoning Budget Popups */
+.chat-think-popup {
+    display: none;
+    height: auto;
+    max-height: 8;
+    background: #0D121B;
+    border: tall #222E42;
+    border-left: wide #A78BFA;
+    padding: 0 1;
+}
+
+#chat-welcome-think-popup {
+    width: 76;
+    margin-bottom: 1;
+}
+
+#chat-docked-think-popup {
+    width: 100%;
+    margin: 0 1 1 1;
+}
+

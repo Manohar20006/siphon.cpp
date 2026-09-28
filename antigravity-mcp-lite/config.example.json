@@ -1,0 +1,16 @@
+{
+  "agy_path": "agy",
+  "project_root": ".",
+  "timeout": 300,
+  "effort": "low",
+  "mode": "plan",
+  "max_prompt_bytes": 120000,
+  "max_output_bytes": 256000,
+  "max_response_bytes": 256000,
+  "session_idle_seconds": 1800,
+  "max_sessions": 8,
+  "models": {
+    "gemini": "gemini-3.8-flash",
+    "claude": "claude-sonnet-4-6"
+  }
+}

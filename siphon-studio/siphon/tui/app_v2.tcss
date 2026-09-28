@@ -1,0 +1,297 @@
+/* ============================================================
+   siphon-studio — professional control-center theme
+   Design system built on theme variables so the dark/light
+   toggle (T) keeps every pane coherent.
+   ============================================================ */
+
+Screen {
+    background: $background;
+}
+
+/* ---------- header / footer ---------- */
+Header {
+    background: $surface;
+    color: $text;
+    border: none;
+}
+Header .header--title { text-style: bold; }
+Header .header--subtitle { color: $text-muted; }
+Footer {
+    background: $panel;
+    color: $text;
+    border-top: solid $primary-darken-2;
+}
+Footer > .footer--key { text-style: bold; color: $text; background: $primary-darken-2; }
+Footer > .footer--description { color: $text-muted; }
+
+/* ---------- tabs ---------- */
+TabbedContent { height: 1fr; }
+TabbedContent > .tabbed-content--header {
+    background: $surface;
+    color: $text;
+    height: 3;
+    padding: 0 1 0 1;
+}
+TabbedContent > .tabbed-content--header > .tab {
+    color: $text-muted;
+    padding: 0 2;
+    background: $surface;
+}
+TabbedContent > .tabbed-content--header > .tab:hover { color: $text; background: $surface-lighten-1; }
+TabbedContent > .tabbed-content--header > .tab.active {
+    background: $surface-lighten-1;
+color: $text;
+    text-style: bold;
+    height: 3;
+    border-bottom: tall $primary;
+}
+
+/* ---------- global system bar (every tab) ---------- */
+#sysbar {
+    dock: top;
+    height: 3;
+    background: $surface;
+    border-bottom: solid $primary-darken-2;
+    padding: 0 1;
+}
+#sysbar .sys-tile {
+    height: 2;
+    padding: 0 1;
+    margin: 0 1 0 0;
+}
+#sysbar .sys-label {
+    color: $text-muted;
+    text-style: bold;
+    text-align: center;
+}
+#sysbar .sys-value {
+    color: $text;
+    text-style: bold;
+    text-align: center;
+}
+#sysbar .sys-num { text-align: right; color: $text; }
+
+/* ---------- shared panels ---------- */
+.hidden { display: none; }
+.panel {
+    border: round $panel;
+    background: $panel;
+    padding: 1;
+}
+.panel-title {
+    text-style: bold;
+    color: $text-muted;
+    padding: 0 0 1 0;
+}
+.hero { text-style: bold; padding: 0 0 1 0; color: $text; }
+.mini { height: 3; align-vertical: middle; padding: 0 2; }
+
+/* ---------- Dashboard: system overview cards ---------- */
+#overview {
+    height: auto;
+    padding: 1 1 0 1;
+}
+.sys-card {
+    width: 1fr;
+    height: 6;
+    border: round $primary-darken-2;
+    background: $panel;
+    margin: 0 1 1 0;
+    padding: 0 1;
+}
+.sys-card .sys-card-title {
+    color: $text-muted;
+    text-style: bold;
+    text-align: center;
+}
+.sys-card .sys-card-value {
+    color: $text;
+    text-style: bold;
+    text-align: center;
+    height: 2;
+}
+.sys-card .sys-card-sub { color: $text-muted; text-align: center; height: 1; }
+.sys-card.gpu { border: round #79c0ff; }
+.sys-card.cpu { border: round #3fb950; }
+.sys-card.mem { border: round #d29922; }
+.sys-card.drive { border: round #8b949e; }
+
+/* ---------- Dashboard: picker + detail ---------- */
+#filter {
+    margin: 0 1 1 1;
+    border: tall $primary;
+    background: $surface;
+}
+#dash-body {
+    height: 1fr;
+    padding: 0 1;
+}
+#picker-col { width: 2fr; }
+#detail-col { width: 3fr; padding: 0 1; }
+#profiles {
+    height: 1fr;
+    border: round $primary-darken-2;
+    background: $panel;
+}
+ListView { background: $panel; }
+ListView:focus > .list-view--item { background: $surface-lighten-1; }
+ListView > .list-view--item { padding: 0 1; height: 1; }
+ListView > .list-view--item.selected {
+    background: $primary;
+    color: $background;
+    text-style: bold;
+}
+ListView > .list-view--item:focus { background: $surface-lighten-1; }
+
+#detail {
+    min-height: 12;
+    border: round $primary-darken-2;
+    background: $panel;
+    padding: 1;
+    margin-bottom: 1;
+}
+#ctx-detail {
+    min-height: 4;
+    border: round $primary-darken-2;
+    background: $panel;
+    padding: 1;
+}
+
+/* ---------- Dashboard: action bar + status ---------- */
+#action-bar {
+    dock: bottom;
+    height: auto;
+    padding: 0 1;
+}
+#action-bar Button { margin: 0 1 1 0; min-width: 10; }
+Button {
+    background: $surface;
+    border: tall $primary-darken-2;
+    color: $text;
+    height: 3;
+    padding: 0 2;
+    text-style: bold;
+}
+Button:hover { background: $surface-lighten-1; border: tall $primary; }
+Button:focus { border: tall $primary; }
+Button.success { background: $success; color: #ffffff; border: none; }
+Button.success:hover { background: #2ea043; }
+Button.error { background: $error; color: #ffffff; border: none; }
+Button.error:hover { background: #da3633; }
+Button.warning { background: $warning; color: #ffffff; border: none; }
+Button.warning:hover { background: #bb8009; }
+
+#dash-status {
+    dock: bottom;
+    height: 1;
+    padding: 0 1 1 1;
+    color: $text-muted;
+    text-style: italic;
+}
+
+/* ---------- Metrics ---------- */
+#metrics-scroll { height: 1fr; padding: 1 2; }
+#metrics-empty { color: $text-muted; padding: 1; }
+.metric-label { color: $text-muted; text-style: bold; margin-top: 1; text-align: left; }
+#metric-cols { height: 22; }
+#col-decode, #col-prefill { width: 1fr; padding: 0 1; }
+Digits {
+    color: $text;
+    background: $panel;
+    border: round $primary-darken-2;
+    padding: 0 2;
+    text-style: bold;
+    height: 3;
+}
+.spark { height: 8; margin: 0 0 1 0; }
+Sparkline { color: $primary; }
+#token-cols { height: auto; }
+#token-cols > Static {
+    width: 1fr;
+    margin: 0 1 0 0;
+    height: 4;
+    align-vertical: middle;
+    padding: 0 2;
+    border: round $primary-darken-2;
+}
+.gauge-label { color: $text-muted; margin-top: 1; text-style: bold; }
+ProgressBar { background: $surface; height: 1; }
+ProgressBar > .bar { background: $surface-lighten-1; }
+ProgressBar > .bar--bar { background: $primary; }
+.sys-summary { color: $text-muted; margin-top: 1; padding: 0 1; }
+
+/* ---------- Slots ---------- */
+#slots-scroll { height: 1fr; padding: 1 2; }
+#slots-table {
+    height: 1fr;
+    border: round $primary-darken-2;
+    background: $panel;
+    padding: 0 1;
+}
+DataTable { background: $panel; }
+DataTable > .datatable--header { background: $surface; color: $text-muted; text-style: bold; }
+DataTable > .datatable--header.header-hover { background: $primary; color: $background; }
+DataTable > .datatable--row { color: $text; }
+DataTable > .datatable--row.cursor { background: $surface-lighten-1; }
+#slots-empty { color: $text-muted; padding: 1; }
+
+/* ---------- Logs ---------- */
+#log-toolbar {
+    height: auto;
+    padding: 0 1;
+    align-vertical: middle;
+    margin-top: 1;
+}
+.toolbar-hint { color: $text-muted; margin: 0 1; }
+#log {
+    height: 1fr;
+    border: round $primary-darken-2;
+    background: #0b0e14;
+    padding: 0 1;
+    margin: 0 1 1 1;
+}
+RichLog { color: $text; }
+#follow-label { color: $text-muted; }
+
+/* ---------- Config ---------- */
+#config-scroll { height: 1fr; padding: 1 2; }
+#config-empty { color: $text-muted; padding: 1; }
+#config-out {
+    height: auto; min-height: 6;
+    border: round $primary-darken-2;
+    background: $panel;
+    padding: 1 2;
+}
+
+/* ---------- Doctor ---------- */
+#doctor-scroll { height: 1fr; padding: 1 2; }
+#doctor-summary { color: $text; text-style: bold; margin-bottom: 1; }
+#doctor-out {
+    border: round $primary-darken-2;
+    background: $panel;
+    padding: 1 2;
+    margin-top: 1;
+}
+#btn-doctor { width: auto; align-horizontal: left; }
+
+/* ---------- Help modal ---------- */
+#help-box {
+    width: 80;
+    height: 36;
+    border: thick $primary;
+    background: $panel;
+    padding: 1 2;
+    align-vertical: top;
+    align-horizontal: center;
+}
+#help-title { text-style: bold; color: $text; text-align: center; margin-bottom: 1; }
+#help-body { color: $text; }
+.help-hint { color: $text-muted; text-align: center; margin-top: 1; }
+
+/* ---------- generic ---------- */
+Static { color: $text; }
+Label { color: $text; }
+Label.hot { color: #f85149; }
+Label.warm { color: #d29922; }
+Switch { background: $surface; border: tall $primary-darken-2; }
+Input { background: $surface; color: $text; }

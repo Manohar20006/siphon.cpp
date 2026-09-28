@@ -1,0 +1,35 @@
+# Merge this into ~/.codex/config.toml and replace the placeholder paths.
+[mcp_servers.universal-worker-bridge]
+command = "python3"
+args = ["/absolute/path/to/universal-mcp/server.py"]
+cwd = "/absolute/path/to/your/project"
+enabled = true
+required = true
+startup_timeout_sec = 10
+tool_timeout_sec = 600
+default_tools_approval_mode = "prompt"
+env_vars = ["KAGGLE_QWEN_BASE_URL", "KAGGLE_QWEN_API_KEY", "ANTIGRAVITY_MAX_PROMPT_BYTES"]
+
+[mcp_servers.universal-worker-bridge.env]
+UNIVERSAL_MCP_CONFIG = "/absolute/path/to/universal-mcp/workers.json"
+UNIVERSAL_MCP_PROJECT_ROOT = "/absolute/path/to/your/project"
+UNIVERSAL_MCP_STORAGE_PATH = "/absolute/path/to/your/project/.universal-mcp-state.sqlite3"
+
+# Secrets are inherited from Codex's parent environment. Do not write the key here.
+[mcp_servers.universal-worker-bridge.tools.list_workers]
+approval_mode = "auto"
+
+[mcp_servers.universal-worker-bridge.tools.worker_health]
+approval_mode = "auto"
+
+[mcp_servers.universal-worker-bridge.tools.readiness_check]
+approval_mode = "auto"
+
+[mcp_servers.universal-worker-bridge.tools.get_task_status]
+approval_mode = "auto"
+
+[mcp_servers.universal-worker-bridge.tools.apply_worker_patch]
+approval_mode = "prompt"
+
+[mcp_servers.universal-worker-bridge.tools.run_worker_verification]
+approval_mode = "prompt"

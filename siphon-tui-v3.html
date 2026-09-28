@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>siphon — local LLM ops</title>
+<style>
+:root{
+  --bg:#0A0E14;
+  --surface:#0F1520;
+  --fg:#C5CBD6;
+  --dim:#5E6A7E;
+  --line:#232D3F;
+  --accent:#7C83F5;
+  --green:#3FB950;
+  --amber:#D29922;
+  --red:#F85149;
+  --sel-bg:#7C83F5;
+  --sel-fg:#0A0E14;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);
+  color:var(--fg);
+  font-family:ui-monospace,SFMono-Regular,SF Mono,Menlo,Consolas,Liberation Mono,monospace;
+  font-size:13px;
+  line-height:1.45;
+  -webkit-font-smoothing:none;
+  overflow-x:hidden;
+}
+::selection{background:var(--accent);color:#0A0E14}
+.tui{
+  width:100%;
+  max-width:1330px;
+  margin:0 auto;
+  padding:8px 10px 10px;
+  min-height:100vh;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+/* header */
+.header{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  border:1px solid var(--line);
+  padding:6px 12px;
+  background:var(--bg);
+  white-space:nowrap;
+}
+.header .left{font-weight:700;letter-spacing:.02em}
+.header .left .dim{color:var(--dim);font-weight:400}
+.header .right{color:var(--dim)}
+.header .right b{color:var(--fg);font-weight:700}
+/* system strip */
+.sysstrip{
+  border:1px solid var(--line);
+  padding:6px 12px;
+  display:flex;
+  align-items:center;
+  gap:14px;
+  white-space:nowrap;
+  overflow:hidden;
+}
+.sysstrip .sep{color:var(--dim)}
+.sysstrip .k{color:var(--dim)}
+.sysstrip .v{color:var(--fg)}
+.vram-bar{letter-spacing:-1px;color:var(--accent)}
+.vram-bar .off{color:#2A3550}
+/* main split */
+.main{
+  display:grid;
+  grid-template-columns:55% 1fr;
+  gap:6px;
+  min-height:0;
+}
+.panel{
+  border:1px solid var(--line);
+  background:var(--bg);
+  position:relative;
+  outline:1px solid transparent;
+  outline-offset:2px;
+}
+.panel.focused{
+  border-color:var(--accent);
+  outline-color:var(--accent);
+}
+.panel-title{
+  position:absolute;
+  top:-9px;
+  left:10px;
+  background:var(--bg);
+  padding:0 8px;
+  color:var(--dim);
+  font-weight:700;
+  letter-spacing:.08em;
+  font-size:11px;
+  text-transform:uppercase;
+}
+.panel.focused .panel-title{color:var(--accent)}
+.panel-body{padding:12px 10px 10px}
+/* table */
+table.models{width:100%;border-collapse:collapse;table-layout:fixed}
+table.models th{
+  text-align:left;
+  color:var(--dim);
+  font-weight:400;
+  font-size:11px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  padding:2px 8px 6px;
+  border-bottom:1px solid var(--line);
+  white-space:nowrap;
+}
+table.models td{
+  padding:5px 8px;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  border-bottom:1px dotted #1A2333;
+  cursor:pointer;
+}
+table.models tr:last-child td{border-bottom:0}
+table.models tr.row{cursor:pointer}
+table.models tr.row.selected td{
+  background:var(--accent);
+  color:#0A0E14;
+}
+table.models tr.row.selected td .st,
+table.models tr.row.selected td .dim,
+table.models tr.row.selected td .fitbar{color:#0A0E14 !important}
+.st-RUNNING{color:var(--green);font-weight:700}
+.st-IDLE{color:var(--dim)}
+.st-STOPPED{color:var(--red);font-weight:700}
+.st-LOADING{color:var(--amber);font-weight:700}
+.dim{color:var(--dim)}
+.fitbar{color:var(--dim);letter-spacing:-1px}
+/* detail */
+.dl{display:flex;flex-direction:column;gap:1px;margin-bottom:8px}
+.dl-row{
+  display:flex;
+  align-items:baseline;
+  gap:6px;
+  white-space:nowrap;
+}
+.dl-row .lab{color:var(--dim);min-width:92px}
+.dl-row .dots{flex:1;color:#26314a;overflow:hidden;letter-spacing:2px}
+.dl-row .val{color:var(--fg);text-align:right}
+.dl-row .val.green{color:var(--green)}
+.dl-row .val.amber{color:var(--amber)}
+.cfg-head{
+  color:var(--dim);
+  font-size:11px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  border-top:1px solid var(--line);
+  padding-top:8px;
+  margin:8px 0 6px;
+}
+.cfg-row{
+  display:grid;
+  grid-template-columns:92px 1fr;
+  align-items:center;
+  gap:8px;
+  padding:2px 0;
+}
+.cfg-row label{color:var(--dim);white-space:nowrap}
+.bracket{
+  display:flex;
+  align-items:center;
+  gap:0;
+  color:var(--dim);
+}
+.bracket .br{color:var(--dim)}
+.bracket input{
+  background:var(--surface);
+  border:0;
+  border-bottom:1px solid #2b3650;
+  color:var(--fg);
+  font:inherit;
+  font-size:12px;
+  padding:1px 6px;
+  width:100%;
+  min-width:0;
+  outline:none;
+}
+.bracket input:focus{
+  background:#151d2e;
+  border-bottom-color:var(--accent);
+  color:#fff;
+}
+.actions{
+  display:flex;
+  gap:10px;
+  margin-top:10px;
+  flex-wrap:wrap;
+}
+.btn{
+  font:inherit;
+  background:transparent;
+  border:0;
+  color:var(--fg);
+  cursor:pointer;
+  padding:4px 2px;
+  min-height:28px;
+}
+.btn .k{color:var(--accent);font-weight:700}
+.btn:hover{background:#151d2e}
+.btn:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
+.btn.primary .k{color:var(--accent)}
+/* metrics */
+.metrics-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  column-gap:22px;
+}
+.metric{
+  display:grid;
+  grid-template-columns:86px 86px 1fr;
+  align-items:center;
+  gap:8px;
+  padding:3px 0;
+  border-bottom:1px dotted #1A2333;
+  white-space:nowrap;
+}
+.metric .mlab{color:var(--dim)}
+.metric .mval{color:var(--fg);text-align:right}
+.metric .mbar{color:var(--accent);letter-spacing:-1px;overflow:hidden}
+.metric .mbar .off{color:#232d44}
+.metric.dimmed .mval{color:var(--dim)}
+.metric.dimmed .mbar{color:#2c3650}
+/* log */
+.log-lines{
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  min-height:86px;
+}
+.log-line{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.log-line .ts{color:var(--dim)}
+.log-line .lvl-ok{color:var(--green)}
+.log-line .lvl-warn{color:var(--amber)}
+.log-line .lvl-err{color:var(--red)}
+.log-line .lvl-inf{color:var(--dim)}
+/* footer */
+.footer{
+  border:1px solid var(--line);
+  padding:7px 12px;
+  color:var(--dim);
+  white-space:nowrap;
+  overflow:hidden;
+}
+.footer b{color:var(--accent);font-weight:700}
+.footer .sep{margin:0 6px;color:#2a3550}
+:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
+@media (max-width:900px){
+  .main{grid-template-columns:1fr}
+  .metrics-grid{grid-template-columns:1fr}
+  .tui{max-width:100%}
+  .sysstrip,.footer{white-space:normal}
+}
+</style>
+</head>
+<body>
+<div class="tui" id="tui">
+
+  <div class="header" data-od-id="header-bar">
+    <div class="left">siphon <span class="dim">— local LLM ops</span></div>
+    <div class="right" data-od-id="clock"><span class="dim">local</span> <b id="clock">00:00:00</b> <span class="dim" id="date">—</span></div>
+  </div>
+
+  <div class="sysstrip" data-od-id="system-strip">
+    <span><span class="k">GPU</span> <span class="v" id="sys-gpu">47%</span> <span class="v" id="sys-gput">53C</span></span>
+    <span><span class="k">VRAM</span> <span class="v">3.9/6.0GiB</span> <span class="vram-bar" aria-hidden="true">██████▓░<span class="off">░░</span></span></span>
+    <span class="sep">│</span>
+    <span><span class="k">CPU</span> <span class="v">8%</span> <span class="v">97C</span></span>
+    <span class="sep">│</span>
+    <span><span class="k">RAM</span> <span class="v">3.5/15.4GiB</span></span>
+    <span class="sep">│</span>
+    <span><span class="k">NVMe</span> <span class="v">37C</span></span>
+    <span class="sep">│</span>
+    <span class="dim">ctx 32k · spec mtp · :8090</span>
+  </div>
+
+  <div class="main">
+    <section class="panel focused" id="panel-table" data-od-id="model-table-panel" tabindex="-1" aria-label="Model table">
+      <div class="panel-title">models · 4</div>
+      <div class="panel-body">
+        <table class="models" data-od-id="model-table">
+          <thead><tr><th style="width:44%">NAME</th><th style="width:18%">STATE</th><th style="width:18%">RATE</th><th style="width:20%">VRAM-FIT</th></tr></thead>
+          <tbody id="model-rows"></tbody>
+        </table>
+        <div class="dim" style="margin-top:8px" id="table-hint">↑↓ move · enter select · s start · x stop</div>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-detail" data-od-id="detail-panel" tabindex="-1" aria-label="Detail">
+      <div class="panel-title" id="detail-title">detail · qwen3.6-moe-tq3</div>
+      <div class="panel-body">
+        <div class="dl" id="detail-dl" data-od-id="detail-list"></div>
+        <div class="cfg-head">config — [edit]</div>
+        <div id="cfg-rows" data-od-id="config-fields"></div>
+        <div class="actions" data-od-id="model-actions">
+          <button class="btn primary" data-od-id="btn-start" id="btn-start">[<span class="k">S</span>tart]</button>
+          <button class="btn" data-od-id="btn-stop" id="btn-stop">[<span class="k">x</span> stop]</button>
+          <button class="btn" data-od-id="btn-apply" id="btn-apply">[<span class="k">a</span>pply]</button>
+          <button class="btn" data-od-id="btn-revert" id="btn-revert">[<span class="k">u</span> revert]</button>
+        </div>
+        <div class="dim" id="cfg-status" style="margin-top:6px" role="status">· clean — no pending edits</div>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel" id="panel-metrics" data-od-id="metrics-panel" tabindex="-1" aria-label="Metrics">
+    <div class="panel-title">metrics · live</div>
+    <div class="panel-body">
+      <div class="metrics-grid" id="metrics-grid" data-od-id="metrics-grid"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-log" data-od-id="log-panel" tabindex="-1" aria-label="Log">
+    <div class="panel-title">log · siphond</div>
+    <div class="panel-body">
+      <div class="log-lines" id="log-lines" data-od-id="log-lines" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <div class="footer" data-od-id="footer-keys">
+    <b>s</b> start <span class="sep">·</span> <b>x</b> stop <span class="sep">·</span> <b>r</b> refresh <span class="sep">·</span> <b>a</b> apply <span class="sep">·</span> <b>u</b> revert <span class="sep">·</span> <b>↑↓</b> navigate <span class="sep">·</span> <b>enter</b> select <span class="sep">·</span> <b>tab</b> focus <span class="sep">·</span> <b>q</b> quit
+  </div>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var MODELS = [
+    {name:"qwen3.6-moe-tq3", state:"RUNNING", rate:"20.3t/s", fit:57, fitLabel:"Fits 57%",
+     latency:"38ms", endpoint:":8090/v1", suite:"code-assist",
+     cfg:{path:"~/.siphon/qwen3.6-moe-tq3.gguf", ctx:"32768", batch:"128", port:"8090", l1:"2800 MiB", l2:"8192 MiB", spec:"mtp"},
+     metrics:{decode:"20.3t/s", prefill:"29.4t/s", l1_hit:"84%", l2_hit:"55%", draft_acc:"84%", nvme:"5743MiB/s", ram2vram:"1915MiB/s", streamed:"1715MiB", dec_calls:"36", pre_calls:"655"}},
+    {name:"kat-coder-mtp", state:"IDLE", rate:"standby", fit:68, fitLabel:"Fits 68%",
+     latency:"—", endpoint:"—", suite:"code-assist",
+     cfg:{path:"~/.siphon/kat-coder-mtp.gguf", ctx:"32768", batch:"96", port:"8091", l1:"2400 MiB", l2:"8192 MiB", spec:"mtp"},
+     metrics:null},
+    {name:"qwen3-coder-next", state:"IDLE", rate:"standby", fit:47, fitLabel:"Fits 47%",
+     latency:"—", endpoint:"—", suite:"code-assist",
+     cfg:{path:"~/.siphon/qwen3-coder-next.gguf", ctx:"16384", batch:"64", port:"8092", l1:"1800 MiB", l2:"4096 MiB", spec:"mtp"},
+     metrics:null},
+    {name:"qwen3.6-dflash", state:"IDLE", rate:"standby", fit:32, fitLabel:"Fits 32%",
+     latency:"—", endpoint:"—", suite:"code-assist",
+     cfg:{path:"~/.siphon/qwen3.6-dflash.gguf", ctx:"16384", batch:"64", port:"8093", l1:"1200 MiB", l2:"2048 MiB", spec:"off"},
+     metrics:null}
+  ];
+  var LIVE = {decode:"20.3t/s", prefill:"29.4t/s", l1_hit:"84%", l2_hit:"55%", draft_acc:"84%", nvme:"5743MiB/s", ram2vram:"1915MiB/s", streamed:"1715MiB", dec_calls:"36", pre_calls:"655"};
+  var sel = 0;
+  var focusIdx = 0;
+  var panels = ["panel-table","panel-detail","panel-metrics","panel-log"];
+  var rowsEl = document.getElementById("model-rows");
+  var dlEl = document.getElementById("detail-dl");
+  var cfgEl = document.getElementById("cfg-rows");
+  var metEl = document.getElementById("metrics-grid");
+  var logEl = document.getElementById("log-lines");
+  var titleEl = document.getElementById("detail-title");
+  var statusEl = document.getElementById("cfg-status");
+
+  function bar(pct, w){
+    w = w || 10;
+    var f = Math.round(pct/100*w);
+    var s = "";
+    for(var i=0;i<w;i++){ s += (i<f) ? "█" : "░"; }
+    return s;
+  }
+  function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+  function renderTable(){
+    var h = "";
+    for(var i=0;i<MODELS.length;i++){
+      var m = MODELS[i];
+      var cls = (i===sel) ? "row selected" : "row";
+      var stc = "st-"+m.state;
+      h += '<tr class="'+cls+'" data-i="'+i+'" tabindex="0">'
+        + '<td>'+esc(m.name)+'</td>'
+        + '<td><span class="st '+stc+'">'+m.state+'</span></td>'
+        + '<td>'+(m.state==="RUNNING"?esc(m.rate):'<span class="dim">standby</span>')+'</td>'
+        + '<td><span class="fitbar">'+bar(m.fit,8)+'</span> <span class="'+(i===sel?"":"dim")+'">'+esc(m.fitLabel)+'</span></td>'
+        + '</tr>';
+    }
+    rowsEl.innerHTML = h;
+    var trs = rowsEl.querySelectorAll("tr");
+    for(var j=0;j<trs.length;j++){
+      (function(tr){
+        tr.addEventListener("click", function(){ sel = parseInt(tr.getAttribute("data-i"),10); renderAll(); });
+        tr.addEventListener("keydown", function(e){
+          if(e.key==="Enter"){ sel = parseInt(tr.getAttribute("data-i"),10); renderAll(); pushLog("inf","select "+MODELS[sel].name); }
+        });
+      })(trs[j]);
+    }
+  }
+
+  function dotRow(lab, val, valCls){
+    return '<div class="dl-row"><span class="lab">'+esc(lab)+'</span><span class="dots" aria-hidden="true"> . . . . . . . . . . . . . .</span><span class="val '+(valCls||"")+'">'+esc(val)+'</span></div>';
+  }
+
+  function renderDetail(){
+    var m = MODELS[sel];
+    titleEl.textContent = "detail · " + m.name;
+    var stateCls = m.state==="RUNNING" ? "green" : "";
+    dlEl.innerHTML =
+      dotRow("state", m.state, stateCls) +
+      dotRow("latency", m.state==="RUNNING" ? m.latency : "—") +
+      dotRow("endpoint", m.state==="RUNNING" ? m.endpoint : "—") +
+      dotRow("suite", m.suite);
+    var c = m.cfg;
+    var fields = [["path",c.path],["ctx",c.ctx],["batch",c.batch],["port",c.port],["l1_cache",c.l1],["l2_pinned",c.l2],["speculator",c.spec]];
+    var h = "";
+    for(var i=0;i<fields.length;i++){
+      h += '<div class="cfg-row"><label for="cfg-'+fields[i][0]+'">'+esc(fields[i][0])+'</label>'
+        + '<span class="bracket"><span class="br">[</span><input id="cfg-'+fields[i][0]+'" data-k="'+fields[i][0]+'" value="'+esc(fields[i][1])+'" spellcheck="false" autocomplete="off"><span class="br">]</span></span></div>';
+    }
+    cfgEl.innerHTML = h;
+    var inputs = cfgEl.querySelectorAll("input");
+    for(var k=0;k<inputs.length;k++){
+      inputs[k].addEventListener("input", function(){ statusEl.textContent = "· edited — press a to apply, u to revert"; });
+    }
+  }
+
+  function metricRow(lab, val, pct, dimmed){
+    return '<div class="metric'+(dimmed?" dimmed":"")+'"><span class="mlab">'+esc(lab)+'</span><span class="mval">'+esc(val)+'</span><span class="mbar" aria-hidden="true">'+bar(pct,10)+'</span></div>';
+  }
+  function pctOf(v){
+    var n = parseFloat(v);
+    if(isNaN(n)) return 0;
+    if(v.indexOf("%")>=0) return Math.min(100,n);
+    if(v.indexOf("t/s")>=0) return Math.min(100, n/30*100);
+    if(v.indexOf("MiB/s")>=0) return Math.min(100, n/6000*100);
+    if(v.indexOf("MiB")>=0) return Math.min(100, n/2000*100);
+    return Math.min(100, n/700*100);
+  }
+  function renderMetrics(){
+    var m = MODELS[sel];
+    var live = (m.state==="RUNNING");
+    var d = live ? LIVE : {decode:"0.0t/s", prefill:"0.0t/s", l1_hit:"—", l2_hit:"—", draft_acc:"—", nvme:"0MiB/s", ram2vram:"0MiB/s", streamed:"0MiB", dec_calls:"0", pre_calls:"0"};
+    var rows = [
+      ["decode", d.decode],["prefill", d.prefill],["l1_hit", d.l1_hit],["l2_hit", d.l2_hit],["draft_acc", d.draft_acc],
+      ["nvme", d.nvme],["ram2vram", d.ram2vram],["streamed", d.streamed],["dec_calls", d.dec_calls],["pre_calls", d.pre_calls]
+    ];
+    var h = "";
+    for(var i=0;i<rows.length;i++){
+      var p = (d[rows[i][0]]==="—") ? 0 : pctOf(rows[i][1]);
+      h += metricRow(rows[i][0], rows[i][1], p, !live);
+    }
+    metEl.innerHTML = h;
+  }
+
+  var LOGS = [
+    {ts:"09:41:02", lv:"lvl-ok", lvT:"OK  ", msg:"qwen3.6-moe-tq3 listening on :8090/v1 · ctx 32768"},
+    {ts:"09:41:03", lv:"lvl-inf", lvT:"INFO", msg:"decode 20.3t/s · prefill 29.4t/s · l1_hit 84% · l2_hit 55%"},
+    {ts:"09:41:05", lv:"lvl-inf", lvT:"INFO", msg:"nvme 5743MiB/s · ram2vram 1915MiB/s · streamed 1715MiB"},
+    {ts:"09:41:07", lv:"lvl-warn", lvT:"WARN", msg:"l2_pinned 8192MiB near cap · draft_acc 84% stable"}
+  ];
+  var logN = 0;
+  function fmtTs(d){
+    function p(n){ return (n<10?"0":"")+n; }
+    return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+  }
+  function renderLogs(){
+    var h = "";
+    var tail = LOGS.slice(-4);
+    for(var i=0;i<tail.length;i++){
+      h += '<div class="log-line"><span class="ts">'+esc(tail[i].ts)+'</span> <span class="'+tail[i].lv+'">'+tail[i].lvT+'</span> <span>siphond │ '+esc(tail[i].msg)+'</span></div>';
+    }
+    logEl.innerHTML = h;
+  }
+  function pushLog(lv, msg){
+    var d = new Date();
+    var m = {OK:"lvl-ok", INFO:"lvl-inf", WARN:"lvl-warn", ERR:"lvl-err"};
+    var t = {OK:"OK  ", INFO:"INFO", WARN:"WARN", ERR:"ERR "};
+    var k = lv.toUpperCase();
+    if(k==="INF") k="INFO";
+    LOGS.push({ts:fmtTs(d), lv:m[k]||"lvl-inf", lvT:t[k]||"INFO", msg:msg});
+    renderLogs();
+  }
+  var FAKE = [
+    "decode 20.4t/s · prefill 29.1t/s · l1_hit 84% · dec_calls 37",
+    "l1_cache 2800MiB ok · l2_pinned 8192MiB · spec mtp verified",
+    "streamed 1716MiB · pre_calls 656 · ram2vram 1914MiB/s",
+    "heartbeat :8090/v1 · p50 38ms · draft_acc 84%",
+    "nvme 5741MiB/s · temp 53C · vram 3.9/6.0GiB steady"
+  ];
+  setInterval(function(){
+    var m = MODELS[sel];
+    if(m.state==="RUNNING"){ pushLog("info", FAKE[logN % FAKE.length]); logN++; }
+    else { pushLog("info", m.name + " standby · zero tokens · awaiting start"); }
+  }, 3000);
+
+  function setFocus(i){
+    focusIdx = (i+panels.length)%panels.length;
+    for(var k=0;k<panels.length;k++){
+      document.getElementById(panels[k]).classList.toggle("focused", k===focusIdx);
+    }
+  }
+
+  function renderAll(){ renderTable(); renderDetail(); renderMetrics(); renderLogs(); }
+
+  document.getElementById("btn-start").addEventListener("click", doStart);
+  document.getElementById("btn-stop").addEventListener("click", doStop);
+  document.getElementById("btn-apply").addEventListener("click", doApply);
+  document.getElementById("btn-revert").addEventListener("click", doRevert);
+
+  function doStart(){
+    var m = MODELS[sel];
+    if(m.state!=="RUNNING"){
+      m.state = m.state==="STOPPED" ? "LOADING" : "RUNNING";
+      if(m.state==="LOADING"){
+        renderAll();
+        pushLog("warn", m.name+" loading weights → vram …");
+        setTimeout(function(){ m.state="RUNNING"; m.rate = m.name==="qwen3.6-moe-tq3" ? "20.3t/s" : "11.7t/s"; renderAll(); pushLog("ok", m.name+" running · "+m.rate+" · "+m.cfg.port); }, 900);
+      } else {
+        m.rate = m.name==="qwen3.6-moe-tq3" ? "20.3t/s" : "11.7t/s";
+        renderAll(); pushLog("ok", m.name+" started · "+m.rate+" on :"+m.cfg.port+"/v1");
+      }
+    }
+  }
+  function doStop(){
+    var m = MODELS[sel];
+    m.state = "STOPPED"; m.rate = "—";
+    renderAll(); pushLog("err", m.name+" stopped · vram released");
+    setTimeout(function(){ if(MODELS[sel]===m && m.state==="STOPPED"){ m.state="IDLE"; renderAll(); } }, 2500);
+  }
+  function doApply(){
+    var inputs = cfgEl.querySelectorAll("input");
+    var m = MODELS[sel];
+    for(var i=0;i<inputs.length;i++){
+      var k = inputs[i].getAttribute("data-k");
+      if(k==="path") m.cfg.path = inputs[i].value;
+      if(k==="ctx") m.cfg.ctx = inputs[i].value;
+      if(k==="batch") m.cfg.batch = inputs[i].value;
+      if(k==="port") m.cfg.port = inputs[i].value;
+      if(k==="l1_cache") m.cfg.l1 = inputs[i].value;
+      if(k==="l2_pinned") m.cfg.l2 = inputs[i].value;
+      if(k==="speculator") m.cfg.spec = inputs[i].value;
+    }
+    m.endpoint = ":" + m.cfg.port + "/v1";
+    statusEl.textContent = "· applied — "+m.name+" :"+m.cfg.port+" · ctx "+m.cfg.ctx;
+    pushLog("info","config applied · "+m.name+" port "+m.cfg.port+" ctx "+m.cfg.ctx+" batch "+m.cfg.batch);
+    renderMetrics();
+  }
+  function doRevert(){ renderDetail(); statusEl.textContent = "· reverted — no pending edits"; pushLog("info","config reverted · "+MODELS[sel].name); }
+
+  document.addEventListener("keydown", function(e){
+    var tag = (document.activeElement && document.activeElement.tagName) || "";
+    var typing = (tag==="INPUT" || tag==="TEXTAREA");
+    if(e.key==="Tab"){ e.preventDefault(); setFocus(focusIdx+1); return; }
+    if(typing){ if(e.key==="Escape") document.activeElement.blur(); return; }
+    if(e.key==="ArrowDown"){ e.preventDefault(); sel=(sel+1)%MODELS.length; renderAll(); }
+    else if(e.key==="ArrowUp"){ e.preventDefault(); sel=(sel-1+MODELS.length)%MODELS.length; renderAll(); }
+    else if(e.key==="Enter"){ pushLog("inf","select "+MODELS[sel].name); }
+    else if(e.key==="s"||e.key==="S"){ doStart(); }
+    else if(e.key==="x"||e.key==="X"){ doStop(); }
+    else if(e.key==="r"||e.key==="R"){ renderAll(); pushLog("info","refresh · models re-polled"); }
+    else if(e.key==="a"||e.key==="A"){ doApply(); }
+    else if(e.key==="u"||e.key==="U"){ doRevert(); }
+    else if(e.key==="q"||e.key==="Q"){ pushLog("warn","quit ignored in mockup · press browser back to exit"); }
+  });
+
+  function tick(){
+    var d = new Date();
+    function p(n){ return (n<10?"0":"")+n; }
+    document.getElementById("clock").textContent = p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+    document.getElementById("date").textContent = d.toLocaleDateString("en-CA",{month:"short",day:"2-digit"});
+  }
+
+  renderAll();
+  tick();
+  setInterval(tick, 1000);
+  window.__siphon = {MODELS:MODELS, get sel(){return sel;}, set sel(v){sel=v; renderAll();}};
+})();
+</script>
+</body>
+</html>

@@ -704,6 +704,7 @@ public:
     ggml_tensor * get_embd()        const { return t_embd; }
     ggml_tensor * get_embd_pooled() const { return t_embd_pooled; }
     ggml_tensor * get_h_nextn()     const { return t_h_nextn; }
+    ggml_tensor * get_layer_inp(int il) const { return t_layer_inp.at(il); }
 
     ggml_cgraph  * get_gf()  const { return gf; }
     ggml_context * get_ctx() const { return ctx_compute.get(); }
@@ -713,7 +714,7 @@ public:
     void reset();
 
     void set_inputs(const llama_ubatch * ubatch);
-    void set_outputs();
+    void set_outputs(const llm_graph_params & params);
 
     // try to update the existing graph result using the new graph parameters in order to reuse it
     // this can only be done if we determine that the resulting graph using the new graph parameters
@@ -732,7 +733,10 @@ public:
     ggml_tensor * t_logits      = nullptr;
     ggml_tensor * t_embd        = nullptr;
     ggml_tensor * t_embd_pooled = nullptr;
-    ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
+ggml_tensor  * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
+
+    // per-layer input embeddings (for layer-input extraction, e.g. DFlash)
+    std::vector<ggml_tensor *> t_layer_inp;
 
     std::map<llama_seq_id, ggml_tensor*> t_sampled_logits;
     std::map<llama_seq_id, ggml_tensor*> t_candidates;

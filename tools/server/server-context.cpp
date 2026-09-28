@@ -6,6 +6,8 @@
 #include "server-task.h"
 #include "server-queue.h"
 #include "llama-radix-cache.h"
+#include "../../src/llama-model.h"
+#include "../../src/llama-dstorage-slots.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -23,6 +25,7 @@
 #include <exception>
 #include <memory>
 #include <filesystem>
+#include <mutex>
 #include <utility>
 
 // fix problem with std::min and std::max
@@ -329,6 +332,15 @@ struct server_slot {
         //       also, need to leave space for 1 extra token to allow context shifts
         int n_draft_max = n_ctx - prompt.n_tokens() - 2;
 
+        // the external draft model only keeps a short context window - stop
+        // speculating once the target sequence would run past the draft's KV
+        if (ctx_dft != nullptr) {
+            const int n_ctx_dft = llama_n_ctx_seq(ctx_dft);
+            if (n_ctx_dft < n_ctx) {
+                n_draft_max = std::min(n_draft_max, n_ctx_dft - (int) prompt.n_tokens() - 2);
+            }
+        }
+
         if (n_remaining > 0) {
             n_draft_max = std::min(n_draft_max, n_remaining - 1);
         }
@@ -577,6 +589,17 @@ struct server_slot {
 //
 
 struct server_metrics {
+    struct live_snapshot {
+        uint64_t n_prompt_tokens_processed_total = 0;
+        uint64_t t_prompt_processing_total = 0;
+        uint64_t n_tokens_predicted_total = 0;
+        uint64_t t_tokens_generation_total = 0;
+        uint64_t n_decode_total = 0;
+        uint64_t n_draft_total = 0;
+        uint64_t n_draft_accepted = 0;
+    };
+
+    mutable std::mutex mutex;
     int64_t t_start = 0;
 
     uint64_t n_prompt_tokens_processed_total = 0;
@@ -594,12 +617,16 @@ struct server_metrics {
 
     uint64_t n_decode_total     = 0;
     uint64_t n_busy_slots_total = 0;
+    uint64_t n_draft_total = 0;
+    uint64_t n_draft_accepted = 0;
 
     void init() {
+        std::lock_guard<std::mutex> lock(mutex);
         t_start = ggml_time_us();
     }
 
     void on_prompt_eval(const server_slot & slot) {
+        std::lock_guard<std::mutex> lock(mutex);
         n_prompt_tokens_processed_total += slot.n_prompt_tokens_processed;
         n_prompt_tokens_processed       += slot.n_prompt_tokens_processed;
         t_prompt_processing             += slot.t_prompt_processing;
@@ -609,6 +636,7 @@ struct server_metrics {
     }
 
     void on_prediction(const server_slot & slot) {
+        std::lock_guard<std::mutex> lock(mutex);
         n_tokens_predicted_total   += slot.n_decoded;
         n_tokens_predicted         += slot.n_decoded;
         t_tokens_generation        += slot.t_token_generation;
@@ -616,6 +644,7 @@ struct server_metrics {
     }
 
     void on_decoded(const std::vector<server_slot> & slots) {
+        std::lock_guard<std::mutex> lock(mutex);
         n_decode_total++;
         for (const auto & slot : slots) {
             if (slot.is_processing()) {
@@ -626,10 +655,34 @@ struct server_metrics {
     }
 
     void reset_bucket() {
+        std::lock_guard<std::mutex> lock(mutex);
         n_prompt_tokens_processed = 0;
         t_prompt_processing       = 0;
         n_tokens_predicted        = 0;
         t_tokens_generation       = 0;
+    }
+
+    void on_draft_generated(uint64_t count) {
+        std::lock_guard<std::mutex> lock(mutex);
+        n_draft_total += count;
+    }
+
+    void on_draft_accepted(uint64_t count) {
+        std::lock_guard<std::mutex> lock(mutex);
+        n_draft_accepted += count;
+    }
+
+    live_snapshot get_live_snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return live_snapshot {
+            n_prompt_tokens_processed_total,
+            t_prompt_processing_total,
+            n_tokens_predicted_total,
+            t_tokens_generation_total,
+            n_decode_total,
+            n_draft_total,
+            n_draft_accepted,
+        };
     }
 };
 
@@ -836,7 +889,12 @@ private:
                     measure_model_bytes = false;
                 }
 
-                params_dft.n_outputs_max = params_base.n_parallel;
+                const bool spec_dflash = std::find(params_base.speculative.types.begin(),
+                                                   params_base.speculative.types.end(),
+                                                   COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH) != params_base.speculative.types.end();
+                // The DFlash encoder processes up to n_ubatch tokens per call and needs an
+                // output row for each, so the draft context must reserve n_ubatch outputs.
+                params_dft.n_outputs_max = spec_dflash ? params_base.n_ubatch : params_base.n_parallel;
 
                 auto mparams_dft = common_model_params_to_llama(params_dft);
                 auto cparams_dft = common_context_params_to_llama(params_dft);
@@ -922,12 +980,24 @@ private:
             params_dft.cache_type_k = params_spec.cache_type_k;
             params_dft.cache_type_v = params_spec.cache_type_v;
 
+            // The external draft model is a plain (non-MoE) model: it must not
+            // inherit the target model's DirectStorage MoE expert-cache setup.
+            params_dft.dstorage_moe          = false;
+            params_dft.dstorage_moe_prefetch = false;
+
             if (params_spec.cpuparams.n_threads > 0) {
                 params_dft.cpuparams.n_threads       = params_spec.cpuparams.n_threads;
                 params_dft.cpuparams_batch.n_threads = params_spec.cpuparams_batch.n_threads;
             }
 
             params_dft.tensor_buft_overrides = params_spec.tensor_buft_overrides;
+
+            const bool spec_dflash = std::find(params_base.speculative.types.begin(),
+                                               params_base.speculative.types.end(),
+                                               COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH) != params_base.speculative.types.end();
+            // The DFlash encoder processes up to n_ubatch tokens per call and needs an
+            // output row for each, so the draft context must reserve n_ubatch outputs.
+            params_dft.n_outputs_max = spec_dflash ? params_base.n_ubatch : params_base.n_parallel;
 
             auto mparams_dft = common_model_params_to_llama(params_dft);
 
@@ -937,7 +1007,7 @@ private:
                 return false;
             }
 
-            auto cparams = common_context_params_to_llama(params_dft);
+auto cparams = common_context_params_to_llama(params_dft);
 
             const bool spec_mtp = std::find(params_base.speculative.types.begin(),
                                             params_base.speculative.types.end(),
@@ -946,9 +1016,23 @@ private:
                 cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
             }
 
-            // note: for small models maybe we can set this to the maximum possible draft from all speculative types
+            // Cap the external draft model's context window. The draft KV must
+            // mirror the target sequence positions, but keeping it as big as the
+            // target context (e.g. 86K) wastes VRAM. A short draft window is
+            // enough: speculation stops as soon as the target outgrows it.
+            if (!spec_mtp) {
+                if (const char * cap = getenv("LLAMA_SPEC_DRAFT_CTX")) {
+                    const uint32_t n_draft_ctx = (uint32_t) std::strtoul(cap, nullptr, 10);
+                    if (n_draft_ctx > 0) {
+                        cparams.n_ctx = std::min(cparams.n_ctx, n_draft_ctx);
+                    }
+                }
+            }
+
+// note: for small models maybe we can set this to the maximum possible draft from all speculative types
             //       the extra memory for small models is likely negligible?
             cparams.n_rs_seq = 0;
+            cparams.ctx_other = ctx_tgt;
             ctx_dft.reset(llama_init_from_model(model_dft.get(), cparams));
 
             ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
@@ -2053,7 +2137,10 @@ private:
         cur.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
         // Add to global radix cache if enabled
-        if (radix_cache) {
+        // note: mtmd (multimodal) prompts contain LLAMA_TOKEN_NULL placeholders and
+        //       cannot be keyed by a plain token prefix, so skip them (mirrors the
+        //       guard in the radix restore path).
+        if (radix_cache && !slot.prompt.tokens.has_mtmd) {
             const auto & full_tokens = slot.prompt.tokens.get_tokens();
             if (cur.n_tokens <= (int64_t)full_tokens.size()) {
                 std::vector<llama_token> prefix_tokens(full_tokens.begin(), full_tokens.begin() + cur.n_tokens);
@@ -2066,6 +2153,48 @@ private:
                 "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                 (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, cur.pos_min,
                 cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
+    }
+
+    // create a checkpoint at the end of generation, so that a follow-up request
+    // can restore the full conversation from the global radix cache instead of
+    // re-prefilling the tokens generated in the previous turn
+    void create_checkpoint_eog(server_slot & slot) {
+        if (params_base.n_ctx_checkpoints <= 0) {
+            return;
+        }
+
+        // make checkpoints only for completion tasks
+        if (slot.task->type != SERVER_TASK_TYPE_COMPLETION) {
+            return;
+        }
+
+        // checkpoints are created only if:
+        // - the model does not support partial sequence removal
+        // - the model uses SWA (and we are not using `swa_full`)
+        // - the model supports partial sequence removal but only up to a fixed bound
+        if (!(ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+              ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
+              n_swa > 0)) {
+            return;
+        }
+
+        // nothing to checkpoint yet
+        const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
+        const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+
+        if (pos_min < 0) {
+            return;
+        }
+
+        // no need to create checkpoints that are too close together
+        if (!slot.prompt.checkpoints.empty() &&
+            slot.prompt.n_tokens() <= slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_step) {
+            return;
+        }
+
+        // n_tokens_cur = 0: the last batch has already been decoded, so the
+        // checkpoint captures the state of the entire conversation
+        create_checkpoint(slot, 0, pos_min, pos_max);
     }
 
     void process_single_task(server_task && task) {
@@ -2137,6 +2266,15 @@ private:
                     // release slot linked with the task id
                     for (auto & slot : slots) {
                         if (slot.task && slot.task->id == task.id_target) {
+                            // capture the partial state so an interrupted generation
+                            // can still be restored from the radix cache instead of
+                            // forcing a full re-prefill on the next request.
+                            // only do this once generation actually started, since a
+                            // mid-prefill cancel has undecoded tokens in prompt.tokens
+                            // that would make the checkpoint inconsistent.
+                            if (slot.n_decoded > 0) {
+                                create_checkpoint_eog(slot);
+                            }
                             slot.release();
                             break;
                         }
@@ -2219,6 +2357,25 @@ private:
 
                     res->n_decode_total          = metrics.n_decode_total;
                     res->n_busy_slots_total      = metrics.n_busy_slots_total;
+
+                    if (DStorageSlotManager * dstorage = model_tgt->dstorage_slots()) {
+                        const auto snapshot = dstorage->telemetry_snapshot();
+                        res->dstorage_active = snapshot.active;
+                        res->dstorage_l1_resident_experts = snapshot.l1_resident_experts;
+                        res->dstorage_l2_resident_experts = snapshot.l2_resident_experts;
+                        res->dstorage_prefill_calls = snapshot.prefill_calls;
+                        res->dstorage_prefill_hits = snapshot.prefill_hits;
+                        res->dstorage_prefill_misses = snapshot.prefill_misses;
+                        res->dstorage_decode_calls = snapshot.decode_calls;
+                        res->dstorage_decode_hits = snapshot.decode_hits;
+                        res->dstorage_decode_misses = snapshot.decode_misses;
+                        res->dstorage_decode_cold_experts = snapshot.decode_cold_experts;
+                        res->dstorage_decode_pinned_experts = snapshot.decode_pinned_experts;
+                        res->dstorage_streamed_file_bytes = snapshot.streamed_file_bytes;
+                        res->dstorage_pinned_transfer_bytes = snapshot.pinned_transfer_bytes;
+                        res->dstorage_pinned_transfer_us = snapshot.pinned_transfer_us;
+                        res->dstorage_stream_total_us = snapshot.stream_total_us;
+                    }
 
                     if (task.metrics_reset_bucket) {
                         metrics.reset_bucket();
@@ -2486,6 +2643,14 @@ private:
         std::vector<server_slot *> generating;
         std::vector<server_slot *> drafting;
 
+        // count total active generating slots for dynamic draft depth scaling
+        int n_gen_active = 0;
+        for (const auto & slot : slots) {
+            if (slot.state == SLOT_STATE_GENERATING) {
+                n_gen_active++;
+            }
+        }
+
         // determine which slots are generating and drafting
         for (auto & slot : slots) {
             if (slot.state != SLOT_STATE_GENERATING) {
@@ -2507,7 +2672,10 @@ private:
                 const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                 const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
-                const int n_draft_max = slot.get_n_draft_max();
+                int n_draft_max = slot.get_n_draft_max();
+                if (n_gen_active > 1 && n_draft_max > 0) {
+                    n_draft_max = std::max(1, n_draft_max / n_gen_active);
+                }
 
                 if (n_draft_max > 0) {
                     GGML_ASSERT(slot.can_speculate());
@@ -2559,6 +2727,7 @@ private:
             auto & ckpt  = slot.spec_ckpt;
 
             slot.n_draft_total += draft.size();
+            metrics.on_draft_generated(draft.size());
 
             // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
             const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
@@ -2580,12 +2749,7 @@ private:
                    (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_dft.get()));
 
                 if (use_ckpt_tgt) {
-                    //const int64_t t_start = ggml_time_us();
-
                     ckpt.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-
-                    //const int64_t t_total = ggml_time_us() - t_start;
-                    //printf("checkpoint total: %f ms\n", t_total / 1000.0);
 
                     SLT_DBG(slot, "created speculative checkpoint (pos_min = %d, pos_max = %d, n_tokens = %d, size = %.3f MiB, draft = %.3f MiB)\n",
                             ckpt.pos_min, ckpt.pos_max, slot.prompt.n_tokens(),
@@ -2799,82 +2963,89 @@ private:
                             // ref: https://github.com/ggml-org/llama.cpp/pull/24110
                             const bool has_new_tokens = (n_past < slot.task->n_tokens());
 
-                            // the largest pos_min required for a checkpoint to be useful
-                            const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
+// the largest pos_min required for a checkpoint to be useful
+                             const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
 
-                            if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
-                                const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
-                                if (pos_min == -1) {
-                                    SLT_ERR(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min);
-                                    GGML_ABORT("pos_min == -1, but n_past > 0 - should not happen: https://github.com/ggml-org/llama.cpp/pull/13833#discussion_r2116181237");
-                                }
+                             // Attempt a global radix cache restore even if the slot's own KV was
+                             // clobbered by an interleaved request (e.g. opencode title generation).
+                             // The radix cache is keyed by the task token prefix, independent of the
+                             // slot's current prompt state, so it can recover the full prefix even
+                             // when n_past == 0 (i.e. the previous request left unrelated KV behind).
+                             bool restored_from_radix = false;
+                             if (radix_cache && !slot.task->tokens.has_mtmd) {
+                                 size_t matched_len = 0;
+                                 auto matched_node = radix_cache->find_longest_prefix(slot.task->tokens.get_tokens(), matched_len);
+                                 if (matched_node && matched_node->checkpoint && matched_len > 0 &&
+                                     matched_len > (size_t) n_past) {
+                                     const auto & ckpt = *(matched_node->checkpoint);
+                                     ckpt.load_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                                     ckpt.load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
-                                // when the prompt prefix does not match, print the tokens around the mismatch
-                                // this is useful for debugging prompt caching
-                                if (slots_debug) {
-                                    const int np0 = std::max<int>(n_past - 4, 0);
-                                    const int np1 = std::min<int>(n_past + 6, std::min(slot.prompt.tokens.size(), slot.task->tokens.size()));
+                                     slot.prompt.tokens.clear();
+                                     const auto & full_tokens = slot.task->tokens.get_tokens();
+                                     const size_t n_prefix = std::min<size_t>(ckpt.n_tokens, full_tokens.size());
+                                     std::vector<llama_token> prefix_tokens(full_tokens.begin(), full_tokens.begin() + n_prefix);
+                                     slot.prompt.tokens.insert(prefix_tokens);
 
-                                    std::stringstream ss0;
-                                    std::stringstream ss1;
+                                     pos_next = std::max(pos_next, std::max(ckpt.pos_min + 1, ckpt.pos_max));
+                                     n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) ckpt.n_tokens);
+                                     SLT_WRN(slot, "restored context checkpoint from GLOBAL RADIX CACHE (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB, matched_len = %zu)\n",
+                                             ckpt.pos_min, ckpt.pos_max, ckpt.n_tokens, n_past, (float) ckpt.size() / 1024 / 1024, matched_len);
+                                     restored_from_radix = true;
+                                 }
+                             }
 
-                                    std::stringstream st0;
-                                    std::stringstream st1;
+                             if (n_past > 0 && n_past <= slot.prompt.n_tokens() && !restored_from_radix) {
+                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
+                                 if (pos_min == -1) {
+                                     SLT_ERR(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min);
+                                     GGML_ABORT("pos_min == -1, but n_past > 0 - should not happen: https://github.com/ggml-org/llama.cpp/pull/13833#discussion_r2116181237");
+                                 }
 
-                                    ss0 << "old: ... ";
-                                    ss1 << "new: ... ";
+                                 // when the prompt prefix does not match, print the tokens around the mismatch
+                                 // this is useful for debugging prompt caching
+                                 if (slots_debug) {
+                                     const int np0 = std::max<int>(n_past - 4, 0);
+                                     const int np1 = std::min<int>(n_past + 6, std::min(slot.prompt.tokens.size(), slot.task->tokens.size()));
 
-                                    for (int i = np0; i < np1; i++) {
-                                        if (i == n_past) {
-                                            ss0 << " | ";
-                                            ss1 << " | ";
-                                        }
+                                     std::stringstream ss0;
+                                     std::stringstream ss1;
 
-                                        {
-                                            const auto token = slot.prompt.tokens[i];
-                                            const auto piece = token != LLAMA_TOKEN_NULL ? common_token_to_piece(ctx_tgt, token) : "[mtmd]";
-                                            ss0 << piece;
-                                            st0 << std::setw(8) << token;
-                                        }
+                                     std::stringstream st0;
+                                     std::stringstream st1;
 
-                                        {
-                                            const auto token = slot.task->tokens[i];
-                                            const auto piece = token != LLAMA_TOKEN_NULL ? common_token_to_piece(ctx_tgt, token) : "[mtmd]";
-                                            ss1 << piece;
-                                            st1 << std::setw(8) << token;
-                                        }
-                                    }
+                                     ss0 << "old: ... ";
+                                     ss1 << "new: ... ";
 
-                                    SLT_WRN(slot, "%s\n", ss0.str().c_str());
-                                    SLT_WRN(slot, "%s\n", ss1.str().c_str());
+                                     for (int i = np0; i < np1; i++) {
+                                         if (i == n_past) {
+                                             ss0 << " | ";
+                                             ss1 << " | ";
+                                         }
 
-                                    SLT_WRN(slot, "%s\n", st0.str().c_str());
-                                    SLT_WRN(slot, "%s\n", st1.str().c_str());
-                                }
+                                         {
+                                             const auto token = slot.prompt.tokens[i];
+                                             const auto piece = token != LLAMA_TOKEN_NULL ? common_token_to_piece(ctx_tgt, token) : "[mtmd]";
+                                             ss0 << piece;
+                                             st0 << std::setw(8) << token;
+                                         }
 
-                                 if (pos_min >= pos_min_thold) {
-                                     bool restored_from_radix = false;
-                                     if (radix_cache) {
-                                         size_t matched_len = 0;
-                                         auto matched_node = radix_cache->find_longest_prefix(slot.task->tokens.get_tokens(), matched_len);
-                                         if (matched_node && matched_node->checkpoint && (matched_len < (size_t)pos_min_thold || pos_min_thold <= 0)) {
-                                             const auto & ckpt = *(matched_node->checkpoint);
-                                             ckpt.load_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                                             ckpt.load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-
-                                             slot.prompt.tokens.clear();
-                                             const auto & full_tokens = slot.task->tokens.get_tokens();
-                                             std::vector<llama_token> prefix_tokens(full_tokens.begin(), full_tokens.begin() + ckpt.n_tokens);
-                                             slot.prompt.tokens.insert(prefix_tokens);
-
-                                             pos_next = std::min(pos_next, std::max(ckpt.pos_min + 1, ckpt.pos_max));
-                                             n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) ckpt.n_tokens);
-                                             SLT_WRN(slot, "restored context checkpoint from GLOBAL RADIX CACHE (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB, matched_len = %zu)\n",
-                                                     ckpt.pos_min, ckpt.pos_max, ckpt.n_tokens, n_past, (float) ckpt.size() / 1024 / 1024, matched_len);
-                                             restored_from_radix = true;
+                                         {
+                                             const auto token = slot.task->tokens[i];
+                                             const auto piece = token != LLAMA_TOKEN_NULL ? common_token_to_piece(ctx_tgt, token) : "[mtmd]";
+                                             ss1 << piece;
+                                             st1 << std::setw(8) << token;
                                          }
                                      }
 
+                                     SLT_WRN(slot, "%s\n", ss0.str().c_str());
+                                     SLT_WRN(slot, "%s\n", ss1.str().c_str());
+
+                                     SLT_WRN(slot, "%s\n", st0.str().c_str());
+                                     SLT_WRN(slot, "%s\n", st1.str().c_str());
+                                 }
+
+                                 if (pos_min >= pos_min_thold) {
                                      if (!restored_from_radix) {
                                          // search for a local context checkpoint
                                          const auto it = std::find_if(
@@ -3434,6 +3605,7 @@ private:
                     slot.print_timings();
                     send_final_response(slot);
                     metrics.on_prediction(slot);
+                    create_checkpoint_eog(slot);
                     slot.release();
 
                     continue;
@@ -3520,6 +3692,7 @@ private:
 
                 // update how many tokens out of those tested were accepted
                 slot.n_draft_accepted += ids.size() - 1;
+                metrics.on_draft_accepted(ids.size() - 1);
 
                 // add accepted tokens to the prompt
                 slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
@@ -3548,6 +3721,7 @@ private:
                         slot.print_timings();
                         send_final_response(slot);
                         metrics.on_prediction(slot);
+                        create_checkpoint_eog(slot);
                         slot.release();
 
                         break;
@@ -3594,6 +3768,49 @@ void server_context::terminate() {
 
 llama_context * server_context::get_llama_context() const {
     return impl->ctx_tgt;
+}
+
+json server_context::get_dstorage_telemetry() const {
+    json result = json::object();
+    if (impl == nullptr) {
+        return result;
+    }
+    const auto live = impl->metrics.get_live_snapshot();
+    result = {
+        {"server_prompt_tokens_total", live.n_prompt_tokens_processed_total},
+        {"server_prompt_time_us_total", live.t_prompt_processing_total},
+        {"server_predicted_tokens_total", live.n_tokens_predicted_total},
+        {"server_generation_time_us_total", live.t_tokens_generation_total},
+        {"server_decode_total", live.n_decode_total},
+        {"server_draft_total", live.n_draft_total},
+        {"server_draft_accepted", live.n_draft_accepted},
+    };
+    if (impl->model_tgt == nullptr) {
+        return result;
+    }
+    if (DStorageSlotManager * dstorage = impl->model_tgt->dstorage_slots()) {
+        const auto snapshot = dstorage->telemetry_snapshot();
+        // Preserve the server timing/draft counters above. Replacing the JSON
+        // object here made every live server_* field disappear whenever
+        // DirectStorage was enabled, leaving prefill blank until the final
+        // completion timing object arrived.
+        result["dstorage_active"] = snapshot.active ? 1 : 0;
+        result["dstorage_l1_resident_experts"] = snapshot.l1_resident_experts;
+        result["dstorage_l2_resident_experts"] = snapshot.l2_resident_experts;
+        result["dstorage_prefill_calls"] = snapshot.prefill_calls;
+        result["dstorage_prefill_hits"] = snapshot.prefill_hits;
+        result["dstorage_prefill_misses"] = snapshot.prefill_misses;
+        result["dstorage_decode_calls"] = snapshot.decode_calls;
+        result["dstorage_decode_hits"] = snapshot.decode_hits;
+        result["dstorage_decode_misses"] = snapshot.decode_misses;
+        result["dstorage_decode_cold_experts"] = snapshot.decode_cold_experts;
+        result["dstorage_decode_pinned_experts"] = snapshot.decode_pinned_experts;
+        result["dstorage_streamed_file_bytes"] = snapshot.streamed_file_bytes;
+        result["dstorage_pinned_transfer_bytes"] = snapshot.pinned_transfer_bytes;
+        result["dstorage_pinned_transfer_us"] = snapshot.pinned_transfer_us;
+        result["dstorage_stream_total_us"] = snapshot.stream_total_us;
+    }
+    return result;
 }
 
 server_response_reader server_context::get_response_reader() {
@@ -3984,6 +4201,7 @@ std::unique_ptr<server_res_generator> server_routes::create_response(bool bypass
 server_routes::server_routes(const common_params & params, server_context & ctx_server)
         : params(params),
           ctx_server(*ctx_server.impl),
+          public_ctx_server(ctx_server),
           queue_tasks(ctx_server.impl->queue_tasks),
           queue_results(ctx_server.impl->queue_results) {
     init_routes();
@@ -4003,6 +4221,12 @@ void server_routes::init_routes() {
         GGML_UNUSED(ctx_server);
 
         res->ok({{"status", "ok"}});
+        return res;
+    };
+
+    this->get_dstorage_telemetry = [this](const server_http_req &) {
+        auto res = create_response(true);
+        res->ok(public_ctx_server.get_dstorage_telemetry());
         return res;
     };
 
@@ -4084,8 +4308,57 @@ void server_routes::init_routes() {
                     {"name",  "n_busy_slots_per_decode"},
                     {"help",  "Average number of busy slots per llama_decode() call"},
                     {"value",  (float) res_task->n_busy_slots_total / std::max((float) res_task->n_decode_total, 1.f)}
+            },{
+                    {"name",  "dstorage_active"},
+                    {"help",  "Whether the Siphon DirectStorage MoE cache is active."},
+                    {"value",  res_task->dstorage_active ? 1 : 0}
+            },{
+                    {"name",  "dstorage_l1_resident_experts"},
+                    {"help",  "Experts currently resident in the VRAM L1 cache."},
+                    {"value",  res_task->dstorage_l1_resident_experts}
+            },{
+                    {"name",  "dstorage_l2_resident_experts"},
+                    {"help",  "Experts currently resident in the pinned-RAM L2 cache."},
+                    {"value",  res_task->dstorage_l2_resident_experts}
             }}}
         };
+
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_prefill_calls"}, {"help", "DirectStorage MoE prefill dispatches."}, {"value", res_task->dstorage_prefill_calls}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_decode_calls"}, {"help", "DirectStorage MoE decode dispatches."}, {"value", res_task->dstorage_decode_calls}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_prefill_hits"}, {"help", "DirectStorage MoE L1 prefill hits."}, {"value", res_task->dstorage_prefill_hits}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_prefill_misses"}, {"help", "DirectStorage MoE L1 prefill misses."}, {"value", res_task->dstorage_prefill_misses}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_decode_hits"}, {"help", "DirectStorage MoE L1 decode hits."}, {"value", res_task->dstorage_decode_hits}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_decode_misses"}, {"help", "DirectStorage MoE L1 decode misses."}, {"value", res_task->dstorage_decode_misses}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_decode_cold_experts"}, {"help", "Decode experts loaded from SSD."}, {"value", res_task->dstorage_decode_cold_experts}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_decode_pinned_experts"}, {"help", "Decode experts promoted from pinned RAM."}, {"value", res_task->dstorage_decode_pinned_experts}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_streamed_file_bytes"}, {"help", "DirectStorage bytes streamed from model storage."}, {"value", res_task->dstorage_streamed_file_bytes}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_pinned_transfer_bytes"}, {"help", "Pinned-RAM bytes copied to VRAM."}, {"value", res_task->dstorage_pinned_transfer_bytes}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_pinned_transfer_us"}, {"help", "Pinned-RAM to VRAM transfer time in microseconds."}, {"value", res_task->dstorage_pinned_transfer_us}
+        });
+        all_metrics_def["counter"].push_back({
+            {"name", "dstorage_stream_total_us"}, {"help", "DirectStorage stream wall time in microseconds."}, {"value", res_task->dstorage_stream_total_us}
+        });
 
         std::stringstream prometheus;
 

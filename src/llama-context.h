@@ -90,6 +90,8 @@ struct llama_context {
     float * get_embeddings_nextn();
     float * get_embeddings_nextn_ith(int32_t i);
 
+    float * get_embeddings_layer_inp(uint32_t lid);
+
     llama_token * get_sampled_tokens() const;
     llama_token   get_sampled_token_ith(int32_t idx);
 
@@ -114,6 +116,7 @@ struct llama_context {
 
     void set_embeddings (bool value);
     void set_embeddings_nextn(bool value, bool masked);
+    void set_embeddings_layer_inp(uint32_t lid, bool enable);
     void set_causal_attn(bool value);
     void set_warmup(bool value);
 
@@ -225,6 +228,9 @@ private:
 
     void output_reorder();
 
+    // extract the per-layer input embeddings requested via set_embeddings_layer_inp()
+    void extract_layer_inputs(const llm_graph_result * res, size_t token_offset, size_t n_tokens);
+
     // map the output row index `i` to batch index
     int64_t output_resolve_row(int32_t i) const;
 
@@ -234,6 +240,8 @@ private:
 
 public:
     uint32_t graph_max_nodes(uint32_t n_tokens) const;
+
+    llama_context * get_ctx_other() const { return cparams.ctx_other; }
 
     // can reuse the llm_graph_result instance of the context (for example to update a memory module)
     llm_graph_result * get_gf_res_reserve() const;
@@ -344,6 +352,10 @@ private:
     // populated only when cparams.embeddings_nextn is enabled and the model graph
     // sets llm_graph_result::t_h_nextn
     buffer_view<float> embd_nextn = {nullptr, 0};
+
+    // host buffers for output layer input embeddings, per layer
+    // populated when cparams.embeddings_layer_inp[il] is true
+    std::vector<buffer_view<float>> embd_layer_inp;
 
     struct sampling_info {
         // !samplers.empty() to check if any samplers are active

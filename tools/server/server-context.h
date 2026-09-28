@@ -79,6 +79,9 @@ struct server_context {
     // not thread-safe, should only be used from the main thread
     server_context_meta get_meta() const;
 
+    // Lock-protected live Siphon cache counters for the desktop telemetry UI.
+    json get_dstorage_telemetry() const;
+
     // register a callback to be called when sleeping state changes
     // must be set before load_model() is called
     void on_sleeping_changed(std::function<void(bool)> callback);
@@ -102,6 +105,7 @@ struct server_routes {
     // they won't be called until ctx_http.is_ready is set to true
     server_http_context::handler_t get_health;
     server_http_context::handler_t get_metrics;
+    server_http_context::handler_t get_dstorage_telemetry;
     server_http_context::handler_t get_slots;
     server_http_context::handler_t post_slots;
     server_http_context::handler_t get_props;
@@ -148,6 +152,7 @@ private:
 
     const common_params & params;
     const server_context_impl & ctx_server;
+    server_context & public_ctx_server;
 
     server_queue & queue_tasks;
     server_response & queue_results;

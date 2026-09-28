@@ -181,6 +181,11 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
     for (int il = 0; il < n_layer; ++il) {
         ggml_tensor * inpSA = inpL;
 
+        if (cparams.embeddings_layer_inp[il]) {
+            res->t_layer_inp[il] = inpL;
+        }
+
+
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
 

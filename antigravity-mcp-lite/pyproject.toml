@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "antigravity-mcp-lite"
+version = "0.2.0"
+description = "A standard-library MCP server for the local authenticated agy CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+antigravity-mcp-lite = "server:main"
+
+[tool.setuptools]
+py-modules = ["server"]

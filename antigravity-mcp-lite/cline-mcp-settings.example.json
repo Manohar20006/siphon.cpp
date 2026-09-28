@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "antigravity-local": {
+      "command": "python3",
+      "args": ["/absolute/path/antigravity-mcp-lite/server.py"],
+      "env": {
+        "ANTIGRAVITY_MCP_LITE_CONFIG": "/absolute/path/antigravity-config.json"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
