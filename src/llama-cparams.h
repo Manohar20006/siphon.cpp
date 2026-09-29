@@ -3,6 +3,7 @@
 #include "llama.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #define LLAMA_MAX_SEQ 256
@@ -46,6 +47,7 @@ struct llama_cparams {
     bool pipeline_parallel;
     bool dstorage_moe;
     bool dstorage_moe_prefetch;
+    std::string dstorage_prerouter_path;
     bool moe_routing_trace;
 
     enum llama_context_type ctx_type;

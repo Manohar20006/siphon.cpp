@@ -12,11 +12,13 @@
 
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 struct llama_model;
+class llama_prerouter;
 class llama_batch_allocr;
 
 class llama_io_read_i;
@@ -304,6 +306,17 @@ private:
 
     std::unordered_map<ggml_tensor *, dstorage_tensor_save> dstorage_saves;
     std::vector<std::vector<int32_t>> dstorage_last_layer_ids;
+    std::unique_ptr<llama_prerouter> dstorage_prerouter;
+    std::vector<std::vector<float>> dstorage_prerouter_hidden;
+    std::vector<std::vector<int32_t>> dstorage_prerouter_previous_ids;
+    std::vector<std::vector<int32_t>> dstorage_prerouter_current_ids;
+    bool dstorage_prerouter_decode_active = false;
+    bool dstorage_prerouter_capacity_disabled = false;
+    bool dstorage_prerouter_policy_disabled = false;
+    int dstorage_prerouter_rejected_steps = 0;
+    int dstorage_prerouter_next_owner = 6;
+    llama_seq_id dstorage_prerouter_seq_id = -1;
+    llama_pos dstorage_prerouter_last_pos = -1;
     std::vector<int64_t> dstorage_moe_compute_start_us;
     std::vector<uint64_t> dstorage_prefill_preloaded_pass;
     int dstorage_prefill_last_layer = -1;

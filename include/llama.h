@@ -388,6 +388,7 @@ extern "C" {
                           // ref: https://github.com/ggml-org/llama.cpp/pull/14363
 bool dstorage_moe; // enable DirectStorage MoE eval callback
         bool dstorage_moe_prefetch; // speculatively prefetch future-layer experts from previous-token routing
+        const char * dstorage_prerouter_path; // optional Edge0 safetensors checkpoint, copied at context creation
 
         struct llama_context * ctx_other; // other context to share weights/models with (dflash etc.)
 

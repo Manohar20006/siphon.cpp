@@ -249,6 +249,11 @@ endif()
 llama_build_and_test(test-dstorage-cache-layout.cpp)
 target_include_directories(test-dstorage-cache-layout PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
+llama_build(test-prerouter.cpp)
+target_sources(test-prerouter PRIVATE ${PROJECT_SOURCE_DIR}/src/llama-prerouter.cpp)
+target_include_directories(test-prerouter PRIVATE ${PROJECT_SOURCE_DIR}/src)
+llama_test(test-prerouter)
+
 if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
   # TODO: repair known memory leaks
   llama_build_and_test(test-opt.cpp)

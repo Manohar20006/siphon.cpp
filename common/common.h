@@ -504,6 +504,7 @@ struct common_params {
     bool cpu_moe = false;
     bool dstorage_moe = false;
     bool dstorage_moe_prefetch = false;
+    std::string dstorage_prerouter_path;
     uint32_t moe_gpu_cache_mib = 1024;
     uint32_t moe_pinned_cache_mib = 0;
 

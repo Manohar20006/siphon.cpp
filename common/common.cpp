@@ -1590,6 +1590,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.kv_unified        = params.kv_unified;
     cparams.dstorage_moe      = params.dstorage_moe;
     cparams.dstorage_moe_prefetch = params.dstorage_moe_prefetch;
+    cparams.dstorage_prerouter_path = params.dstorage_prerouter_path.empty() ? nullptr : params.dstorage_prerouter_path.c_str();
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;

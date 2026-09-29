@@ -2360,6 +2360,18 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LLAMA_DSTORAGE_MOE_PREFETCH"));
     add_opt(common_arg(
+        {"--dstorage-prerouter"}, "FILE",
+        "prefetch DirectStorage experts with an Edge0 Qwen3.6 35B prerouter checkpoint (experimental; exact model routing is retained)",
+        [](common_params & params, const std::string & value) {
+            if (params.cpu_moe || value.empty()) {
+                throw std::invalid_argument("--dstorage-prerouter requires a checkpoint path and cannot be combined with --cpu-moe");
+            }
+            params.dstorage_moe = true;
+            params.dstorage_moe_prefetch = true;
+            params.dstorage_prerouter_path = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_DSTORAGE_PREROUTER"));
+    add_opt(common_arg(
         {"--moe-gpu-cache-mib"}, "N",
         "MiB of VRAM to use for the DirectStorage MoE expert cache (default: 1024)",
         [](common_params & params, int value) {
