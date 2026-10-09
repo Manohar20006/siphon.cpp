@@ -10,7 +10,7 @@ siphon.cpp brings Qwen3.6 35B‑A3B Mixture‑of‑Experts inference to low‑VR
 
 Quick links
 
-- Repo: https://github.com/Manohar20006/siphon.cpp
+- Main repository: [siphon.cpp on GitHub](https://github.com/Manohar20006/siphon.cpp)
 - Quick start: clone, place GGUF into `models/`, `./scripts/build-gds-cuda.sh`, `./scripts/run-qwen36-moe.sh`
 
 Why this helps search engines
