@@ -1,4 +1,6 @@
-# moe.cpp Project Deep Dive
+# siphon.cpp Project Deep Dive
+
+[Main repository: Manohar20006/siphon.cpp](https://github.com/Manohar20006/siphon.cpp) · [Project README](https://github.com/Manohar20006/siphon.cpp#readme)
 
 Last updated: 2026-07-15
 
