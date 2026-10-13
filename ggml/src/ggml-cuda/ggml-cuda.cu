@@ -1660,6 +1660,9 @@ static void ggml_cuda_op_mul_mat_cublas(
         row_diff == src0->ne[1] &&
         dst->op_params[0] == GGML_PREC_DEFAULT;
 
+    // stays false if cuBLAS rejects the BF16 GEMM below, in which case the F32 path at the end is used instead
+    bool bf16_gemm_done = false;
+
     if (supports_bf16 && src0->type == GGML_TYPE_BF16 && ggml_is_contiguous(src0) && row_diff == src0->ne[1]) {
         ggml_cuda_pool_alloc<nv_bfloat16> src1_as_bf16(ctx.pool(id));
         if (src1->type != GGML_TYPE_BF16) {
@@ -1677,18 +1680,34 @@ static void ggml_cuda_op_mul_mat_cublas(
         const float beta_f32  = 0.0f;
 
         CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));
-        CUBLAS_CHECK(
+        const cublasStatus_t status_bf16 =
             cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
                     row_diff, src1_ncols, ne10,
                     &alpha_f32,  src0_ptr,       CUDA_R_16BF, ne00,
                                  src1_ptr,       CUDA_R_16BF, ne10,
                     &beta_f32,   dst_bf16.get(), CUDA_R_16BF, ldc,
                     CUBLAS_COMPUTE_32F,
-                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                    CUBLAS_GEMM_DEFAULT_TENSOR_OP);
 
-        const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_BF16);
-        to_fp32_cuda(dst_bf16.get(), dst_dd_i, row_diff*src1_ncols, stream);
-    } else if (fast_fp16_hardware_available(cc) && use_fp16) {
+        if (status_bf16 == CUBLAS_STATUS_NOT_SUPPORTED) {
+            // cuBLAS has no BF16 kernel for some small/thin shapes (e.g. MTP draft batches through BF16 router or
+            // shared-expert gate weights that neither MMVF nor MMF take); fall back to the F32 GEMM path below
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                GGML_LOG_WARN("%s: cuBLAS BF16 GEMM not supported for %s (m=%" PRId64 ", n=%" PRId64 ", k=%" PRId64
+                              ", lda=%" PRId64 ", ldb=%" PRId64 ", ldc=%" PRId64 "), falling back to F32 GEMM\n",
+                              __func__, src0->name, row_diff, src1_ncols, ne10, ne00, ne10, ldc);
+            }
+        } else {
+            CUBLAS_CHECK(status_bf16);
+
+            const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_BF16);
+            to_fp32_cuda(dst_bf16.get(), dst_dd_i, row_diff*src1_ncols, stream);
+            bf16_gemm_done = true;
+        }
+    }
+
+    if (fast_fp16_hardware_available(cc) && use_fp16) {
         // convert src0 and src1 to fp16, multiply as fp16, convert dst to fp32
         ggml_cuda_pool_alloc<half> src0_as_f16(ctx.pool(id));
         if (src0->type != GGML_TYPE_F16) {
@@ -1747,7 +1766,7 @@ static void ggml_cuda_op_mul_mat_cublas(
             const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
             to_fp32_cuda(dst_f16.get(), dst_dd_i, row_diff*src1_ncols, stream);
         }
-    } else {
+    } else if (!bf16_gemm_done) {
         ggml_cuda_pool_alloc<float> src0_ddq_as_f32(ctx.pool(id));
         ggml_cuda_pool_alloc<float> src1_ddq_as_f32(ctx.pool(id));
 
