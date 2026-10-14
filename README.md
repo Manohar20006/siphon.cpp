@@ -1,5 +1,12 @@
 # siphon.cpp
 
+siphon.cpp (siphon cpp, siphon-cpp)
+
+Run Qwen3.6 35B-A3B MoE locally on a 6 GB VRAM laptop. Local inference using CUDA + GGUF with SSD-based MoE expert streaming for low-VRAM systems.
+
+Keywords: qwen3.6, MoE, GGUF, CUDA, low VRAM, local LLM, expert streaming, laptop GPU
+
+
 ![siphon.cpp banner](media/siphon_final_banner.png)
 
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
@@ -373,8 +380,7 @@ Rules of thumb:
 - Increase `MOE_GPU_CACHE_MIB` first on larger GPUs. It directly improves the
   chance that routed experts are already resident in VRAM.
 - Keep enough VRAM for dense weights, KV cache, compute buffers, and the CUDA
-  context. If startup fails with CUDA OOM, reduce `MOE_GPU_CACHE_MIB`, `CTX`,
-  `BATCH`, or `UBATCH`.
+  context. If startup fails with CUDA OOM, reduce `MOE_GPU_CACHE_MIB`, `CTX`, `BATCH`, or `UBATCH`.
 - Increase `MOE_PINNED_CACHE_MIB` only when the machine has enough free system
   RAM. On a 16 GiB machine, the 8192 MiB suite is the practical default.
 - Larger `CTX` gives a longer context window but costs KV-cache memory and can
@@ -442,6 +448,6 @@ python3 scripts/select-static-moe-experts.py \
 ## Repository Notes
 
 - GGUF models, build directories, traces, profiling captures, logs, and local
-  artifacts are intentionally ignored.
+artifacts are intentionally ignored.
 - `expert-suites/` contains small text files that are safe to commit.
 - `models/` is only a placeholder directory for local model files.
