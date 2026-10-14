@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-set -e
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="${DIR}/siphon-studio:${PYTHONPATH}"
-exec python3 -m siphon.tui.app "$@"

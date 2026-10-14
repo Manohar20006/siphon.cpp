@@ -178,6 +178,12 @@ AGENTS.local.md
 # Added by code-review-graph
 .code-review-graph/
 
-# Siphon Studio local state and per-machine imported model profiles
-/siphon-studio/state/
-/siphon-studio/profiles/imported-*.json
+# The desktop app moved to its own repository (github.com/Manohar20006/LocalMind);
+# these are leftovers from local checkouts made before the move.
+/siphon-studio/
+/siphon-desktop-dark-opendesign.html
+/siphon-studio.html
+/siphon-tui
+/siphon-tui.py
+/install.sh
+/tests/test-studio-*

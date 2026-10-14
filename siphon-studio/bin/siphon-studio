@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Repository-local desktop launcher. It keeps the app lightweight and avoids
-# requiring a pip install while still behaving like a normal desktop target.
-studio_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-export PYTHONPATH="${studio_root}${PYTHONPATH:+:${PYTHONPATH}}"
-exec python3 "${studio_root}/bin/siphon" desktop "$@"

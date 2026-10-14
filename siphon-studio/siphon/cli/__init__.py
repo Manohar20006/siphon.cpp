@@ -1,1 +1,0 @@
-"""siphon.cli - headless command package (see siphon/cli/main.py)."""
