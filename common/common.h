@@ -507,6 +507,13 @@ struct common_params {
     std::string dstorage_prerouter_path;
     uint32_t moe_gpu_cache_mib = 1024;
     uint32_t moe_pinned_cache_mib = 0;
+    bool moe_full_layer_ubatch = false; // let DirectStorage prefill ubatches cover whole layers (see --moe-full-layer-ubatch)
+    // server decision path: a second, scoring-only context on the same model (0 = disabled)
+    int32_t decision_ctx = 0;
+    int32_t decision_ubatch = 128;
+    int32_t decision_chunk  = 24; // absolute prompt chunk width reproduced by decisions (0 = plain ubatches)
+    int32_t decision_prefix = 0; // prompt tokens whose memory state is reused across decisions
+    bool    decision_only   = false; // serve decisions only: the decision context is the only context
 
     bool lora_init_without_apply = false; // only load lora to memory, but do not apply it to ctx (user can manually apply lora later using llama_adapter_lora_apply)
     std::vector<common_adapter_lora_info> lora_adapters; // lora adapter path with user defined scale

@@ -145,132 +145,114 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_bf16(
     return sum;
 }
 
+// TQ3_0 stores each block of 32 values x as r = H*S*x/sqrt(32) quantized to a 3-bit codebook (H: 32x32 Walsh-Hadamard
+// matrix in Sylvester order, S: a fixed sign pattern), so x = S*H*r/sqrt(32) and dequantizing a single element needs all
+// 32 codes of its block. The vector FA kernel therefore never dequantizes K or V element-wise: Q is rotated once into
+// the code domain, which turns K.Q into sum_j r_j*(H*S*Q/sqrt(32))_j, and V is accumulated in the code domain and
+// rotated back once per output value, since sum_k p_k*x_k = S*H*(sum_k p_k*r_k)/sqrt(32).
+
 static __device__ __forceinline__ float tq3_0_centroid(const int idx) {
-    switch (idx) {
-        case 0: return -2.1573f;
-        case 1: return -1.3336f;
-        case 2: return -0.7434f;
-        case 3: return -0.2428f;
-        case 4: return  0.2428f;
-        case 5: return  0.7434f;
-        case 6: return  1.3336f;
-        default: return 2.1573f;
+    // 3-bit Lloyd-Max centroids for N(0,1), symmetric around 0: idx 4..7 -> +c[idx-4], idx 0..3 -> -c[3-idx]
+    const int   m = (idx & 4) ? (idx & 3) : (3 - (idx & 3));
+    const float c = m == 0 ? 0.2428f : m == 1 ? 0.7434f : m == 2 ? 1.3336f : 2.1573f;
+    return (idx & 4) ? c : -c;
+}
+
+static __device__ __forceinline__ float tq3_0_sign(const int i) {
+    return (0xb1a6d4b2u & (1u << i)) ? -1.0f : 1.0f;
+}
+
+// Code-domain values d*centroid(code) of the n consecutive codes j0..j0+n-1 of a block (j0 % n == 0).
+template <int n>
+static __device__ __forceinline__ void tq3_0_load_codes(const block_tq3_0 & x, const int j0, float (&r)[n]) {
+    static_assert(n == 2 || n == 4 || n == 8, "bad n");
+
+    uint32_t lo = x.qs[j0/4];
+    if constexpr (n == 8) {
+        lo |= uint32_t(x.qs[j0/4 + 1]) << 8;
+    } else if constexpr (n == 2) {
+        lo >>= 2*(j0 % 4);
+    }
+    const uint32_t hi = x.qr[j0/8] >> (j0 % 8);
+    const float    d  = __half2float(x.gamma);
+
+#pragma unroll
+    for (int l = 0; l < n; ++l) {
+        r[l] = d * tq3_0_centroid(((lo >> 2*l) & 3) | (((hi >> l) & 1) << 2));
     }
 }
 
-static __device__ __forceinline__ int tq3_0_sign(const int i) {
-    return (0xb1a6d4b2u & (1u << i)) ? -1 : +1;
+// Forward TQ3_0 rotation H*S*v/sqrt(32) of 32-value blocks spread over the lanes of a warp: each lane holds the n
+// consecutive values that start at block offset i0 = (lane*n) % 32, neighbouring lanes hold neighbouring values.
+// For n < 32 the lanes of a block exchange values with shuffles, so all lanes of the warp must call this together.
+template <int n>
+static __device__ __forceinline__ void tq3_0_rotate_fwd(float (&v)[n], const int i0) {
+#pragma unroll
+    for (int l = 0; l < n; ++l) {
+        v[l] *= tq3_0_sign((i0 + l) % QK_TQ3_0);
+    }
+#pragma unroll
+    for (int s = 1; s < n && s < QK_TQ3_0; s <<= 1) {
+#pragma unroll
+        for (int l = 0; l < n; ++l) {
+            if ((l & s) == 0) {
+                const float a = v[l];
+                const float b = v[l + s];
+                v[l]     = a + b;
+                v[l + s] = a - b;
+            }
+        }
+    }
+#pragma unroll
+    for (int s = n; s < QK_TQ3_0; s <<= 1) {
+        const bool upper = i0 & s;
+#pragma unroll
+        for (int l = 0; l < n; ++l) {
+            const float o = __shfl_xor_sync(0xFFFFFFFF, v[l], s/n, WARP_SIZE);
+            v[l] = upper ? o - v[l] : v[l] + o;
+        }
+    }
+#pragma unroll
+    for (int l = 0; l < n; ++l) {
+        v[l] *= 0.17677669529663688f;
+    }
 }
 
-static __device__ __forceinline__ int tq3_0_hadamard_sign(const int i, const int j) {
-    return (__popc(uint32_t(i & j)) & 1) ? -1 : +1;
-}
-
-static __device__ __forceinline__ int tq3_0_code(const block_tq3_0 & x, const int j) {
-    const int low2 = (x.qs[j / 4] >> (2 * (j % 4))) & 3;
-    const int hi1  = (x.qr[j / 8] >> (j % 8)) & 1;
-    return low2 | (hi1 << 2);
-}
-
-static __device__ __noinline__ float tq3_0_dequant_scalar(const block_tq3_0 & x, const int i) {
-    const float d = __half2float(x.gamma);
-
+// Inverse TQ3_0 rotation of one value: x_i = S_i*sum_j H_ij*r_j/sqrt(32), r = the 32 code-domain values of its block.
+static __device__ __forceinline__ float tq3_0_rotate_inv_one(const float * r, const int i) {
     float sum = 0.0f;
-    for (int j = 0; j < QK_TQ3_0; ++j) {
-        sum += float(tq3_0_hadamard_sign(i, j)) * tq3_0_centroid(tq3_0_code(x, j));
-    }
-
-    return d * sum * 0.17677669529663688f * float(tq3_0_sign(i));
-}
-
-template <int ne>
-static __device__ __forceinline__ void tq3_0_dequant_consecutive(
-        const block_tq3_0 * __restrict__ x, float (&dst)[ne], const int64_t i0) {
-    static_assert(ne == 2 || ne == 4, "bad ne");
-
-    const int64_t ib = i0 / QK_TQ3_0;
-    const int ii0 = int(i0 % QK_TQ3_0);
-
-    if (ii0 + ne > QK_TQ3_0) {
-#pragma unroll
-        for (int l = 0; l < ne; ++l) {
-            const int64_t i = i0 + l;
-            dst[l] = tq3_0_dequant_scalar(x[i / QK_TQ3_0], int(i % QK_TQ3_0));
-        }
-        return;
-    }
-
-    const block_tq3_0 & xb = x[ib];
-    float sum[ne] = {};
-
 #pragma unroll
     for (int j = 0; j < QK_TQ3_0; ++j) {
-        const float c = tq3_0_centroid(tq3_0_code(xb, j));
-#pragma unroll
-        for (int l = 0; l < ne; ++l) {
-            sum[l] += float(tq3_0_hadamard_sign(ii0 + l, j)) * c;
-        }
+        sum += (__popc(i & j) & 1) ? -r[j] : r[j];
     }
-
-    const float d = __half2float(xb.gamma) * 0.17677669529663688f;
-#pragma unroll
-    for (int l = 0; l < ne; ++l) {
-        dst[l] = d * sum[l] * float(tq3_0_sign(ii0 + l));
-    }
+    return sum * 0.17677669529663688f * tq3_0_sign(i);
 }
 
+// K.Q for one K row. Q_v must hold this lane's slice of Q rotated with tq3_0_rotate_fwd (D/nthreads values per lane).
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq3_0(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
-
-    const block_tq3_0 * K_tq3_0 = (const block_tq3_0 *) K_c;
     GGML_UNUSED(Q_q8);
     GGML_UNUSED(Q_ds_v);
 
+    constexpr int n  = D/nthreads;
+    constexpr int nc = n < 8 ? n : 8;
+    const block_tq3_0 * K_tq3_0 = (const block_tq3_0 *) K_c;
+    const int i0 = (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads) * n;
+
     float sum = 0.0f;
-    const int tid = nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads;
-
-if constexpr (nthreads == WARP_SIZE) {
-        const int lane = threadIdx.x;
-        // Each lane holds D/WARP_SIZE consecutive Q values (Q_v[0..(D/WARP_SIZE)/2-1]).
-        static_assert(D % (2*WARP_SIZE) == 0, "D not divisible by 2*WARP_SIZE");
-        constexpr int nq = D / WARP_SIZE;          // Q dims per lane
-        constexpr int np = nq / 2;                 // half2 pairs per lane
-        const int i0_base = lane*nq;               // first global Q dim of this lane
 #pragma unroll
-        for (int p = 0; p < np; ++p) {
-            float kv[2];
-            tq3_0_dequant_consecutive<2>(K_tq3_0, kv, i0_base + 2*p);
+    for (int c = 0; c < n; c += nc) {
+        float r[nc];
+        tq3_0_load_codes<nc>(K_tq3_0[(i0 + c) / QK_TQ3_0], (i0 + c) % QK_TQ3_0, r);
+#pragma unroll
+        for (int l = 0; l < nc; l += 2) {
 #ifdef V_DOT2_F32_F16_AVAILABLE
-            const half2 qh2 = ((const half2 *) Q_v)[p];
-            const float q0 = __half2float(__low2half(qh2));
-            const float q1 = __half2float(__high2half(qh2));
+            const float2 q = __half22float2(((const half2 *) Q_v)[(c + l)/2]);
 #else
-            const float2 qf2 = ((const float2 *) Q_v)[p];
-            const float q0 = qf2.x;
-            const float q1 = qf2.y;
+            const float2 q = ((const float2 *) Q_v)[(c + l)/2];
 #endif // V_DOT2_F32_F16_AVAILABLE
-
-            sum += kv[0]*q0 + kv[1]*q1;
-        }
-    } else {
-        for (int i2_0 = 0; i2_0 < D/2; i2_0 += nthreads) {
-            const int i2 = i2_0 + tid;
-#ifdef V_DOT2_F32_F16_AVAILABLE
-            const half2 qh2 = ((const half2 *) Q_v)[i2_0/nthreads];
-            const float q0 = __half2float(__low2half(qh2));
-            const float q1 = __half2float(__high2half(qh2));
-#else
-            const float2 qf2 = ((const float2 *) Q_v)[i2_0/nthreads];
-            const float q0 = qf2.x;
-            const float q1 = qf2.y;
-#endif // V_DOT2_F32_F16_AVAILABLE
-
-            const int i0 = 2*i2 + 0;
-            const int i1 = 2*i2 + 1;
-            const float k0 = tq3_0_dequant_scalar(K_tq3_0[i0 / QK_TQ3_0], i0 % QK_TQ3_0);
-            const float k1 = tq3_0_dequant_scalar(K_tq3_0[i1 / QK_TQ3_0], i1 % QK_TQ3_0);
-            sum += k0*q0 + k1*q1;
+            sum += r[l]*q.x + r[l + 1]*q.y;
         }
     }
 
@@ -749,26 +731,24 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     }
 }
 
+// V values in the TQ3_0 code domain (i0 % ne == 0): the vector FA kernel rotates the accumulated sum back at the end.
 template <typename T, int ne>
 static __device__ __forceinline__ void dequantize_V_tq3_0(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
     const block_tq3_0 * x = (const block_tq3_0 *) vx;
 
-    static_assert(ne == 2 || ne == 4, "bad ne");
+    float vals[ne];
+    tq3_0_load_codes<ne>(x[i0 / QK_TQ3_0], int(i0 % QK_TQ3_0), vals);
 
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same_v<T, half>) {
-        float vals[ne];
-        tq3_0_dequant_consecutive<ne>(x, vals, i0);
-
+#pragma unroll
         for (int l0 = 0; l0 < ne; l0 += 2) {
             ((half2 *) dst)[l0/2] = make_half2(vals[l0 + 0], vals[l0 + 1]);
         }
     } else
 #endif // FP16_AVAILABLE
     if constexpr (std::is_same_v<T, float>) {
-        float vals[ne];
-        tq3_0_dequant_consecutive<ne>(x, vals, i0);
-
+#pragma unroll
         for (int l = 0; l < ne; ++l) {
             ((float *) dst)[l] = vals[l];
         }

@@ -84,5 +84,37 @@ def server_bin() -> Path:
     return repo_root() / "build-gds-cuda" / "bin" / "llama-server"
 
 
+def cpu_server_bin() -> Path:
+    """Find the CPU llama-server, honoring an explicit binary override."""
+    override = os.environ.get("SIPHON_CPU_SERVER_BIN")
+    if override:
+        path = Path(override).expanduser().resolve()
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise FileNotFoundError(
+                f"SIPHON_CPU_SERVER_BIN does not name an executable file: {path}"
+            )
+        return path
+
+    root = repo_root()
+    candidates: list[Path] = []
+    cpu_root = os.environ.get("SIPHON_CPU_ROOT")
+    if cpu_root:
+        candidates.append(Path(cpu_root).expanduser() / "build-cpu" / "bin" / "llama-server")
+    candidates.extend((
+        root / "build-cpu" / "bin" / "llama-server",
+        root / "siphon-cpu" / "build-cpu" / "bin" / "llama-server",
+        root.parent / "inference" / "siphon-cpu" / "build-cpu" / "bin" / "llama-server",
+    ))
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return resolved
+    searched = ", ".join(str(path.resolve()) for path in candidates)
+    raise FileNotFoundError(
+        "CPU llama-server binary not found; set SIPHON_CPU_SERVER_BIN or build it "
+        f"with the CPU configuration (searched: {searched})"
+    )
+
+
 def web_ui_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"

@@ -261,6 +261,18 @@ DS_API int ds_loader_host_to_cuda_batch(
     int request_count
 );
 
+// Like ds_loader_host_to_cuda_batch but returns once the copies are queued, so file
+// streaming can overlap them. The destinations are not valid until
+// ds_loader_host_to_cuda_sync succeeds; the host sources must stay alive until then.
+DS_API int ds_loader_host_to_cuda_batch_async(
+    DSLoaderHandle loader,
+    const DSLoaderHostToCudaRequest* requests,
+    int request_count
+);
+
+// Waits for every copy queued by ds_loader_host_to_cuda_batch_async.
+DS_API int ds_loader_host_to_cuda_sync(DSLoaderHandle loader);
+
 // Copies a batch of CUDA device slices to pinned host memory.
 DS_API int ds_loader_cuda_to_host_batch(
     DSLoaderHandle loader,

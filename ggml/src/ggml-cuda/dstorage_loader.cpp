@@ -1596,6 +1596,19 @@ int ds_loader_host_to_cuda_batch(
     return 0;
 }
 
+// No overlap on the DirectStorage path: the copy completes before returning.
+int ds_loader_host_to_cuda_batch_async(
+    DSLoaderHandle loader,
+    const DSLoaderHostToCudaRequest* requests,
+    int request_count
+) {
+    return ds_loader_host_to_cuda_batch(loader, requests, request_count);
+}
+
+int ds_loader_host_to_cuda_sync(DSLoaderHandle) {
+    return 0;
+}
+
 int ds_loader_get_io_stats(DSLoaderHandle, DSLoaderIoStats* out_stats) {
     if (!out_stats) {
         return -1;
@@ -1772,6 +1785,9 @@ void* ds_loader_host_alloc(uint64_t size, int* out_is_pinned) { if (out_is_pinne
 void ds_loader_host_free(void* ptr, int is_pinned) {}
 int ds_loader_host_to_cuda_batch(DSLoaderHandle loader, const DSLoaderHostToCudaRequest* requests,
                                   int request_count) { return -1; }
+int ds_loader_host_to_cuda_batch_async(DSLoaderHandle loader, const DSLoaderHostToCudaRequest* requests,
+                                  int request_count) { return -1; }
+int ds_loader_host_to_cuda_sync(DSLoaderHandle loader) { return 0; }
 int ds_loader_cuda_to_host_batch(DSLoaderHandle loader, const DSLoaderCudaToHostRequest* requests,
                                   int request_count) { return -1; }
 uint64_t ds_loader_cuda_alloc(uint64_t size) { return 0; }

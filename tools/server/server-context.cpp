@@ -8,6 +8,7 @@
 #include "llama-radix-cache.h"
 #include "../../src/llama-model.h"
 #include "../../src/llama-dstorage-slots.h"
+#include "../../src/llama-ext.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -20,12 +21,14 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cinttypes>
 #include <exception>
 #include <memory>
 #include <filesystem>
 #include <mutex>
+#include <set>
 #include <utility>
 
 // fix problem with std::min and std::max
@@ -742,6 +745,13 @@ private:
 
     common_speculative_ptr spec;
 
+    // Scoring-only decision context on the same model (--decision-ctx). It owns its own
+    // memory and settings (native expert count, Q8_0 KV, small batches) and never generates;
+    // it shares the weights and the expert cache with the generation context.
+    llama_context_ptr    ctx_decide;
+    llama_tokens         decide_prefix_key;   // tokens whose state is in decide_prefix_state
+    std::vector<uint8_t> decide_prefix_state; // llama_state_seq data of seq 0 after the prefix
+
     bool add_bos_token = true;
 
     int32_t n_ctx; // total context for all clients / slots
@@ -775,6 +785,10 @@ private:
     bool sleeping = false;
 
     void destroy() {
+        ctx_decide.reset();
+        decide_prefix_key.clear();
+        decide_prefix_state.clear();
+
         spec.reset();
         ctx_dft.reset();
         model_dft.reset();
@@ -823,6 +837,22 @@ private:
         SRV_INF("loading model '%s'\n", params.model.path.c_str());
 
         params_base = params;
+        if (params_base.decision_only) {
+            if (params_base.decision_ctx <= 0) {
+                SRV_ERR("%s", "--decision-only requires --decision-ctx\n");
+                return false;
+            }
+            if (!params_base.mmproj.path.empty()) {
+                SRV_ERR("%s", "--decision-only does not support a multimodal projector\n");
+                return false;
+            }
+            // nothing generates: drop the draft/MTP context and decode prefetch
+            params_base.speculative.types = { COMMON_SPECULATIVE_TYPE_NONE };
+            params_base.speculative.draft.mparams.path.clear();
+            params_base.speculative.draft.mparams.hf_repo.clear();
+            params_base.dstorage_moe_prefetch = false;
+            params_base.n_parallel = 1;
+        }
         params_base.n_outputs_max = server_n_outputs_max(params_base);
 
         std::string & mmproj_path = params_base.mmproj.path;
@@ -950,10 +980,11 @@ private:
             }
         }
 
-        llama_init = common_init_from_params(params_base);
+        // decision-only: load the model alone; the decision context becomes the target context below
+        llama_init = common_init_from_params(params_base, /*model_only*/ params_base.decision_only);
 
         model_tgt = llama_init->model();
-        ctx_tgt   = llama_init->context();
+        ctx_tgt   = params_base.decision_only ? nullptr : llama_init->context();
 
         if (model_tgt == nullptr) {
             SRV_ERR("failed to load model, '%s'\n", params_base.model.path.c_str());
@@ -961,6 +992,17 @@ private:
         }
 
         vocab = llama_model_get_vocab(model_tgt);
+
+        if (params_base.decision_only) {
+            if (!init_decision_context()) {
+                return false;
+            }
+            // slots and metadata need a target context; generation requests are rejected
+            ctx_tgt = ctx_decide.get();
+        } else if (ctx_tgt == nullptr) {
+            SRV_ERR("failed to create context with model '%s'\n", params_base.model.path.c_str());
+            return false;
+        }
 
         n_ctx = llama_n_ctx(ctx_tgt);
 
@@ -1235,14 +1277,251 @@ auto cparams = common_context_params_to_llama(params_dft);
         model_aliases = params_base.model_alias;
         model_tags    = params_base.model_tags;
 
+        if (params_base.decision_ctx > 0 && !params_base.decision_only && !init_decision_context()) {
+            return false;
+        }
+
         // propagate new defaults back to caller
         params = params_base;
+
+        // Report actual reserved buffers once, after real target/draft contexts
+        // exist. Fit/no-alloc probes and inference timing are not measurements.
+        // Native MTP shares model buffers: count weights once, both contexts.
+        llama_memory_breakdown_data gpu_memory;
+        std::set<ggml_backend_dev_t> gpu_devices;
+        auto add_gpu_memory = [&](llama_context * ctx, bool include_model) {
+            if (!ctx) {
+                return;
+            }
+            for (const auto & [buft, memory] : llama_get_memory_breakdown(ctx)) {
+                auto dev = ggml_backend_buft_get_device(buft);
+                if (!dev || ggml_backend_buft_is_host(buft) || ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                    continue;
+                }
+                gpu_devices.insert(dev);
+                gpu_memory.model   += include_model ? memory.model : 0;
+                gpu_memory.context += memory.context;
+                gpu_memory.compute += memory.compute;
+            }
+        };
+        add_gpu_memory(ctx_tgt, true);
+        add_gpu_memory(ctx_dft.get(), model_dft != nullptr);
+        if (ctx_decide.get() != ctx_tgt) {
+            add_gpu_memory(ctx_decide.get(), false);
+        }
+        uint64_t expert_pool_bytes = model_tgt->dstorage_slots() ? model_tgt->dstorage_slots()->get_allocated_pool_bytes() : 0;
+        if (model_dft && model_dft->dstorage_slots()) {
+            expert_pool_bytes += model_dft->dstorage_slots()->get_allocated_pool_bytes();
+        }
+        const json memory_record = {
+            {"version", 1}, {"device_count", gpu_devices.size()},
+            {"gpu_name", gpu_devices.size() == 1 ? ggml_backend_dev_description(*gpu_devices.begin()) : ""},
+            {"model_bytes", gpu_memory.model}, {"context_bytes", gpu_memory.context},
+            {"compute_bytes", gpu_memory.compute},
+            {"expert_pool_bytes", expert_pool_bytes},
+        };
+        // Independent of console verbosity; one startup event, not per-token
+        // logging. Studio associates it with the successful launch log offset.
+        fprintf(stderr, "SIPHON_GPU_MEMORY %s\n", memory_record.dump().c_str());
 
         if (!is_resume) {
             return init();
         }
 
         return true;
+    }
+
+    bool init_decision_context() {
+        const int32_t n_ctx_dec = params_base.decision_ctx;
+        const int32_t n_ubatch  = params_base.decision_ubatch;
+        const int32_t n_prefix  = params_base.decision_prefix;
+        const int32_t n_chunk   = params_base.decision_chunk;
+        if (n_prefix >= n_ctx_dec) {
+            SRV_ERR("--decision-prefix (%d) must be below --decision-ctx (%d)\n", n_prefix, n_ctx_dec);
+            return false;
+        }
+        // Exactness without prompt chunking: a reused prefix must end on a ubatch boundary, so a
+        // suffix-only pass splits the prompt into the same ubatches as a full pass.
+        if (n_chunk == 0 && n_prefix > 0 && n_prefix % n_ubatch != 0) {
+            SRV_ERR("--decision-prefix (%d) must be a multiple of --decision-ubatch (%d) when --decision-chunk is 0\n",
+                    n_prefix, n_ubatch);
+            return false;
+        }
+
+        common_params params_dec = params_base;
+        params_dec.n_ctx      = n_ctx_dec;
+        params_dec.n_batch    = n_ctx_dec;
+        params_dec.n_ubatch   = n_ubatch;
+        params_dec.n_parallel = 1;
+        params_dec.n_outputs_max = 0;
+        params_dec.cache_type_k = GGML_TYPE_Q8_0;
+        params_dec.cache_type_v = GGML_TYPE_Q8_0;
+        params_dec.dstorage_moe_prefetch = false;
+        params_dec.dstorage_prerouter_path.clear();
+
+        auto cparams = common_context_params_to_llama(params_dec);
+        cparams.n_seq_max       = 1;
+        cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        cparams.n_expert_used   = -1; // native routing, independent of generation's override
+        cparams.n_rs_seq        = 0;  // decisions never roll back speculative drafts
+        // with prompt chunking, wide ubatches only reduce expert reloads; results stay chunk-defined
+        cparams.moe_full_layer_ubatch = n_chunk > 0;
+        // decisions are gated bit-exact against references recorded with MMQ for pooled experts
+        cparams.moe_pooled_mmq  = true;
+        cparams.cb_eval         = nullptr;
+        cparams.cb_eval_user_data = nullptr;
+
+        ctx_decide.reset(llama_init_from_model(model_tgt, cparams));
+        if (!ctx_decide) {
+            SRV_ERR("%s", "failed to create the decision context\n");
+            return false;
+        }
+        // Only the last row is read: run the final layer for output rows only.
+        llama_set_embeddings_nextn(ctx_decide.get(), false, /*masked*/ true);
+        if (n_chunk > 0 && !llama_set_prompt_chunking(ctx_decide.get(), n_chunk, n_ctx_dec)) {
+            SRV_ERR("%s", "--decision-chunk requires a backend with prompt chunking (CUDA); use --decision-chunk 0\n");
+            ctx_decide.reset();
+            return false;
+        }
+        // Warm up once so lazily created GPU resources (cuBLAS handle, chunk pool buffers) are
+        // allocated at startup: a VRAM shortfall then fails here instead of on a live request.
+        {
+            const int32_t n_warm = std::min<int32_t>(n_ctx_dec, n_chunk > 0 ? n_chunk + 1 : (int32_t) llama_n_ubatch(ctx_decide.get()));
+            llama_batch batch = llama_batch_init(n_warm, 0, 1);
+            const llama_token tok = llama_vocab_bos(vocab) != LLAMA_TOKEN_NULL ? llama_vocab_bos(vocab) : 0;
+            for (int32_t i = 0; i < n_warm; ++i) {
+                common_batch_add(batch, tok, i, { 0 }, i + 1 == n_warm);
+            }
+            const bool ok = (n_chunk == 0 || llama_set_prompt_chunking(ctx_decide.get(), n_chunk, n_warm)) &&
+                    llama_decode(ctx_decide.get(), batch) == 0;
+            llama_batch_free(batch);
+            llama_memory_clear(llama_get_memory(ctx_decide.get()), true);
+            if (!ok) {
+                SRV_ERR("%s", "decision context warmup failed\n");
+                ctx_decide.reset();
+                return false;
+            }
+        }
+        if (n_chunk == 0 && llama_n_ubatch(ctx_decide.get()) != (uint32_t) n_ubatch) {
+            SRV_WRN("decision ubatch clamped from %d to %u by the expert cache; results follow the clamped size\n",
+                    n_ubatch, llama_n_ubatch(ctx_decide.get()));
+        }
+        decide_prefix_key.clear();
+        decide_prefix_state.clear();
+        SRV_INF("decision context: n_ctx = %u, n_ubatch = %u, chunk = %d, prefix = %d tokens\n",
+                llama_n_ctx(ctx_decide.get()), llama_n_ubatch(ctx_decide.get()), n_chunk, n_prefix);
+        return true;
+    }
+
+    void process_decide(const server_task & task) {
+        llama_context * ctx = ctx_decide.get();
+        if (!ctx) {
+            send_error(task, "decisions are disabled; start the server with --decision-ctx", ERROR_TYPE_NOT_SUPPORTED);
+            return;
+        }
+        const llama_tokens & tokens = task.decide_prompt;
+        const int32_t n_tokens = (int32_t) tokens.size();
+        if (n_tokens == 0) {
+            send_error(task, "the decision prompt is empty", ERROR_TYPE_INVALID_REQUEST);
+            return;
+        }
+        if (n_tokens > (int32_t) llama_n_ctx(ctx)) {
+            // the exceed-context error must carry both sizes (send_error asserts on them)
+            send_error(task.id, string_format("the decision prompt has %d tokens, more than --decision-ctx %d",
+                       n_tokens, (int32_t) llama_n_ctx(ctx)), ERROR_TYPE_EXCEED_CONTEXT_SIZE, n_tokens, (int32_t) llama_n_ctx(ctx));
+            return;
+        }
+        const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+        if (task.decide_labels.empty()) {
+            send_error(task, "token_ids must not be empty", ERROR_TYPE_INVALID_REQUEST);
+            return;
+        }
+        for (llama_token id : task.decide_labels) {
+            if (id < 0 || id >= n_vocab) {
+                send_error(task, "token_ids contains an invalid token id", ERROR_TYPE_INVALID_REQUEST);
+                return;
+            }
+        }
+
+        const int64_t t_start = ggml_time_us();
+        llama_memory_clear(llama_get_memory(ctx), true);
+        const int32_t n_chunk = params_base.decision_chunk;
+        if (n_chunk > 0 && !llama_set_prompt_chunking(ctx, n_chunk, n_tokens)) {
+            send_error(task, "failed to configure decision prompt chunking", ERROR_TYPE_SERVER);
+            return;
+        }
+
+        llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+        auto decode_range = [&](int32_t from, int32_t to) {
+            common_batch_clear(batch);
+            for (int32_t i = from; i < to; ++i) {
+                common_batch_add(batch, tokens[i], i, { 0 }, i + 1 == n_tokens);
+            }
+            return llama_decode(ctx, batch) == 0;
+        };
+
+        const int32_t n_prefix = task.decide_prefix >= 0 ? task.decide_prefix : params_base.decision_prefix;
+        bool prefix_hit = false;
+        bool ok = true;
+        int32_t begin = 0;
+        // With chunking, the saved prefix state depends on the prompt end only through the chunk
+        // holding the prefix boundary; reuse it only when this prompt covers that whole chunk.
+        const int32_t prefix_reach = n_chunk > 0 ? (n_prefix + n_chunk - 1) / n_chunk * n_chunk : n_prefix;
+        if (n_prefix > 0 && n_tokens > n_prefix && n_tokens >= prefix_reach) {
+            prefix_hit = decide_prefix_key.size() == (size_t) n_prefix &&
+                    std::equal(decide_prefix_key.begin(), decide_prefix_key.end(), tokens.begin());
+            if (prefix_hit) {
+                ok = llama_state_seq_set_data(ctx, decide_prefix_state.data(), decide_prefix_state.size(), 0) ==
+                        decide_prefix_state.size();
+            } else {
+                decide_prefix_key.clear();
+                ok = decode_range(0, n_prefix);
+                if (ok) {
+                    decide_prefix_state.resize(llama_state_seq_get_size(ctx, 0));
+                    ok = llama_state_seq_get_data(ctx, decide_prefix_state.data(), decide_prefix_state.size(), 0) ==
+                            decide_prefix_state.size();
+                }
+                if (ok) {
+                    decide_prefix_key.assign(tokens.begin(), tokens.begin() + n_prefix);
+                }
+            }
+            begin = n_prefix;
+        }
+        ok = ok && decode_range(begin, n_tokens);
+        llama_batch_free(batch);
+
+        const float * logits = ok ? llama_get_logits_ith(ctx, -1) : nullptr;
+        if (!logits) {
+            decide_prefix_key.clear();
+            decide_prefix_state.clear();
+            send_error(task, "decision prefill failed", ERROR_TYPE_SERVER);
+            return;
+        }
+
+        // log-softmax over the full vocabulary in double precision
+        const double max = *std::max_element(logits, logits + n_vocab);
+        double sum = 0.0;
+        for (int32_t i = 0; i < n_vocab; ++i) {
+            sum += std::exp(double(logits[i]) - max);
+        }
+        const double normalizer = max + std::log(sum);
+
+        auto res = std::make_unique<server_task_result_decide>();
+        res->id = task.id;
+        for (llama_token id : task.decide_labels) {
+            res->logprobs.push_back(logits[id] - normalizer);
+        }
+        if (!std::isfinite(max) || !std::all_of(res->logprobs.begin(), res->logprobs.end(),
+                    [](double v) { return std::isfinite(v); })) {
+            send_error(task, "decision produced invalid logits", ERROR_TYPE_SERVER);
+            return;
+        }
+        llama_synchronize(ctx);
+        res->n_prompt_tokens = n_tokens;
+        res->n_prefix_tokens = begin;
+        res->prefix_hit      = prefix_hit;
+        res->t_ms            = (ggml_time_us() - t_start) / 1000.0;
+        queue_results.send(std::move(res));
     }
 
     // unlike load_model(), this is only called once during initialization
@@ -2204,6 +2483,10 @@ auto cparams = common_context_params_to_llama(params_dft);
             case SERVER_TASK_TYPE_EMBEDDING:
             case SERVER_TASK_TYPE_RERANK:
                 {
+                    if (params_base.decision_only) {
+                        send_error(task, "this server runs with --decision-only; use /decide", ERROR_TYPE_NOT_SUPPORTED);
+                        break;
+                    }
                     // special case: if input is provided via CLI, tokenize it first
                     // otherwise, no need to tokenize as it's already done inside the HTTP thread
                     if (task.cli) {
@@ -2524,6 +2807,10 @@ auto cparams = common_context_params_to_llama(params_dft);
                         });
                     }
                     queue_results.send(std::move(res));
+                } break;
+            case SERVER_TASK_TYPE_DECIDE:
+                {
+                    process_decide(task);
                 } break;
             case SERVER_TASK_TYPE_SET_LORA:
                 {
@@ -5012,6 +5299,53 @@ void server_routes::init_routes() {
         }
 
         GGML_ASSERT(dynamic_cast<server_task_result_apply_lora*>(result.get()) != nullptr);
+        res->ok(result->to_json());
+        return res;
+    };
+
+    // Score candidate next tokens after a prompt on the decision context: prefill only,
+    // no sampling. Body: {"prompt": string, "token_ids": [int, ...], "prefix_tokens": int (optional)};
+    // the prompt is tokenized with special tokens added and parsed. prefix_tokens = how many leading
+    // prompt tokens are shared across requests (cached once, reused on a match); default
+    // --decision-prefix.
+    this->post_decide = [this](const server_http_req & req) {
+        auto res = create_response();
+        const json body = json::parse(req.body);
+        if (!body.contains("prompt") || !body.at("prompt").is_string() ||
+                !body.contains("token_ids") || !body.at("token_ids").is_array()) {
+            res->error(format_error_response("\"prompt\" (string) and \"token_ids\" (array) are required", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+
+        auto & rd = res->rd;
+        {
+            server_task task(SERVER_TASK_TYPE_DECIDE);
+            task.id = rd.get_new_id();
+            task.decide_prompt = common_tokenize(ctx_server.vocab, body.at("prompt").get<std::string>(), true, true);
+            task.decide_labels = body.at("token_ids").get<llama_tokens>();
+            if (body.contains("prefix_tokens")) {
+                if (!body.at("prefix_tokens").is_number_integer() || body.at("prefix_tokens").get<int64_t>() < 0) {
+                    res->error(format_error_response("\"prefix_tokens\" must be a non-negative integer", ERROR_TYPE_INVALID_REQUEST));
+                    return res;
+                }
+                task.decide_prefix = (int32_t) std::min<int64_t>(body.at("prefix_tokens").get<int64_t>(), INT32_MAX);
+            }
+            rd.post_task(std::move(task));
+        }
+
+        auto result = rd.next(req.should_stop);
+        if (!result) {
+            // connection was closed
+            GGML_ASSERT(req.should_stop());
+            return res;
+        }
+
+        if (result->is_error()) {
+            res->error(result->to_json());
+            return res;
+        }
+
+        GGML_ASSERT(dynamic_cast<server_task_result_decide*>(result.get()) != nullptr);
         res->ok(result->to_json());
         return res;
     };

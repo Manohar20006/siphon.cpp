@@ -1405,6 +1405,20 @@ struct ggml_backend_cuda_context {
 
     int curr_stream_no = 0;
 
+    // Absolute prompt chunking, set per ubatch through ggml_backend_cuda_set_prompt_chunking.
+    // When width > 0, dense weight matmuls and flash attention over the current batch, which covers
+    // prompt positions [from, from + tokens) of a prompt ending at `end`, are dispatched per
+    // absolute chunk [width*k, min(width*k + width, end)). This reproduces the kernels of a prompt
+    // processed in width-token ubatches from position 0, independent of the actual ubatch size.
+    int64_t prompt_chunk_width  = 0;
+    int64_t prompt_chunk_from   = 0;
+    int64_t prompt_chunk_tokens = 0;
+    int64_t prompt_chunk_end    = 0;
+
+    // Pooled (DirectStorage) MoE experts use MMQ at every batch size instead of MMVQ for <= 8 tokens; set per context
+    // through ggml_backend_cuda_set_pooled_moe_mmq.
+    bool pooled_moe_mmq = false;
+
 #ifdef USE_CUDA_GRAPH
     // Map from first_node_ptr to cuda_graph - allows multiple graphs per context
     // when the computation is split across CPU/GPU (e.g., with --n-cpu-moe)

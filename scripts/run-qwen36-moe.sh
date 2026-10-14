@@ -40,6 +40,7 @@ CONFIG_VARS=(
   RUNTIME_MODE
   DSTORAGE_CAPABILITY
   MOE_EXPERT_COUNT_MODE
+  MOE_FULL_LAYER_UBATCH
 )
 
 declare -A USER_OVERRIDES=()
@@ -96,6 +97,7 @@ SPEC_TYPE="${SPEC_TYPE:-draft-mtp}"
 RUNTIME_MODE="${RUNTIME_MODE:-qwen-dstorage}"
 DSTORAGE_CAPABILITY="${DSTORAGE_CAPABILITY:-configured}"
 MOE_EXPERT_COUNT_MODE="${MOE_EXPERT_COUNT_MODE:-default}"
+MOE_FULL_LAYER_UBATCH="${MOE_FULL_LAYER_UBATCH:-0}"
 
 if [[ "$MODEL" != /* ]]; then
   MODEL="$ROOT/$MODEL"
@@ -107,7 +109,11 @@ if [[ -n "$EXPERTS" && "$EXPERTS" != /* ]]; then
   EXPERTS="$ROOT/$EXPERTS"
 fi
 
-SERVER="$ROOT/build-gds-cuda/bin/llama-server"
+# SIPHON_SERVER_BIN (absolute or repo-relative) selects another llama-server build, e.g. build-decision.
+SERVER="${SIPHON_SERVER_BIN:-$ROOT/build-gds-cuda/bin/llama-server}"
+if [[ "$SERVER" != /* ]]; then
+  SERVER="$ROOT/$SERVER"
+fi
 
 if [[ ! -x "$SERVER" ]]; then
   echo "Missing $SERVER"
@@ -162,10 +168,22 @@ if [[ "$RUNTIME_MODE" == "qwen-dstorage" ]]; then
   fi
   SERVER_ARGS+=(
     -dsm
-    --dstorage-moe-prefetch
     --moe-gpu-cache-mib "$MOE_GPU_CACHE_MIB"
     --moe-pinned-cache-mib "$MOE_PINNED_CACHE_MIB"
   )
+  # MOE_FULL_LAYER_UBATCH=1: prefill ubatches cover whole layers (each expert loaded once per ubatch) instead of
+  # being clamped to the expert cache. Needs a server with --moe-full-layer-ubatch and replaces the previous-token
+  # expert prefetch, which submitted no loads in decode benchmarks (its candidates were already resident). Pair it
+  # with UBATCH=512 and a GPU cache that leaves room for the larger compute buffer (2560 MiB on a 6 GB GPU).
+  if [[ "$MOE_FULL_LAYER_UBATCH" == "1" && -n "${LLAMA_DSTORAGE_PREROUTER:-}" ]]; then
+    echo "MOE_FULL_LAYER_UBATCH=1 ignored: the prerouter (LLAMA_DSTORAGE_PREROUTER) needs the expert prefetch."
+    MOE_FULL_LAYER_UBATCH=0
+  fi
+  if [[ "$MOE_FULL_LAYER_UBATCH" == "1" ]]; then
+    SERVER_ARGS+=(--moe-full-layer-ubatch)
+  else
+    SERVER_ARGS+=(--dstorage-moe-prefetch)
+  fi
 fi
 
 # Continuous batching interleaves tokens from all slots in one decode(). It is

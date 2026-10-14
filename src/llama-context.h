@@ -9,8 +9,10 @@
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
+#include "llama-prerouter-state.h"
 
 #include <cstdio>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -118,6 +120,7 @@ struct llama_context {
 
     void set_embeddings (bool value);
     void set_embeddings_nextn(bool value, bool masked);
+    bool set_prompt_chunking(int32_t width, int32_t prompt_end);
     void set_embeddings_layer_inp(uint32_t lid, bool enable);
     void set_causal_attn(bool value);
     void set_warmup(bool value);
@@ -306,17 +309,44 @@ private:
 
     std::unordered_map<ggml_tensor *, dstorage_tensor_save> dstorage_saves;
     std::vector<std::vector<int32_t>> dstorage_last_layer_ids;
-    std::unique_ptr<llama_prerouter> dstorage_prerouter;
+    std::shared_ptr<const llama_prerouter> dstorage_prerouter;
+    llama_prerouter_state dstorage_prerouter_state;
     std::vector<std::vector<float>> dstorage_prerouter_hidden;
-    std::vector<std::vector<int32_t>> dstorage_prerouter_previous_ids;
-    std::vector<std::vector<int32_t>> dstorage_prerouter_current_ids;
+    std::vector<std::pair<int32_t, int32_t>> dstorage_prerouter_rows;
     bool dstorage_prerouter_decode_active = false;
-    bool dstorage_prerouter_capacity_disabled = false;
+    bool dstorage_prerouter_prefetch = false;
     bool dstorage_prerouter_policy_disabled = false;
-    int dstorage_prerouter_rejected_steps = 0;
     int dstorage_prerouter_next_owner = 6;
+    int dstorage_prerouter_owner = -1;
     llama_seq_id dstorage_prerouter_seq_id = -1;
     llama_pos dstorage_prerouter_last_pos = -1;
+    std::shared_ptr<std::atomic<bool>> dstorage_prerouter_job_valid;
+    uint64_t dstorage_prerouter_predictions = 0;
+    uint64_t dstorage_prerouter_prediction_us = 0;
+    uint64_t dstorage_prerouter_graph_us = 0;
+    uint64_t dstorage_prerouter_capture_us = 0;
+    uint64_t dstorage_prerouter_comparisons = 0;
+    uint64_t dstorage_prerouter_hits = 0;
+    uint64_t dstorage_prerouter_positions = 0;
+    uint64_t dstorage_prerouter_lead_us = 0;
+    uint64_t dstorage_prerouter_submissions = 0;
+    uint64_t dstorage_prerouter_nonresident = 0;
+    uint64_t dstorage_prerouter_residency_samples = 0;
+    uint64_t dstorage_prerouter_resets = 0;
+    uint64_t dstorage_prerouter_skipped_capacity = 0;
+    std::vector<int32_t> dstorage_prerouter_candidates;
+    int dstorage_prerouter_target = -1;
+    void dstorage_prerouter_begin_batch(const llama_ubatch & ubatch, llm_graph_type gtype);
+    void dstorage_prerouter_record_routes(int layer, const std::vector<int32_t> & ids);
+    void dstorage_prerouter_reset();
+    bool dstorage_profile_enabled = false;
+    uint64_t dstorage_profile_graphs = 0;
+    uint64_t dstorage_profile_graph_us = 0;
+    uint64_t dstorage_profile_ensure_us = 0;
+    uint64_t dstorage_profile_batched_graphs = 0;
+    bool dstorage_profile_small_graph = false;
+    uint64_t dstorage_profile_small_graph_us = 0;
+    uint64_t dstorage_profile_small_ensure_us = 0;
     std::vector<int64_t> dstorage_moe_compute_start_us;
     std::vector<uint64_t> dstorage_prefill_preloaded_pass;
     int dstorage_prefill_last_layer = -1;
@@ -424,6 +454,12 @@ private:
     void *              abort_callback_data = nullptr;
 
     std::vector<std::pair<ggml_backend_t, ggml_backend_set_n_threads_t>> set_n_threads_fns;
+
+    // absolute prompt chunking (see llama_set_prompt_chunking), forwarded per ubatch to the backends
+    using ggml_backend_set_prompt_chunking_t = void (*)(ggml_backend_t, int32_t, int64_t, int64_t, int64_t);
+    std::vector<std::pair<ggml_backend_t, ggml_backend_set_prompt_chunking_t>> set_prompt_chunking_fns;
+    int32_t prompt_chunk_width = 0;
+    int32_t prompt_chunk_end   = 0;
 
     // pointers and buffer types used for the compute buffer of each backend
     std::vector<ggml_backend_t>             backend_ptrs;

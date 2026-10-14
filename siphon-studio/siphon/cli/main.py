@@ -11,6 +11,7 @@ Commands (all support --json for machine-readable output):
   doctor           environment + GDS health checks
   profile          new | clone | rm
   desktop          launch the native Siphon Studio desktop app
+  api              local API for your apps: serve | info | keys show|regenerate | apps | connect | disconnect
 """
 
 from __future__ import annotations
@@ -74,6 +75,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     new_p.add_argument("--script", default="")
     rm_p = pf_sub.add_parser("rm", help="delete an app profile")
     rm_p.add_argument("name")
+
+    ap = sub.add_parser("api", parents=[parent], help="local API gateway + scoped API keys")
+    ap_sub = ap.add_subparsers(dest="api_cmd", required=True)
+    sv = ap_sub.add_parser("serve", parents=[parent], help="run the API gateway on 127.0.0.1 (foreground)")
+    sv.add_argument("--port", type=int, default=0, help="port (default $SIPHON_API_PORT or 8088)")
+    ap_sub.add_parser("info", parents=[parent], help="endpoint, running engine and usage snippets")
+    ks = ap_sub.add_parser("keys", parents=[parent], help="the decode and decision API keys")
+    ks_sub = ks.add_subparsers(dest="keys_cmd", required=True)
+    kshow = ks_sub.add_parser("show", parents=[parent], help="print the API keys (created on first use)")
+    kshow.add_argument("--scope", choices=["decode", "decision"], default=None)
+    kr = ks_sub.add_parser("regenerate", parents=[parent], help="replace a key; the old one stops working")
+    kr.add_argument("--scope", required=True, choices=["decode", "decision"])
+    ap_sub.add_parser("apps", parents=[parent], help="coding apps that can be connected to the decode API")
+    for name, text in (("connect", "point an app at the local decode API"), ("disconnect", "undo connect")):
+        cp = ap_sub.add_parser(name, parents=[parent], help=text)
+        cp.add_argument("app", choices=["opencode", "claude-code", "codex"])
+        if name == "connect":
+            cp.add_argument("--profile", default=None, help="decode profile whose model alias to use")
 
     return p.parse_args(argv)
 
@@ -235,6 +254,88 @@ def _cmd_profile(args, profs, as_json) -> int:
     return 0
 
 
+def _cmd_api(args, as_json) -> int:
+    from ..api import connect, gateway
+    from ..api.keys import KeyStore
+    if args.api_cmd == "serve":
+        port = args.port or gateway.default_port()
+        try:
+            gw = gateway.serve(port)
+        except OSError as exc:
+            sys.stderr.write(f"cannot bind {gateway.HOST}:{port}: {exc}\n")
+            return 1
+        print(f"Siphon API on http://{gateway.HOST}:{port}  (Ctrl-C to stop)", file=sys.stderr)
+        try:
+            gw.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            gw.keys.flush()
+            gw.server_close()
+        return 0
+    if args.api_cmd == "info":
+        _emit(api_info(), as_json)
+        return 0
+    store = KeyStore()
+    keys_cmd = getattr(args, "keys_cmd", None)
+    if keys_cmd == "show":
+        scopes = [args.scope] if args.scope else ["decode", "decision"]
+        _emit({scope: store.get(scope).key for scope in scopes}, as_json)
+        return 0
+    if keys_cmd == "regenerate":
+        record = store.regenerate(args.scope)
+        msg = f"new {record.scope} key (the old one no longer works)"
+        if record.scope == "decode":
+            updated = connect.refresh(record.key)
+            if updated:
+                msg += f"; updated connected apps: {', '.join(updated)}"
+        _emit({"ok": True, "msg": msg, record.scope: record.key}, as_json)
+        return 0
+    if args.api_cmd == "apps":
+        _emit({app["id"]: {k: app[k] for k in ("installed", "connected", "where", "usage")}
+               for app in connect.status()}, as_json)
+        return 0
+    if args.api_cmd in {"connect", "disconnect"}:
+        try:
+            if args.api_cmd == "disconnect":
+                connect.disconnect(args.app)
+                _emit({"ok": True, "msg": f"disconnected {args.app}"}, as_json)
+                return 0
+            profile = discover().get(args.profile) if args.profile else None
+            if args.profile and profile is None:
+                raise connect.ConnectError(f"no profile named {args.profile!r}")
+            backend = gateway.BackendResolver().current()
+            model = (profile.env.get("ALIAS", profile.name) if profile else backend.alias if backend else "siphon")
+            context = int((profile.env if profile else {}).get("CTX", 65536))
+            target = connect.Target(endpoint=f"http://{gateway.HOST}:{gateway.default_port()}",
+                                    key=store.get("decode").key, model=model, context=context)
+            _emit({"ok": True, "msg": connect.connect(args.app, target)}, as_json)
+            return 0
+        except connect.ConnectError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
+    return 2
+
+
+def api_info() -> dict:
+    from ..api import gateway
+    base = f"http://{gateway.HOST}:{gateway.default_port()}"
+    backend = gateway.BackendResolver().current()
+    return {
+        "endpoint": base,
+        "running": None if backend is None else {"profile": backend.profile, "mode": backend.mode,
+                                                 "model": backend.alias},
+        "decode": {"key_scope": "decode", "openai_base_url": f"{base}/v1",
+                   "anthropic_base_url": base,
+                   "routes": ["POST /v1/chat/completions", "POST /v1/completions", "POST /v1/responses",
+                              "POST /v1/messages", "POST /v1/messages/count_tokens", "GET /v1/models"]},
+        "decision": {"key_scope": "decision", "routes": ["POST /v1/decide", "POST /v1/decide/warmup"],
+                     "body": {"input": "user text", "question": "what to decide",
+                              "options": ["name", {"name": "...", "description": "..."}],
+                              "context": "optional, shared across calls", "threshold": 0.9}},
+    }
+
+
 def main() -> int:
     args = _parse_args(sys.argv[1:])
 
@@ -281,6 +382,8 @@ def main() -> int:
         return run_desktop()
     elif args.cmd == "profile":
         return _cmd_profile(args, profs, as_json)
+    elif args.cmd == "api":
+        return _cmd_api(args, as_json)
     return 0
 
 

@@ -38,6 +38,22 @@ The project is especially focused on local coding workflows: use it from the
 built-in web UI, or connect OpenCode, Hermes, and other OpenAI-compatible coding
 agents to the local server.
 
+## Install Siphon Studio (Ubuntu / Debian, one command)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Manohar20006/siphon.cpp/v1.0.0/install.sh | bash
+```
+
+The installer checks the machine and installs the system packages it needs (it asks for
+`sudo`). It then builds the engine for your CPU and downloads the model (21.1 GiB, resumable,
+checksum-verified). Finally it adds **Siphon Studio** to your applications menu. Run the same
+command again to update, or to resume an interrupted download.
+
+- **Needs:** Ubuntu 24.04+ or Debian 13+, an x86_64 CPU with AVX2, 16 GB RAM, an SSD and about 25 GB of free space.
+- **No GPU needed:** without an NVIDIA GPU the model runs on the CPU. Expect about 4-5 tokens/s with 16 GB RAM and an NVMe SSD.
+- **Options:** `SIPHON_DIR=/path` picks the install folder. `SIPHON_MODEL=/path/to/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` reuses a model you already have.
+- The installer builds the CPU engine only. For the GPU (CUDA) engine, follow [Build](#build) below.
+
 ## Platform Status
 
 This is currently a **Linux-first CUDA project**. The tested path is Linux +
@@ -96,7 +112,7 @@ python3 -m pip install -r requirements.txt
 Clone the repo:
 
 ```bash
-git clone https://github.com/Manohar20006/qwen.cpp.git siphon.cpp
+git clone https://github.com/Manohar20006/siphon.cpp.git siphon.cpp
 cd siphon.cpp
 ```
 

@@ -15,6 +15,7 @@ Verified on hardware (2026-09-01):
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,6 +69,8 @@ class Profile:
     script: str = ""                       # repo-relative launcher path
     source: str = "app"                    # "bundled" | "app"
     path: Path | None = None               # backing file
+    model_files: list[str] = field(default_factory=list)
+    model_folder: str = ""
 
     @property
     def is_bundled(self) -> bool:
@@ -102,7 +105,12 @@ class Profile:
 
     # -- serialization ---------------------------------------------------
     def to_dict(self) -> dict:
-        return {"name": self.name, "script": self.script, "env": self.env}
+        data = {"name": self.name, "script": self.script, "env": self.env}
+        if self.model_files:
+            data["model_files"] = self.model_files
+        if self.model_folder:
+            data["model_folder"] = self.model_folder
+        return data
 
     def save(self) -> "Profile":
         if self.is_bundled:
@@ -126,7 +134,9 @@ class Profile:
         data = json.loads(path.read_text(encoding="utf-8"))
         return cls(name=data["name"], env=data.get("env", {}),
                    script=data.get("script", paths.default_run_script()),
-                   source="app", path=path)
+                   source="app", path=path,
+                   model_files=data.get("model_files", []),
+                   model_folder=data.get("model_folder", ""))
 
     @classmethod
     def create_app(cls, name: str, env: dict[str, str], script: str = "") -> "Profile":
@@ -142,33 +152,68 @@ class Profile:
         """Return a list of problems (empty = healthy)."""
         issues: list[str] = []
         root = paths.repo_root()
+        from . import execution
+        try:
+            execution_mode = execution.mode(self)
+        except ValueError as exc:
+            return [str(exc)]
 
         model = self.resolve("MODEL")
         if not model:
             issues.append("MODEL is not set")
         elif not Path(model).is_file():
             issues.append(f"MODEL not found: {model}")
+        else:
+            from .model_files import inspect_model_files, model_part_paths
+            try:
+                parts = model_part_paths(Path(model))
+                if self.model_files or len(parts) > 1:
+                    metadata = inspect_model_files(Path(model))
+                    if self.model_files and metadata["parts"] != self.model_files:
+                        issues.append("Model parts changed; re-add the model folder")
+            except (OSError, ValueError) as exc:
+                issues.append(f"Model parts invalid: {exc}")
 
-        experts = self.resolve("EXPERTS")
-        if experts and not Path(experts).is_file():
-            issues.append(f"EXPERTS suite not found: {experts}")
+        if execution_mode != "cpu":
+            experts = self.resolve("EXPERTS")
+            if experts and not Path(experts).is_file():
+                issues.append(f"EXPERTS suite not found: {experts}")
 
-        script = root / self.script_rel
-        if not script.exists():
-            issues.append(f"launcher script not found: {self.script_rel}")
+        if execution_mode != "cpu":
+            script = root / self.script_rel
+            if not script.exists():
+                issues.append(f"launcher script not found: {self.script_rel}")
 
-        for key in ("PORT", "CTX", "BATCH", "UBATCH", "MOE_GPU_CACHE_MIB",
-                    "MOE_PINNED_CACHE_MIB", "CACHE_RAM_MIB", "GDS_READ_THREADS"):
+        if execution_mode == "gpu":
+            if not execution.gpu_available():
+                issues.append("GPU execution selected, but nvidia-smi did not detect an NVIDIA GPU")
+            server = paths.server_bin()
+            if self.env.get("SIPHON_SERVER_BIN"):    # per-profile build, same rule as the launcher
+                server = Path(self.resolve("SIPHON_SERVER_BIN"))
+            if not server.is_file() or not os.access(server, os.X_OK):
+                issues.append(f"GPU llama-server binary is missing or not executable: {server}")
+
+        numeric_keys = ("PORT",) if execution_mode == "cpu" else (
+            "PORT", "CTX", "BATCH", "UBATCH", "MOE_GPU_CACHE_MIB",
+            "MOE_PINNED_CACHE_MIB", "CACHE_RAM_MIB", "GDS_READ_THREADS",
+        )
+        for key in numeric_keys:
             raw = self.env.get(key, "")
             if raw:
                 try:
                     int(raw)
-                except ValueError:
+                except (TypeError, ValueError):
                     issues.append(f"{key} is not an integer: {raw!r}")
+
+        if execution_mode == "cpu":
+            issues.extend(execution.validate_cpu_settings(self))
+            return issues
 
         try:
             gpu_cache = int(self.env.get("MOE_GPU_CACHE_MIB", "0")) / 1024
             ctx = int(self.env.get("CTX", "0"))
+            if self.env.get("LLAMA_ARG_DECISION_ONLY", "").strip().lower() in {"1", "true", "on", "enabled"}:
+                ctx = int(self.env.get("LLAMA_ARG_DECISION_CTX", "0"))   # no generation KV cache
             gpu_total = 6141 / 1024  # RTX 4050 laptop, verified on this host
             estimate = gpu_cache + 2.4 + ctx / 65536 * 0.6
             if estimate > gpu_total:
@@ -268,6 +313,11 @@ def find_models() -> list[dict]:
 
 def preview_command(profile: Profile) -> list[str]:
     """Human-friendly preview of the exact launch command (dry-run)."""
+    from . import execution
+    if execution.mode(profile) == "cpu":
+        command, _env = execution.cpu_launch(profile)
+        projected = execution.preview_environment(profile)
+        return ["env", *(f"{key}={value}" for key, value in projected.items()), *command]
     env_file = profile.materialize_env()
     script = str(paths.repo_root() / profile.script_rel)
     return ["env", f"CONFIG={env_file}", "bash", script]

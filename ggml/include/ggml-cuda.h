@@ -43,6 +43,16 @@ GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * f
 GGML_BACKEND_API bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size);
 GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
 
+// Absolute prompt chunking for one backend (0 width disables): the next graphs process prompt
+// positions [from, from + n_tokens) of a prompt ending at `end`; dense weight matmuls and flash
+// attention reproduce the results of `width`-token ubatches starting at position 0.
+GGML_BACKEND_API void ggml_backend_cuda_set_prompt_chunking(ggml_backend_t backend, int32_t width, int64_t from, int64_t n_tokens, int64_t end);
+
+// Keep DirectStorage pooled MoE expert matmuls on MMQ at every batch size for one backend (default: batches of up to
+// 8 tokens use MMVQ). Reproduces the numerics of builds before MMVQ handled expert pools, e.g. for decisions that are
+// gated bit-exact against such references.
+GGML_BACKEND_API void ggml_backend_cuda_set_pooled_moe_mmq(ggml_backend_t backend, bool enabled);
+
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
 
 #ifdef  __cplusplus

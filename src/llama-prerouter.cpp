@@ -8,8 +8,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
+#include <mutex>
+#include <system_error>
+#include <tuple>
+#include <utility>
 
 namespace {
 
@@ -23,6 +29,31 @@ constexpr int k_head_hidden = 512;
 constexpr int k_features = k_hidden + 2 * k_experts;
 constexpr uint64_t k_max_header_size = 64ULL * 1024 * 1024;
 
+struct checkpoint_identity {
+    std::string canonical_path;
+    std::uintmax_t file_size;
+    std::filesystem::file_time_type modified;
+};
+
+struct cache_key {
+    checkpoint_identity checkpoint;
+    int n_layers;
+    int n_embd;
+    int n_experts;
+    int n_expert_used;
+};
+
+struct cache_key_less {
+    bool operator()(const cache_key & a, const cache_key & b) const {
+        return std::tie(a.checkpoint.canonical_path, a.checkpoint.file_size,
+                        a.checkpoint.modified, a.n_layers, a.n_embd,
+                        a.n_experts, a.n_expert_used) <
+               std::tie(b.checkpoint.canonical_path, b.checkpoint.file_size,
+                        b.checkpoint.modified, b.n_layers, b.n_embd,
+                        b.n_experts, b.n_expert_used);
+    }
+};
+
 struct tensor_info {
     uint64_t begin;
     uint64_t end;
@@ -31,6 +62,28 @@ struct tensor_info {
 bool fail(std::string & error, const std::string & message) {
     error = message;
     return false;
+}
+
+bool get_checkpoint_identity(const std::string & path, checkpoint_identity & identity,
+                             std::string & error) {
+    std::error_code ec;
+    const std::filesystem::path canonical = std::filesystem::canonical(path, ec);
+    if (ec) {
+        error = "cannot open prerouter checkpoint: " + path;
+        return false;
+    }
+    const std::uintmax_t file_size = std::filesystem::file_size(canonical, ec);
+    if (ec) {
+        error = "cannot inspect prerouter checkpoint: " + path;
+        return false;
+    }
+    const auto modified = std::filesystem::last_write_time(canonical, ec);
+    if (ec) {
+        error = "cannot inspect prerouter checkpoint: " + path;
+        return false;
+    }
+    identity = { canonical.generic_string(), file_size, modified };
+    return true;
 }
 
 bool read_u64_le(std::ifstream & file, uint64_t & value) {
@@ -292,6 +345,68 @@ std::unique_ptr<llama_prerouter> llama_prerouter::load(
             return nullptr;
         }
     }
+    return model;
+}
+
+std::shared_ptr<const llama_prerouter> llama_prerouter::load_shared(
+        const std::string & path, int n_layers, int n_embd, int n_experts,
+        int n_expert_used, std::string & error) {
+    error.clear();
+    if (n_layers != k_model_layers || n_embd != k_hidden || n_experts != k_experts ||
+        n_expert_used != k_top_k) {
+        error = "prerouter only supports Qwen3.6-35B-A3B (40 layers, 2048 hidden, 256 experts, K=4)";
+        return nullptr;
+    }
+
+    static std::mutex cache_mutex;
+    static std::map<cache_key, std::weak_ptr<const llama_prerouter>, cache_key_less> cache;
+    std::lock_guard<std::mutex> lock(cache_mutex);
+
+    checkpoint_identity identity;
+    if (!get_checkpoint_identity(path, identity, error)) {
+        return nullptr;
+    }
+    const cache_key key = { identity, n_layers, n_embd, n_experts, n_expert_used };
+
+    for (auto it = cache.begin(); it != cache.end();) {
+        const bool stale_checkpoint =
+                it->first.checkpoint.canonical_path == identity.canonical_path &&
+                (it->first.checkpoint.file_size != identity.file_size ||
+                 it->first.checkpoint.modified != identity.modified);
+        if (it->second.expired() || stale_checkpoint) {
+            it = cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    const auto cached = cache.find(key);
+    if (cached != cache.end()) {
+        if (auto model = cached->second.lock()) {
+            return model;
+        }
+        cache.erase(cached);
+    }
+
+    auto unique_model = load(path, n_layers, n_embd, n_experts, n_expert_used, error);
+    if (!unique_model) {
+        return nullptr;
+    }
+
+    checkpoint_identity after_load;
+    std::string identity_error;
+    if (!get_checkpoint_identity(path, after_load, identity_error)) {
+        error = identity_error;
+        return nullptr;
+    }
+    if (after_load.canonical_path != identity.canonical_path ||
+        after_load.file_size != identity.file_size || after_load.modified != identity.modified) {
+        error = "prerouter checkpoint changed while loading: " + path;
+        return nullptr;
+    }
+
+    std::shared_ptr<const llama_prerouter> model(std::move(unique_model));
+    cache.emplace(key, model);
     return model;
 }
 

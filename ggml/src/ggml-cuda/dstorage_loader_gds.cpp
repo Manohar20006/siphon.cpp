@@ -1647,10 +1647,11 @@ void ds_loader_host_free(void * ptr, int is_pinned) {
     free(ptr);
 }
 
-int ds_loader_host_to_cuda_batch(
+static int host_to_cuda_enqueue(
         DSLoaderHandle loader,
         const DSLoaderHostToCudaRequest * requests,
-        int request_count) {
+        int request_count,
+        bool wait) {
     if (loader == nullptr || requests == nullptr || request_count < 0 || !ensure_cuda_loaded()) {
         set_last_error(-EINVAL);
         return -1;
@@ -1677,12 +1678,43 @@ int ds_loader_host_to_cuda_batch(
             return -1;
         }
     }
-    if (use_async) {
+    if (use_async && wait) {
         const CUresult cr = g_cuStreamSynchronize(loader->h2d_stream);
         if (cr != CUDA_SUCCESS) {
             set_last_error(cr);
             return -1;
         }
+    }
+    return 0;
+}
+
+int ds_loader_host_to_cuda_batch(
+        DSLoaderHandle loader,
+        const DSLoaderHostToCudaRequest * requests,
+        int request_count) {
+    return host_to_cuda_enqueue(loader, requests, request_count, /*wait*/ true);
+}
+
+int ds_loader_host_to_cuda_batch_async(
+        DSLoaderHandle loader,
+        const DSLoaderHostToCudaRequest * requests,
+        int request_count) {
+    return host_to_cuda_enqueue(loader, requests, request_count, /*wait*/ false);
+}
+
+int ds_loader_host_to_cuda_sync(DSLoaderHandle loader) {
+    if (loader == nullptr || !ensure_cuda_loaded()) {
+        set_last_error(-EINVAL);
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(loader->h2d_mutex);
+    if (loader->h2d_stream == nullptr || g_cuStreamSynchronize == nullptr) {
+        return 0; // the synchronous fallback already completed every copy
+    }
+    const CUresult cr = g_cuStreamSynchronize(loader->h2d_stream);
+    if (cr != CUDA_SUCCESS) {
+        set_last_error(cr);
+        return -1;
     }
     return 0;
 }

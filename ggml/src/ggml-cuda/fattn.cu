@@ -463,6 +463,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
+        // TQ3_0 K/V with a large GQA group: the vector kernel decodes every K/V block once per Q head, while the MMA
+        // path converts K/V to F16 once and shares each tile across the group. With 8 Q heads per KV head this measured
+        // 2-4x faster for 1-2 rows at every context length (even at 4 heads per KV head, much slower without GQA).
+        if (K->type == GGML_TYPE_TQ3_0 && gqa_opt_applies && gqa_ratio % 8 == 0) {
+            return BEST_FATTN_KERNEL_MMA_F16;
+        }
         if (can_use_vector_kernel) {
             if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
                 if (cc >= GGML_CUDA_CC_ADA_LOVELACE && Q->ne[1] == 1 && Q->ne[3] == 1 && !(gqa_ratio > 4 && K->ne[1] >= 8192)) {

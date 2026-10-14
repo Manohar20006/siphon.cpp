@@ -2392,6 +2392,67 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LLAMA_MOE_PINNED_CACHE_MIB"));
     add_opt(common_arg(
+        {"--moe-full-layer-ubatch"},
+        "DirectStorage MoE: keep the full --ubatch-size for prompt processing when the GPU expert cache can hold every "
+        "expert of a layer, instead of limiting it to what top-k routing can touch. Each ubatch then streams every "
+        "layer's experts once, so larger ubatches move far fewer bytes (needs VRAM for the larger compute buffer; "
+        "cannot be combined with --dstorage-moe-prefetch)",
+        [](common_params & params) {
+            params.moe_full_layer_ubatch = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LLAMA_ARG_MOE_FULL_LAYER_UBATCH"));
+    add_opt(common_arg(
+        {"--decision-ctx"}, "N",
+        "context size of the scoring-only decision context served at /decide (default: 0 = disabled)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.decision_ctx = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_DECISION_CTX"));
+    add_opt(common_arg(
+        {"--decision-ubatch"}, "N",
+        string_format("physical batch size of the decision context (default: %d)", params.decision_ubatch),
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.decision_ubatch = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_DECISION_UBATCH"));
+    add_opt(common_arg(
+        {"--decision-chunk"}, "N",
+        string_format("decisions compute dense matmuls and attention in absolute N-token prompt chunks, so their "
+            "results do not depend on --decision-ubatch or the prefix length (CUDA; default: %d, 0 = plain ubatches)",
+            params.decision_chunk),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.decision_chunk = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_DECISION_CHUNK"));
+    add_opt(common_arg(
+        {"--decision-only"},
+        "serve /decide only: no generation context, MTP draft or prefetch, so the expert caches can use that "
+        "memory; generation requests are rejected (requires --decision-ctx)",
+        [](common_params & params) {
+            params.decision_only = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_DECISION_ONLY"));
+    add_opt(common_arg(
+        {"--decision-prefix"}, "N",
+        "reuse the memory state of the first N prompt tokens across decisions with the same prefix; "
+        "must be a multiple of --decision-ubatch when --decision-chunk is 0 (default: 0 = disabled)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.decision_prefix = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_DECISION_PREFIX"));
+    add_opt(common_arg(
         {"-ncmoe", "--n-cpu-moe"}, "N",
         "keep the Mixture of Experts (MoE) weights of the first N layers in the CPU",
         [](common_params & params, int value) {

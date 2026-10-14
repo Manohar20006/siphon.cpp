@@ -3,11 +3,14 @@
 #include "llama.h"
 
 #include <array>
+#include <bitset>
 #include <cassert>
 
 // bump if necessary
 #define LLAMA_MAX_LAYERS  512
 #define LLAMA_MAX_EXPERTS 512 // Qwen3 Next
+#define LLAMA_MAX_PLE_NGRAM 8
+#define LLAMA_MAX_PLE_HEADS 64
 
 enum llama_expert_gating_func_type {
     LLAMA_EXPERT_GATING_FUNC_TYPE_NONE           = 0,
@@ -52,6 +55,7 @@ struct llama_hparams {
     uint32_t n_layer_nextn = 0;
     uint32_t n_expert = 0;
     uint32_t n_expert_used = 0;
+    uint32_t n_expert_used_native = 0; // n_expert_used before LLAMA_MOE_EXPERT_USED_OVERRIDE
     uint32_t n_rel_attn_bkts = 0;
 
     // TODO: this needs to be reworked
@@ -222,6 +226,23 @@ struct llama_hparams {
     uint32_t indexer_head_size = 0;
     uint32_t indexer_top_k     = 0;
 
+    // qwen4exp hyper-connections, compressed attention, and PLE metadata
+    uint32_t dsv4_hc_mult = 0;
+    uint32_t hc_low_rank  = 0;
+    std::array<uint32_t, LLAMA_MAX_LAYERS> dsv4_compress_ratios = {};
+
+    uint32_t ple_ngram_size      = 0;
+    uint32_t ple_heads_per_ngram = 0;
+    uint32_t ple_conv_kernel     = 0;
+    uint32_t ple_n_heads         = 0;
+    uint32_t ple_head_dim        = 0;
+    uint32_t ple_eos_token_id    = 0;
+    uint32_t ple_image_token_id  = 0;
+    std::bitset<LLAMA_MAX_LAYERS> is_ple_impl = {};
+    std::array<uint64_t, LLAMA_MAX_PLE_NGRAM> ple_layer_multipliers = {};
+    std::array<uint64_t, LLAMA_MAX_PLE_HEADS> ple_head_offsets = {};
+    std::array<uint64_t, LLAMA_MAX_PLE_HEADS> ple_head_vocab_sizes = {};
+
     // qwen3vl deepstack
     // When parsed from GGUF, this implies the first N layers consume the first
     // N deepstack embeddings. Use deepstack_mapping_arr if you need a more
@@ -290,6 +311,11 @@ struct llama_hparams {
 
     // whether or not the given layer is recurrent (for hybrid models)
     bool is_recr(uint32_t il) const;
+
+    bool is_ple(uint32_t il) const;
+
+    // PLE conv history rows: (kernel - 1) * ngram_size; 0 without a PLE module
+    uint32_t ple_conv_state() const;
 
     uint32_t n_head(uint32_t il = 0) const;
 

@@ -1995,6 +1995,16 @@ json server_task_result_apply_lora::to_json() {
     return json {{ "success", true }};
 }
 
+json server_task_result_decide::to_json() {
+    return json {
+        { "logprobs",      logprobs },
+        { "prompt_tokens", n_prompt_tokens },
+        { "prefix_tokens", n_prefix_tokens },
+        { "prefix_hit",    prefix_hit },
+        { "decide_ms",     t_ms },
+    };
+}
+
 //
 // server_prompt_cache
 //

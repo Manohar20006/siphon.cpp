@@ -12,6 +12,7 @@
 #include "../src/llama-model-saver.h"
 
 #include <cinttypes>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -109,6 +110,8 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         n_ff   = 192;
     } else if (arch == LLM_ARCH_NEMOTRON_H || arch == LLM_ARCH_NEMOTRON_H_MOE) {
         n_layer = 3;
+    } else if (arch == LLM_ARCH_QWEN4EXP) {
+        n_layer = 4; // interval-four layout provides recurrent PLE and one dense QSA layer
     } else if (arch == LLM_ARCH_CHAMELEON) {
         n_vocab = 10240;
     }
@@ -138,7 +141,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     ms.add_kv(LLM_KV_LOGIT_SCALE,             1.0f);
     ms.add_kv(LLM_KV_TIME_MIX_EXTRA_DIM,      uint32_t(64));
     ms.add_kv(LLM_KV_TIME_DECAY_EXTRA_DIM,    uint32_t(128));
-    ms.add_kv(LLM_KV_FULL_ATTENTION_INTERVAL, uint32_t(2));
+    ms.add_kv(LLM_KV_FULL_ATTENTION_INTERVAL, arch == LLM_ARCH_QWEN4EXP ? uint32_t(4) : uint32_t(2));
 
     if (arch == LLM_ARCH_PLAMO2 || arch == LLM_ARCH_JAMBA || arch == LLM_ARCH_NEMOTRON_H || arch == LLM_ARCH_NEMOTRON_H_MOE ||
             arch == LLM_ARCH_GRANITE_HYBRID || arch == LLM_ARCH_LFM2 || arch == LLM_ARCH_LFM2MOE || arch == LLM_ARCH_KIMI_LINEAR) {
@@ -196,8 +199,51 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         ms.add_kv(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, uint32_t(2));
     }
 
+    if (arch == LLM_ARCH_QWEN4EXP) {
+        ms.add_kv(LLM_KV_HYPER_CONNECTION_COUNT,    uint32_t(4));
+        ms.add_kv(LLM_KV_HYPER_CONNECTION_LOW_RANK, uint32_t(8));
+        ms.add_kv(LLM_KV_ATTENTION_COMPRESS_RATIOS, std::vector<uint32_t>(n_layer, 4));
+
+        ms.add_kv(LLM_KV_PLE_LAYERS,              std::vector<uint32_t>{0});
+        ms.add_kv(LLM_KV_PLE_NGRAM_SIZE,          uint32_t(3));
+        ms.add_kv(LLM_KV_PLE_HEADS_PER_NGRAM,     uint32_t(1));
+        ms.add_kv(LLM_KV_PLE_CONV_KERNEL,         uint32_t(3));
+        ms.add_kv(LLM_KV_PLE_EOS_TOKEN_ID,        uint32_t(2));
+        ms.add_kv(LLM_KV_PLE_IMAGE_TOKEN_ID,      uint32_t(3));
+        ms.add_kv(LLM_KV_EMBEDDING_LENGTH_PER_LAYER, n_embd / 2);
+
+        // llama_model_saver's array helper does not support uint64 yet; preserve the
+        // on-disk PLE metadata width so the loader's uint64 get_arr path is exercised.
+        const uint64_t ple_layer_multipliers[] = {
+            0x9e3779b185ebca87ULL, 0xc2b2ae3d27d4eb4fULL, 0x165667b19e3779f9ULL,
+        };
+        const uint64_t ple_head_offsets[] = { 0, 4 };
+        const uint64_t ple_head_vocab_sizes[] = { 4, 4 };
+        gguf_set_arr_data(ms.gguf_ctx, ms.llm_kv(LLM_KV_PLE_LAYER_MULTIPLIERS).c_str(),
+                GGUF_TYPE_UINT64, ple_layer_multipliers, sizeof(ple_layer_multipliers) / sizeof(ple_layer_multipliers[0]));
+        gguf_set_arr_data(ms.gguf_ctx, ms.llm_kv(LLM_KV_PLE_HEAD_OFFSETS).c_str(),
+                GGUF_TYPE_UINT64, ple_head_offsets, sizeof(ple_head_offsets) / sizeof(ple_head_offsets[0]));
+        gguf_set_arr_data(ms.gguf_ctx, ms.llm_kv(LLM_KV_PLE_HEAD_VOCAB_SIZES).c_str(),
+                GGUF_TYPE_UINT64, ple_head_vocab_sizes, sizeof(ple_head_vocab_sizes) / sizeof(ple_head_vocab_sizes[0]));
+
+        ggml_tensor ple_table;
+        memset(&ple_table, 0, sizeof(ggml_tensor));
+        ple_table.type = GGML_TYPE_F16;
+        ple_table.ne[0] = n_embd / 2;
+        ple_table.ne[1] = 8;
+        ple_table.ne[2] = 1;
+        ple_table.ne[3] = 1;
+        ple_table.nb[0] = ggml_type_size(ple_table.type);
+        ple_table.nb[1] = ggml_row_size(ple_table.type, ple_table.ne[0]);
+        ple_table.nb[2] = ple_table.nb[1] * ple_table.ne[1];
+        ple_table.nb[3] = ple_table.nb[2] * ple_table.ne[2];
+        ggml_set_name(&ple_table, "per_layer_token_embd.weight");
+        gguf_add_tensor(ms.gguf_ctx, &ple_table);
+    }
+
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT, uint32_t(1));
-    ms.add_kv(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH, uint32_t(64));
+    ms.add_kv(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,
+              arch == LLM_ARCH_QWEN4EXP ? n_embd_head : uint32_t(64));
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,      uint32_t(8));
     ms.add_kv(LLM_KV_ROPE_DIMENSION_SECTIONS, std::vector<uint32_t>({n_embd_head/4, n_embd_head/4, n_embd_head/4, n_embd_head/4}));
     ms.add_kv(LLM_KV_TOKENIZER_MODEL,         "no_vocab");
@@ -223,7 +269,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     ms.add_kv(LLM_KV_XIELU_ALPHA_P,             1.0f);
     ms.add_kv(LLM_KV_XIELU_BETA,                1.0f);
     ms.add_kv(LLM_KV_XIELU_EPS,                 1.0e-7f);
-    ms.add_kv(LLM_KV_SSM_INNER_SIZE,            arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE ? 256 : 2*n_embd);
+    ms.add_kv(LLM_KV_SSM_INNER_SIZE,            arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_QWEN4EXP ? 256 : 2*n_embd);
     ms.add_kv(LLM_KV_SSM_CONV_KERNEL,           uint32_t(4));
     ms.add_kv(LLM_KV_SSM_STATE_SIZE,            uint32_t(128));
     ms.add_kv(LLM_KV_SSM_TIME_STEP_RANK,        n_head);
@@ -254,7 +300,7 @@ static bool silent_model_load_progress(float /*progress*/, void * /*user_data*/)
 
 static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
         struct gguf_context * gguf_ctx, FILE * file, const size_t seed, const std::vector<ggml_backend_dev_t> & devs,
-        const llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER, bool encode = false) {
+        const llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER, bool encode = false, uint32_t n_seq_max = 0, bool kv_unified = false, bool embeddings = false) {
     GGML_ASSERT((gguf_ctx == nullptr) != (file == nullptr));
     llama_model_params model_params = llama_model_default_params();
     model_params.progress_callback = silent_model_load_progress;
@@ -265,6 +311,12 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
 
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = 0;
+    ctx_params.kv_unified = kv_unified;
+    ctx_params.embeddings = embeddings;
+    if (embeddings) ctx_params.pooling_type = LLAMA_POOLING_TYPE_NONE;
+    if (n_seq_max != 0) {
+        ctx_params.n_seq_max = n_seq_max;
+    }
     ctx_params.n_threads = 4;
     ctx_params.n_threads_batch = 4;
     if (!encode) {
@@ -319,6 +371,161 @@ static std::vector<float> get_logits(
     return ret;
 }
 
+static bool logits_close(const std::vector<float> & a, const std::vector<float> & b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (!std::isfinite(a[i]) || !std::isfinite(b[i]) || std::fabs(a[i] - b[i]) > 1e-4f) return false;
+    }
+    return true;
+}
+
+static std::vector<float> decode_sequence(
+        llama_context * ctx, uint32_t n_vocab, llama_seq_id seq_id, llama_pos pos,
+        const std::vector<llama_token> & tokens) {
+    llama_batch batch = llama_batch_init((int32_t) tokens.size(), 0, 2);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        common_batch_add(batch, tokens[i], pos + (llama_pos) i, {seq_id}, true);
+    }
+    batch.n_tokens = (int32_t) tokens.size();
+    if (llama_decode(ctx, batch)) {
+        llama_batch_free(batch);
+        throw std::runtime_error("qwen4exp state test decode failed");
+    }
+    std::vector<float> logits;
+    logits.reserve(tokens.size() * n_vocab);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const float * row = llama_get_logits_ith(ctx, i);
+        logits.insert(logits.end(), row, row + n_vocab);
+    }
+    llama_batch_free(batch);
+    return logits;
+}
+
+static bool test_qwen4exp_state_continuity(const size_t seed) {
+    const std::vector<llama_token> tokens = { 4, 11, 29, 47, 61, 83 };
+    const std::vector<llama_token> prefix0(tokens.begin(), tokens.begin() + 3);
+    const std::vector<llama_token> continuation(tokens.begin() + 3, tokens.end());
+    const std::vector<llama_token> prefix1 = { 5, 17, 31 };
+    const std::vector<llama_token> suffix1 = { 43, 59 };
+    ggml_backend_dev_t cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (cpu == nullptr) throw std::runtime_error("qwen4exp state test requires a CPU backend");
+    const std::vector<ggml_backend_dev_t> cpu_devs = { cpu };
+    gguf_context_ptr gguf = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true);
+    auto make_ctx = [&]() {
+        return get_model_and_ctx(gguf.get(), nullptr, seed, cpu_devs, LLAMA_SPLIT_MODE_LAYER, false, 2);
+    };
+    auto require = [](bool ok, const char * what) {
+        if (!ok) throw std::runtime_error(what);
+    };
+
+    auto whole = make_ctx();
+    require(llama_model_n_embd_out(whole.first.get()) == llama_model_n_embd(whole.first.get()),
+            "qwen4exp output embedding width does not match the final head mixer");
+    const uint32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(whole.first.get()));
+    require(llama_n_seq_max(whole.second.get()) == 2, "qwen4exp state test requires n_seq_max=2");
+    const auto expected = decode_sequence(whole.second.get(), n_vocab, 0, 0, tokens);
+    auto chunked = make_ctx();
+    auto actual = decode_sequence(chunked.second.get(), n_vocab, 0, 0, prefix0);
+    auto tail = decode_sequence(chunked.second.get(), n_vocab, 0, 3, continuation);
+    actual.insert(actual.end(), tail.begin(), tail.end());
+    require(logits_close(expected, actual), "qwen4exp chunked decode differs from one-shot");
+    auto single = make_ctx();
+    actual.clear();
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        auto row = decode_sequence(single.second.get(), n_vocab, 0, i, { tokens[i] });
+        actual.insert(actual.end(), row.begin(), row.end());
+    }
+    require(logits_close(expected, actual), "qwen4exp single-token decode differs from one-shot");
+
+    // Two equally long sequences may share a microbatch. PLE lookback must
+    // follow each sequence's positions, not the global batch row index.
+    auto interleaved = make_ctx();
+    auto reference1 = make_ctx();
+    const auto expected1 = decode_sequence(reference1.second.get(), n_vocab, 1, 0, tokens);
+    llama_batch mixed = llama_batch_init(2 * (int32_t) tokens.size(), 0, 2);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        common_batch_add(mixed, tokens[i], i, {0}, true);
+        common_batch_add(mixed, tokens[i], i, {1}, true);
+    }
+    const int mixed_result = llama_decode(interleaved.second.get(), mixed);
+    llama_batch_free(mixed);
+    require(mixed_result == 0, "qwen4exp interleaved sequence decode failed");
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        for (int seq_id = 0; seq_id < 2; ++seq_id) {
+            const float * row = llama_get_logits_ith(interleaved.second.get(), 2 * i + seq_id);
+            const auto & reference = seq_id == 0 ? expected : expected1;
+            require(logits_close(std::vector<float>(row, row + n_vocab),
+                                std::vector<float>(reference.begin() + i * n_vocab, reference.begin() + (i + 1) * n_vocab)),
+                    "qwen4exp interleaved sequence logits differ from independent decode");
+        }
+    }
+
+    auto seq = make_ctx();
+    decode_sequence(seq.second.get(), n_vocab, 0, 0, prefix0);
+    const size_t seq_size = llama_state_seq_get_size(seq.second.get(), 0);
+    std::vector<uint8_t> seq_state(seq_size);
+    require(seq_size && llama_state_seq_get_data(seq.second.get(), seq_state.data(), seq_state.size(), 0) == seq_size,
+            "qwen4exp sequence state save failed");
+    const auto continuation_expected = decode_sequence(seq.second.get(), n_vocab, 0, 3, continuation);
+    require(llama_state_seq_set_data(seq.second.get(), seq_state.data(), seq_state.size(), 0) == seq_size,
+            "qwen4exp sequence state restore to seq0 failed");
+    require(logits_close(continuation_expected, decode_sequence(seq.second.get(), n_vocab, 0, 3, continuation)),
+            "qwen4exp seq0 continuation changed after restore");
+    require(llama_state_seq_set_data(seq.second.get(), seq_state.data(), seq_state.size(), 1) == seq_size,
+            "qwen4exp sequence state restore to seq1 failed");
+    require(logits_close(continuation_expected, decode_sequence(seq.second.get(), n_vocab, 1, 3, continuation)),
+            "qwen4exp seq1 continuation changed after restore");
+
+    auto multi = make_ctx();
+    decode_sequence(multi.second.get(), n_vocab, 0, 0, prefix0);
+    decode_sequence(multi.second.get(), n_vocab, 1, 0, prefix1);
+    const size_t state_size = llama_state_get_size(multi.second.get());
+    std::vector<uint8_t> state(state_size);
+    require(state_size && llama_state_get_data(multi.second.get(), state.data(), state.size()) == state_size,
+            "qwen4exp two-sequence context save failed");
+    const auto next0 = decode_sequence(multi.second.get(), n_vocab, 0, 3, continuation);
+    const auto next1 = decode_sequence(multi.second.get(), n_vocab, 1, (llama_pos) prefix1.size(), suffix1);
+    require(llama_state_set_data(multi.second.get(), state.data(), state.size()) == state_size,
+            "qwen4exp two-sequence context restore failed");
+    require(logits_close(next0, decode_sequence(multi.second.get(), n_vocab, 0, 3, continuation)) &&
+            logits_close(next1, decode_sequence(multi.second.get(), n_vocab, 1, (llama_pos) prefix1.size(), suffix1)),
+            "qwen4exp two-sequence continuation changed after context restore");
+
+    require(llama_state_seq_set_data(seq.second.get(), seq_state.data(), seq_state.size(), 1) == seq_size,
+            "qwen4exp setup for corrupt-state check failed");
+    auto clean = make_ctx();
+    const auto first_logits = decode_sequence(clean.second.get(), n_vocab, 1, 0, { tokens[0] });
+    require(llama_state_seq_set_data(seq.second.get(), seq_state.data(), seq_state.size() - 1, 1) == 0,
+            "qwen4exp accepted truncated sequence state");
+    require(logits_close(first_logits, decode_sequence(seq.second.get(), n_vocab, 1, 0, { tokens[0] })),
+            "qwen4exp truncated restore left stale sequence or PLE index state");
+
+    auto shared = get_model_and_ctx(gguf.get(), nullptr, seed, cpu_devs, LLAMA_SPLIT_MODE_LAYER, false, 2, true);
+    llama_batch shared_batch = llama_batch_init(1, 0, 2);
+    common_batch_add(shared_batch, tokens[0], 0, {0, 1}, true);
+    const int shared_result = llama_decode(shared.second.get(), shared_batch);
+    llama_batch_free(shared_batch);
+    require(shared_result != 0, "qwen4exp accepted a token shared across PLE sequence histories");
+    require(logits_close(first_logits, decode_sequence(shared.second.get(), n_vocab, 1, 0, { tokens[0] })),
+            "qwen4exp rejected shared-sequence input mutated the cache");
+
+    auto embeddings = get_model_and_ctx(gguf.get(), nullptr, seed, cpu_devs, LLAMA_SPLIT_MODE_LAYER, false, 2, false, true);
+    llama_batch embedding_batch = llama_batch_init(2, 0, 1);
+    common_batch_add(embedding_batch, tokens[0], 0, {0}, true);
+    common_batch_add(embedding_batch, tokens[1], 1, {0}, true);
+    const int embedding_result = llama_decode(embeddings.second.get(), embedding_batch);
+    llama_batch_free(embedding_batch);
+    require(embedding_result == 0, "qwen4exp embedding extraction decode failed");
+    for (int row = 0; row < 2; ++row) {
+        const float * values = llama_get_embeddings_ith(embeddings.second.get(), row);
+        require(values != nullptr, "qwen4exp output embeddings are missing");
+        for (int i = 0; i < llama_model_n_embd_out(embeddings.first.get()); ++i) {
+            require(std::isfinite(values[i]), "qwen4exp output embedding is nonfinite");
+        }
+    }
+    return true;
+}
+
 static bool moe_mandatory(const llm_arch arch) {
     switch (arch) {
         case LLM_ARCH_LLAMA4:
@@ -328,6 +535,7 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_QWEN3NEXT:
         case LLM_ARCH_QWEN3VLMOE:
         case LLM_ARCH_QWEN35MOE:
+        case LLM_ARCH_QWEN4EXP:
         case LLM_ARCH_PHIMOE:
         case LLM_ARCH_DBRX:
         case LLM_ARCH_OLMOE:
@@ -460,7 +668,7 @@ static int save_models(const llm_arch target_arch, const size_t seed, const ggml
             if (!moe && moe_mandatory(arch)) {
                 continue;
             }
-            if (!llama_model_saver_supports_arch(arch)) {
+            if (arch == LLM_ARCH_QWEN4EXP || !llama_model_saver_supports_arch(arch)) {
                 LOG_INF("%s: %s model (%s) is unsupported, skipping\n", __func__, llm_arch_name(arch), moe ? "MoE" : "dense");
                 continue;
             }
@@ -492,6 +700,15 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
         const ggml_log_level level_eff = level >= ud->min_level ? level : GGML_LOG_LEVEL_DEBUG;
         ud->original_logger.callback(level_eff, text, ud->original_logger.user_data);
     }, &ud);
+
+    bool all_ok = true;
+    if (target_arch == LLM_ARCH_UNKNOWN || target_arch == LLM_ARCH_QWEN4EXP) {
+        printf("qwen4exp runtime state continuity (CPU): ");
+        fflush(stdout);
+        const bool state_ok = test_qwen4exp_state_continuity(seed);
+        all_ok = state_ok && all_ok;
+        printf("%s\n", state_ok ? "OK" : "FAIL");
+    }
 
     const std::vector<llama_token> tokens = get_tokens(128, 128, seed);
 
@@ -534,7 +751,6 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
     const std::string template_row_cfg = std::string("|%" + std::to_string(max_arch_name_length) + "s|%") + std::to_string(max_device_label_length) + "s|%6s|";
     const std::string template_row_res = "%15s %10s|%20s|\n";
 
-    bool all_ok = true;
     common_log_flush(common_log_main());
     printf(template_header.c_str(), "Model arch.", "Device", "Config", "NMSE vs. CPU", "Roundtrip");
     printf("|");
@@ -607,6 +823,7 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
                     FILE * file = tmpfile(); // Can be null on Windows without administrator privileges.
                     // FIXME: when adding a tensor to a gguf_context a copy is made, this changes the pointer which the meta backend
                     //     in turn uses to map the tensors to their simple equivalents - this is fundamentally incompatible
+                    // qwen4exp saver support is outside this fixture slice.
                     if (file != nullptr && llama_model_saver_supports_arch(arch) && dc.split_mode != LLAMA_SPLIT_MODE_TENSOR) {
                         GGML_ASSERT(model_and_ctx_dev.first && model_and_ctx_dev.second);
                         llama_model_saver ms = llama_model_saver(model_and_ctx_dev.first.get());

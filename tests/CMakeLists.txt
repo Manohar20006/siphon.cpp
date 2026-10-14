@@ -254,6 +254,10 @@ target_sources(test-prerouter PRIVATE ${PROJECT_SOURCE_DIR}/src/llama-prerouter.
 target_include_directories(test-prerouter PRIVATE ${PROJECT_SOURCE_DIR}/src)
 llama_test(test-prerouter)
 
+llama_build(test-prerouter-state.cpp)
+target_include_directories(test-prerouter-state PRIVATE ${PROJECT_SOURCE_DIR}/src)
+llama_test(test-prerouter-state)
+
 if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
   # TODO: repair known memory leaks
   llama_build_and_test(test-opt.cpp)

@@ -486,48 +486,31 @@ static __global__ void dequantize_block_mxfp4(const void * __restrict__ vx, dst_
     }
 }
 
-// TurboQuant TQ3_0: 3-bit codebook dequant + cooperative inverse WHT (one block of 32 per CUDA block)
+// TurboQuant TQ3_0 stores each block of 32 values x as r = H*S*x/sqrt(32) (H: Sylvester Walsh-Hadamard matrix,
+// S: fixed signs), with r quantized to a 3-bit Lloyd-Max codebook. One warp per block: lane l decodes r[l], the
+// inverse transform x = S*H*r/sqrt(32) runs as 5 shuffle butterflies, and lane l writes x[l].
 template<typename dst_t>
-static __global__ void dequantize_block_tq3_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
-    const float centroids[8] = {
-        -2.1573f, -1.3336f, -0.7434f, -0.2428f,
-         0.2428f,  0.7434f,  1.3336f,  2.1573f
-    };
-    const int8_t signs[32] = {
-        +1, -1, +1, +1, -1, -1, +1, -1, +1, +1, -1, +1, -1, +1, -1, -1,
-        +1, -1, -1, +1, +1, -1, +1, -1, -1, +1, +1, +1, -1, -1, +1, -1
-    };
+static __global__ void dequantize_block_tq3_0(const void * __restrict__ vx, dst_t * __restrict__ yy, const int64_t nb) {
+    const int64_t i = int64_t(blockIdx.x) * (blockDim.x / QK_TQ3_0) + threadIdx.x / QK_TQ3_0;
+    if (i >= nb) {
+        return; // whole 32-lane groups exit together, so the shuffles below stay converged
+    }
+    const int lane = threadIdx.x % QK_TQ3_0;
+    const block_tq3_0 * x = (const block_tq3_0 *) vx + i;
 
-    const int64_t i = blockIdx.x;
-    const block_tq3_0 * x = (const block_tq3_0 *)vx;
-    const int tid = threadIdx.x;
-    if (tid >= 32) return;
+    const int idx = ((x->qs[lane/4] >> (2*(lane%4))) & 3) | (((x->qr[lane/8] >> (lane%8)) & 1) << 2);
+    const int m   = (idx & 4) ? (idx & 3) : (3 - (idx & 3));
+    const float c = m == 0 ? 0.2428f : m == 1 ? 0.7434f : m == 2 ? 1.3336f : 2.1573f;
+    float v = __half2float(x->gamma) * ((idx & 4) ? c : -c);
 
-    const float d = __half2float(x[i].gamma);
-
-    const int low2 = (x[i].qs[tid / 4] >> (2 * (tid % 4))) & 3;
-    const int hi1  = (x[i].qr[tid / 8] >> (tid % 8)) & 1;
-    const int idx  = low2 | (hi1 << 2);
-
-    __shared__ float shmem[32];
-    shmem[tid] = d * centroids[idx];
-    __syncthreads();
-
-    // cooperative inverse WHT (5 butterfly stages)
-    for (int step = 1; step < 32; step <<= 1) {
-        int partner = tid ^ step;
-        float a = shmem[tid];
-        float b = shmem[partner];
-        __syncthreads();
-        if (tid < partner) {
-            shmem[tid]     = a + b;
-            shmem[partner] = a - b;
-        }
-        __syncthreads();
+#pragma unroll
+    for (int s = 1; s < QK_TQ3_0; s <<= 1) {
+        const float o = __shfl_xor_sync(0xFFFFFFFF, v, s, QK_TQ3_0);
+        v = (lane & s) ? o - v : v + o;
     }
 
-    const float inv_sqrt32 = 0.17677669529663688f;
-    yy[i * QK_TQ3_0 + tid] = shmem[tid] * inv_sqrt32 * signs[tid];
+    const float sign = ((0xb1a6d4b2u >> lane) & 1) ? -1.0f : 1.0f;
+    yy[i*QK_TQ3_0 + lane] = v * (0.17677669529663688f * sign);
 }
 
 template <int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
@@ -663,8 +646,10 @@ static void dequantize_row_mxfp4_cuda(const void * vx, dst_t * y, const int64_t 
 
 template<typename dst_t>
 static void dequantize_row_tq3_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
-    const int nb = k / QK_TQ3_0;
-    dequantize_block_tq3_0<<<nb, 32, 0, stream>>>(vx, y);
+    const int64_t nb = k / QK_TQ3_0;
+    constexpr int blocks_per_cuda_block = 8;
+    const int64_t num_blocks = (nb + blocks_per_cuda_block - 1) / blocks_per_cuda_block;
+    dequantize_block_tq3_0<<<num_blocks, blocks_per_cuda_block*QK_TQ3_0, 0, stream>>>(vx, y, nb);
 }
 
 template <typename dst_t>

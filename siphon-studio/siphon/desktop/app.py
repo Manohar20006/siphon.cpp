@@ -40,9 +40,16 @@ gi.require_version("WebKit", "6.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, WebKit
 
 from .. import paths
-from ..core import runner
-from ..core.monitor import fetch_dstorage_metrics, fetch_metrics
+from ..core import runner, execution
+from ..core.monitor import fetch_dstorage_metrics, fetch_health, fetch_metrics
 from ..core.profiles import Profile, discover
+from ..core.memory_budget import gpu_reservation, memory_signature
+from ..core.runtime_memory import read_memory_record, load_observation, save_observation
+from ..core.model_files import (
+    inspect_model_files, model_fingerprint, model_part_paths, scan_model_folder,
+)
+from .catalogue import load_excluded_model_keys, save_excluded_model_keys
+from ..api import connect as api_connect
 from ..console.dstore import parse_log_tail
 from ..tui.data import fetch_slots, fetch_sys_stats
 
@@ -93,19 +100,62 @@ def _profile_map(profiles: dict[str, Profile]) -> dict[str, str]:
     return mapping
 
 RAM_HEADROOM_MIB = 2 * 1024
-VRAM_HEADROOM_MIB = 512
+VRAM_HEADROOM_MIB = 128
 
 
-def _resource_state(system: Any) -> dict[str, Any]:
+def _cpu_ram_reservation(layout: dict[str, Any] | None, config: dict[str, Any]) -> dict[str, Any] | None:
+    """Reserve CPU KV/state and a provisional workspace, not the mmap file size."""
+    if not layout:
+        return None
+    kind = config.get("cache_type", "q8_0")
+    per_token = sum(layout["kv_bytes_by_type"][kind])
+    mtp = config.get("spec_type") == "draft-mtp"
+    draft_per_token = sum(layout["draft_kv_bytes_by_type"]["f16"]) if mtp else 0
+    context = max(0, int(config.get("context", 0)))
+    rollback = int(config.get("draft_tokens", 0)) if mtp and layout.get("rollback_supported", True) else 0
+    recurrent = sum(layout.get("recurrent_bytes_by_layer", [])) / 1048576 * max(1, int(config.get("parallel", 1))) * (1 + rollback)
+    return {"kv_bytes_per_token": per_token, "draft_kv_bytes_per_token": draft_per_token,
+            "kv_mib": context * (per_token + draft_per_token) / 1048576,
+            "recurrent_mib": recurrent, "compute_mib": 512,
+            "total_mib": context * (per_token + draft_per_token) / 1048576 + recurrent + 512}
+
+
+def _resource_state(system: Any, config: dict[str, Any] | None = None,
+                    memory_layout: dict[str, Any] | None = None, *, running: bool = False) -> dict[str, Any]:
     """Return live allocation ceilings using available, not total, memory."""
     ram_available_mib = max(0, int(float(system.mem_free_gb or 0) * 1024))
     vram_available_mib = max(0, int(float(system.gpu_mib_free or 0)))
     cpu_threads = max(1, int(os.cpu_count() or 1))
+    free_safe = max(0, vram_available_mib - VRAM_HEADROOM_MIB)
+    if memory_layout and memory_layout.get("runtime_memory", {}).get("gpu_name") != getattr(system, "gpu_name", ""):
+        memory_layout = {key: value for key, value in memory_layout.items() if key != "runtime_memory"}
+    budget_error = ""
+    cpu_mode = (config or {}).get("execution_mode") == "cpu"
+    cpu_reservation = None
+    try:
+        if cpu_mode:
+            cpu_reservation = _cpu_ram_reservation(memory_layout, config or {})
+            reservation = None
+        else:
+            reservation = gpu_reservation(memory_layout, config or {}) if memory_layout else None
+    except (ValueError, TypeError, KeyError) as exc:
+        reservation = None
+        budget_error = str(exc)
+    # A loaded engine's weights/KV are already absent from GPU free memory.
+    # Locked allocations must never be subtracted a second time or reduced.
+    reserved = reservation["total_mib"] if reservation and not running else 0
     return {
+        "execution_mode": (config or {}).get("execution_mode", "gpu"),
         "ram_available_gb": float(system.mem_free_gb or 0),
         "vram_available_gb": vram_available_mib / 1024.0,
         "ram_safe_mib": max(0, ram_available_mib - RAM_HEADROOM_MIB),
-        "vram_safe_mib": max(0, vram_available_mib - VRAM_HEADROOM_MIB),
+        "vram_safe_mib": 0 if budget_error else max(0, free_safe - reserved),
+        "vram_free_safe_mib": free_safe,
+        "vram_reservation": reservation,
+        "cpu_ram_reservation": cpu_reservation,
+        "memory_layout": memory_layout,
+        "vram_budget_known": bool(reservation) if config is not None else True,
+        "vram_budget_error": budget_error,
         "ram_headroom_mib": RAM_HEADROOM_MIB,
         "vram_headroom_mib": VRAM_HEADROOM_MIB,
         "cpu_threads": cpu_threads,
@@ -113,28 +163,54 @@ def _resource_state(system: Any) -> dict[str, Any]:
     }
 
 
-def _validate_resource_settings(values: dict[str, Any], system: Any) -> tuple[bool, str]:
+def _validate_resource_settings(
+    values: dict[str, Any], system: Any, *, enforce_memory_capacity: bool = True,
+    memory_layout: dict[str, Any] | None = None,
+    require_model_budget: bool = False,
+) -> tuple[bool, str]:
     """Reject launch profiles that exceed currently safe host capacities."""
-    state = _resource_state(system)
+    cpu_mode = values.get("execution_mode") == "cpu"
+    if values.get("execution_mode", "gpu") not in {"cpu", "gpu"}:
+        return False, "Execution mode must be CPU or GPU."
+    if enforce_memory_capacity and require_model_budget and memory_layout is None:
+        return False, "Model memory requirements are unavailable; inspect the model before saving or starting."
+    if cpu_mode and values.get("cache_type", "q8_0") not in {"q8_0", "f16"}:
+        return False, "CPU mode supports Q8_0 or F16 attention cache precision."
+    try:
+        state = _resource_state(system, values, memory_layout)
+    except (ValueError, TypeError, KeyError) as exc:
+        return False, f"Cannot determine model {'CPU RAM' if cpu_mode else 'GPU memory'} budget: {exc}"
+    if state["vram_budget_error"]:
+        return False, f"Cannot determine model {'CPU RAM' if cpu_mode else 'GPU memory'} budget: {state['vram_budget_error']}"
+    if enforce_memory_capacity and system.gpu_mib_total and state["vram_reservation"] and state["vram_reservation"]["total_mib"] > state["vram_free_safe_mib"]:
+        return False, "Model weights and buffers exceed available GPU memory after headroom. Reduce context or GPU placement before starting."
     try:
         pinned_mib = max(0, int(values.get("pinned_cache", values.get("l2_cache", 0)) or 0))
         prompt_mib = max(0, int(values.get("cache_ram", 0) or 0))
         vram_mib = max(0, int(values.get("vram_cache", values.get("l1_cache", 0)) or 0))
     except (TypeError, ValueError):
         return False, "Memory allocations must be valid numbers."
-    requested_ram = pinned_mib + prompt_mib
-    if system.mem_total_gb and requested_ram > state["ram_safe_mib"]:
+    requested_ram = prompt_mib + (state["cpu_ram_reservation"]["total_mib"] if state["cpu_ram_reservation"] else 0) if cpu_mode else pinned_mib + prompt_mib
+    if enforce_memory_capacity and system.mem_total_gb and requested_ram > state["ram_safe_mib"]:
         return False, (
             f"RAM allocation is {requested_ram / 1024:.1f} GiB, but only "
             f"{state['ram_safe_mib'] / 1024:.1f} GiB is safely available. "
             "Siphon always preserves at least 2 GiB of free RAM."
         )
-    if system.gpu_mib_total and vram_mib > state["vram_safe_mib"]:
+    if enforce_memory_capacity and not cpu_mode and system.gpu_mib_total and vram_mib > state["vram_safe_mib"]:
         return False, (
             f"VRAM cache is {vram_mib / 1024:.1f} GiB, but only "
             f"{state['vram_safe_mib'] / 1024:.1f} GiB is safely available "
-            "after the runtime reserve."
+            "after model weights, KV/state buffers, and runtime/headroom reserves."
         )
+    if cpu_mode:
+        try:
+            threads = int(values.get("cpu_threads", 1))
+        except (ValueError, TypeError):
+            return False, "CPU threads must be a valid number."
+        if not 1 <= threads <= state["cpu_threads"]:
+            return False, f"CPU threads must be between 1 and {state['cpu_threads']}."
+        return True, ""
     try:
         gds_threads = int(values.get("gds_threads", 1) or 1)
     except (TypeError, ValueError):
@@ -147,23 +223,36 @@ def _validate_resource_settings(values: dict[str, Any], system: Any) -> tuple[bo
     return True, ""
 
 
-def _recommended_settings(config: dict[str, Any], system: Any) -> dict[str, int]:
+def _recommended_settings(config: dict[str, Any], system: Any,
+                          memory_layout: dict[str, Any] | None = None) -> dict[str, int]:
     """Produce conservative, model-aware cache budgets for this machine."""
-    state = _resource_state(system)
+    if config.get("execution_mode") == "cpu":
+        context = min(int(config.get("context", 4096)), 65536)
+        safe = _resource_state(system)["ram_safe_mib"]
+        while context > 4096:
+            reserve = _cpu_ram_reservation(memory_layout, {**config, "context": context})
+            if not reserve or reserve["total_mib"] <= safe / 2:
+                break
+            context //= 2
+        reserve = _cpu_ram_reservation(memory_layout, {**config, "context": context})
+        remaining = max(0, safe - (reserve["total_mib"] if reserve else 512))
+        return {"context": context, "cache_ram": min(int(config.get("cache_ram", 0)), int(remaining // 512 * 512)),
+                "cpu_threads": execution.default_cpu_threads(), "expert_k": int(config.get("expert_k", 0))}
+    context = min(int(config.get("context", 0) or 0), _recommended_context(_resource_state(system)["vram_safe_mib"]))
+    state = _resource_state(system, {**config, "context": context, "gpu_layers": 999}, memory_layout)
     ram_safe = int(state["ram_safe_mib"])
     vram_safe = int(state["vram_safe_mib"])
     prompt_target = min(int(config.get("cache_ram", 0) or 0), ram_safe // 3)
     prompt_target = max(0, prompt_target // 512 * 512)
     pinned_target = min(int(config.get("l2_cache", 0) or 0), ram_safe - prompt_target)
     pinned_target = max(0, pinned_target // 1024 * 1024)
-    gpu_layers_target, vram_target = _recommended_gpu_budget(vram_safe)
-    requested_context = int(config.get("context", 0) or 0)
+    gpu_layers_target, vram_target = _recommended_gpu_budget(vram_safe, reserve_mib=0 if memory_layout else 512)
     return {
         "gpu_layers": gpu_layers_target,
         "vram_cache": vram_target,
         "pinned_cache": pinned_target,
         "cache_ram": prompt_target,
-        "context": min(requested_context, _recommended_context(vram_safe)),
+        "context": context,
         "expert_k": int(config.get("expert_k", 0) or 0),
         "gds_threads": min(
             max(1, int(config.get("gds_threads", 1) or 1)),
@@ -172,14 +261,14 @@ def _recommended_settings(config: dict[str, Any], system: Any) -> dict[str, int]
     }
 
 
-def _recommended_gpu_budget(vram_safe_mib: int) -> tuple[int, int]:
+def _recommended_gpu_budget(vram_safe_mib: int, *, reserve_mib: int = 512) -> tuple[int, int]:
     """Reserve a conservative DirectStorage expert pool.
 
     DirectStorage expert tensors are GPU addresses and every MoE layer that
     consumes them must therefore remain GPU-routed.  Memory is controlled with
     context/KV size and the bounded expert pool, not partial CPU layer offload.
     """
-    usable_mib = max(0, int(vram_safe_mib) - 512)
+    usable_mib = max(0, int(vram_safe_mib) - reserve_mib)
     gpu_layers = 999
     expert_pool_mib = min(1024, usable_mib)
     expert_pool_mib = expert_pool_mib // 128 * 128
@@ -234,6 +323,10 @@ def _file_size(path: Path) -> int:
 def _startup_log_error(path: Path, start_offset: int) -> str | None:
     """Return a fatal runtime error emitted after this launch began."""
     fatal_markers = (
+        "unknown model architecture",
+        "error loading model",
+        "failed to load model",
+        "exiting due to model loading error",
         "failed to allocate CUDA VRAM pool",
         "failed to stream experts",
         "failed to compute graph",
@@ -247,7 +340,12 @@ def _startup_log_error(path: Path, start_offset: int) -> str | None:
             text = handle.read()
     except OSError:
         return None
-    return next((marker for marker in fatal_markers if marker in text), None)
+    markers = tuple(marker.lower() for marker in fatal_markers)
+    return next((
+        line.strip()
+        for line in text.splitlines()
+        if any(marker in line.lower() for marker in markers)
+    ), None)
 
 
 def _probe_inference(profile: Profile) -> str | None:
@@ -455,13 +553,16 @@ def _model_field(reader: Any, key: str, default: Any = None) -> Any:
         return default
 
 
-def _profile_config(profile: Profile) -> dict[str, Any]:
+def _profile_config(profile: Profile, *, include_modes: bool = True) -> dict[str, Any]:
     """Return launch settings without touching the model weights.
 
     This intentionally stays separate from GGUF inspection so the catalogue
     can show the selected profile's real defaults immediately. Reading a
     large GGUF header/tensor table is done asynchronously afterward.
     """
+    original = profile
+    mode = execution.mode(profile)
+    profile = Profile(name=profile.name, env=execution.effective_env(profile), script=profile.script)
     expert_override = profile.env.get("LLAMA_MOE_EXPERT_USED_OVERRIDE", "")
     expert_mode = profile.env.get("MOE_EXPERT_COUNT_MODE", "default")
     if expert_mode == "native" and not expert_override:
@@ -473,7 +574,10 @@ def _profile_config(profile: Profile) -> dict[str, Any]:
             ))
         except ValueError:
             expert_k = 0
-    return {
+    config = {
+        "execution_mode": mode,
+        "gpu_available": execution.gpu_available(),
+        "cpu_threads": int(profile.env.get("THREADS", str(execution.default_cpu_threads()))),
         "context": int(profile.env.get("CTX", "0") or 0),
         "batch": int(profile.env.get("BATCH", "0") or 0),
         "microbatch": int(profile.env.get("UBATCH", "0") or 0),
@@ -487,6 +591,8 @@ def _profile_config(profile: Profile) -> dict[str, Any]:
         "gds_threads": int(profile.env.get("GDS_READ_THREADS", "0") or 0),
         "spec_type": profile.env.get("SPEC_TYPE", "none"),
         "draft_model": profile.env.get("MODEL_DRAFT", ""),
+        "draft_cache_type": "f16",  # Current launchers do not override -ctk/-ctv-draft.
+        "parallel": int(profile.env.get("N_PARALLEL", "1") or 1),
         "draft_tokens": int(profile.env.get("SPEC_DRAFT_N_MAX", "0") or 0),
         "draft_probability": float(profile.env.get("SPEC_DRAFT_P_MIN", "0") or 0),
         "temperature": float(profile.env.get("SIPHON_TEMPERATURE", "0.70") or 0.70),
@@ -502,10 +608,36 @@ def _profile_config(profile: Profile) -> dict[str, Any]:
             "CACHE_PROMPT", "1" if profile.script_rel.endswith("run-qwen36-moe.sh") else "0"
         ) not in {"", "0", "false", "False"},
     }
+    if include_modes:
+        config["mode_settings"] = {
+            name: _profile_config(Profile(name=original.name,
+                env={**original.env, "SIPHON_EXECUTION_MODE": name}, script=original.script), include_modes=False)
+            for name in ("gpu", "cpu")
+        }
+    return config
 
 
 def _metadata_cache_path() -> Path:
     return paths.state_dir() / "model-metadata.json"
+
+
+_METADATA_CACHE_VERSION = 4
+_metadata_cache_lock = threading.RLock()
+
+
+def _profile_model_parts(profile: Profile) -> list[Path]:
+    if profile.model_files:
+        return [Path(path) for path in profile.model_files]
+    model = profile.resolve("MODEL")
+    return model_part_paths(Path(model)) if model else []
+
+
+def _profile_model_available(profile: Profile) -> bool:
+    try:
+        parts = _profile_model_parts(profile)
+        return bool(parts) and all(path.is_file() and os.access(path, os.R_OK) for path in parts)
+    except (OSError, ValueError):
+        return False
 
 
 def _read_metadata_cache() -> dict[str, Any]:
@@ -522,24 +654,34 @@ def _write_metadata_cache(payload: dict[str, Any]) -> None:
         return
     try:
         path = Path(str(model_path)).resolve()
-        stat = path.stat()
-        cache = _read_metadata_cache()
-        cache[str(path)] = {
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
+        fingerprint = model_fingerprint([Path(p) for p in payload.get("parts", [str(path)])])
+        if payload.get("fingerprint", fingerprint) != fingerprint:
+            return
+        entry = {
+            "version": _METADATA_CACHE_VERSION,
+            "fingerprint": fingerprint,
             "data": {
                 key: payload[key]
                 for key in (
                     "name", "architecture", "layers", "native_context",
                     "expert_count", "expert_used_count", "artifact_gib",
-                    "dense_gib", "expert_gib",
+                    "dense_gib", "core_gib", "lookup_gib", "expert_gib",
+                    "tensor_gib", "part_count", "parts", "memory_layout",
                 )
                 if key in payload
             },
         }
-        cache_path = _metadata_cache_path()
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(cache, indent=2) + "\n", encoding="utf-8")
+        with _metadata_cache_lock:
+            cache = _read_metadata_cache()
+            cache[str(path)] = entry
+            cache_path = _metadata_cache_path()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            pending = cache_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+            try:
+                pending.write_text(json.dumps(cache, indent=2) + "\n", encoding="utf-8")
+                pending.replace(cache_path)
+            finally:
+                pending.unlink(missing_ok=True)
     except (OSError, TypeError, ValueError):
         # Metadata caching is an optimization. A read-only state directory or
         # an unusual filesystem must never prevent model inspection.
@@ -548,14 +690,13 @@ def _write_metadata_cache(payload: dict[str, Any]) -> None:
 
 def _cached_model_info(profile: Profile, model_key: str) -> dict[str, Any] | None:
     model_path = Path(profile.resolve("MODEL"))
-    if not model_path.is_file():
+    if not _profile_model_available(profile):
         return None
     try:
         path = model_path.resolve()
-        stat = path.stat()
         entry = _read_metadata_cache().get(str(path), {})
-        if (entry.get("size") != stat.st_size or
-                entry.get("mtime_ns") != stat.st_mtime_ns or
+        if (entry.get("version") != _METADATA_CACHE_VERSION or
+                entry.get("fingerprint") != model_fingerprint(_profile_model_parts(profile)) or
                 not isinstance(entry.get("data"), dict)):
             return None
         return {
@@ -583,46 +724,73 @@ def _model_info(profile: Profile, model_key: str) -> dict[str, Any]:
     info: dict[str, Any] = {
         "type": "model_info",
         "model_key": model_key,
-        "available": model_path.is_file(),
+        "available": _profile_model_available(profile),
         "profile": profile.name,
         "path": str(model_path),
         "config": _profile_config(profile),
     }
-    if not model_path.is_file():
+    if not info["available"]:
         return info
 
     try:
-        from gguf.gguf_reader import GGUFReader
-
-        reader = GGUFReader(model_path)
-        architecture = str(_model_field(reader, "general.architecture", ""))
-        prefix = architecture
-        layers = _model_field(reader, f"{prefix}.block_count", 0)
-        context = _model_field(reader, f"{prefix}.context_length", 0)
-        expert_count = _model_field(reader, f"{prefix}.expert_count", 0)
-        expert_used = _model_field(reader, f"{prefix}.expert_used_count", 0)
-        total_tensor_bytes = sum(int(t.n_bytes) for t in reader.tensors)
-        expert_tensor_bytes = sum(
-            int(t.n_bytes) for t in reader.tensors if "exps" in t.name
-        )
-        artifact_gib = model_path.stat().st_size / (1024 ** 3)
-        info.update({
-            "name": MODEL_DISPLAY_NAMES.get(
-                model_key,
-                str(_model_field(reader, "general.name", model_path.stem)),
-            ),
-            "architecture": architecture,
-            "layers": int(layers or 0),
-            "native_context": int(context or 0),
-            "expert_count": int(expert_count or 0),
-            "expert_used_count": int(expert_used or 0),
-            "artifact_gib": round(artifact_gib, 2),
-            "dense_gib": round(max(total_tensor_bytes - expert_tensor_bytes, 0) / (1024 ** 3), 2),
-            "expert_gib": round(expert_tensor_bytes / (1024 ** 3), 2),
-        })
+        fingerprint = model_fingerprint(_profile_model_parts(profile))
+        info.update(inspect_model_files(model_path))
+        if fingerprint != model_fingerprint([Path(p) for p in info["parts"]]):
+            raise ValueError("Model parts changed while inspecting; choose the folder again.")
+        info["fingerprint"] = fingerprint
+        info["name"] = MODEL_DISPLAY_NAMES.get(model_key, info["name"])
     except Exception as exc:
+        info["available"] = False
         info["metadata_error"] = str(exc)
     return info
+
+
+def _memory_observation_identity(profile: Profile) -> dict[str, Any]:
+    binary = paths.server_bin()
+    runtime = [binary, profile.script]
+    runtime.extend(sorted(binary.parent.glob("lib*.so*")))
+    environment = {key: value for key, value in os.environ.items()
+                   if key.startswith(("GGML_", "LLAMA_", "CUDA_")) or key in {
+                        "CTX", "BATCH", "UBATCH", "GPU_LAYERS", "CACHE_TYPE", "FLASH_ATTENTION",
+                        "ROPE_SCALING", "MOE_GPU_CACHE_MIB", "MOE_PINNED_CACHE_MIB", "CACHE_RAM_MIB",
+                        "SPEC_TYPE", "MODEL_DRAFT", "SPEC_DRAFT_N_MAX", "SPEC_DRAFT_P_MIN", "N_PARALLEL",
+                        "CACHE_PROMPT", "N_CTX_CHECKPOINTS", "GDS_READ_THREADS", "MMPROJ", "RUNTIME_MODE"}}
+    environment.update(profile.env)
+    # Hash effective launcher settings: all profile fields invalidate safely,
+    # but their values (which could include credentials) are never persisted.
+    return {"model": model_fingerprint(_profile_model_parts(profile)),
+            "runtime": model_fingerprint(runtime),
+            "env": hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest()}
+
+
+def _record_runtime_memory(profile: Profile, config: dict[str, Any], offset: int) -> None:
+    if config.get("execution_mode") == "cpu":
+        return  # Never overwrite a GPU workspace observation with CPU bytes.
+    record = read_memory_record(profile.log_file, offset)
+    if record:
+        try:
+            save_observation(paths.state_dir() / "runtime-memory.json", profile.name,
+                             _memory_observation_identity(profile), {**record, "config": memory_signature(config)})
+        except (OSError, ValueError):
+            pass
+
+
+def _profile_memory_layout(profile: Profile, *, inspect: bool = False) -> dict[str, Any] | None:
+    info = _cached_model_info(profile, _model_key_for_profile(profile))
+    if info is None and inspect and _profile_model_available(profile):
+        info = _model_info(profile, _model_key_for_profile(profile))
+        if info.get("available"):
+            _write_metadata_cache(info)
+    layout = info.get("memory_layout") if info else None
+    if layout:
+        try:
+            record = load_observation(paths.state_dir() / "runtime-memory.json", profile.name,
+                                      _memory_observation_identity(profile))
+            if record:
+                layout = {**layout, "runtime_memory": record}
+        except (OSError, ValueError):
+            pass
+    return layout
 
 
 class DesktopBridge:
@@ -632,7 +800,14 @@ class DesktopBridge:
         self.window = window
         self.webview = webview
         self.profiles: dict[str, Profile] = discover()
-        self.profile_by_model_key = _profile_map(self.profiles)
+        self._catalogue_lock = threading.RLock()
+        self._all_profile_by_model_key = _profile_map(self.profiles)
+        self._excluded_model_keys = load_excluded_model_keys()
+        self._registration_generations: dict[str, int] = {}
+        self.profile_by_model_key = {
+            key: name for key, name in self._all_profile_by_model_key.items()
+            if key not in self._excluded_model_keys
+        }
         self.model_key = "qwen35"
         self._poll_busy = False
         self._poll_paused = False
@@ -641,12 +816,17 @@ class DesktopBridge:
         self._chat_stop_events: dict[str, threading.Event] = {}
         self._chat_lock = threading.Lock()
         self._sampling: dict[str, dict[str, float]] = {}
+        self._import_lock = threading.RLock()
+        self._import_scan_id = ""
+        self._import_candidates: dict[str, dict[str, Any]] = {}
         self._request_metrics: dict[str, dict[str, Any]] = {}
         # DirectStorage exposes lifetime counters through /metrics.  Each chat
         # request records a baseline so the dashboard can show its own real
         # movement, rather than the totals accumulated by earlier requests.
         self._dstorage_baselines: dict[str, dict[str, float]] = {}
         self._active_generations: dict[str, bool] = {}
+        self._starting_models: set[str] = set()
+        self._stopping_models: set[str] = set()
         self._live_timing_samples: dict[str, dict[str, float]] = {}
         self._live_stream_metrics: dict[str, dict[str, float]] = {}
         self._dstorage_rate_samples: dict[str, dict[str, float]] = {}
@@ -656,13 +836,81 @@ class DesktopBridge:
             profile.name: _file_size(profile.log_file)
             for profile in self.profiles.values()
         }
+        self._api_init()
 
     def register(self, manager: WebKit.UserContentManager) -> None:
         manager.register_script_message_handler("siphon")
         manager.connect("script-message-received::siphon", self._message_received)
 
-    def close(self) -> None:
-        self._closed = True
+    def _ensure_shutdown_state(self) -> None:
+        if not hasattr(self, "_shutdown_lock"):
+            self._shutdown_lock = threading.RLock()
+            self._launch_lock = threading.RLock()
+            self._shutdown_event = threading.Event()
+            self._shutdown_done = threading.Event()
+            self._shutdown_thread = None
+            self._shutdown_callbacks = []
+            self._shutdown_errors = []
+            self._model_action_threads = []
+
+    def close(self, on_complete=None) -> None:
+        """Cancel new work and asynchronously unload all managed engines."""
+        self._ensure_shutdown_state()
+        with self._shutdown_lock:
+            thread = self._shutdown_thread
+            if self._shutdown_done.is_set() and not self._shutdown_errors:
+                if on_complete is not None:
+                    GLib.idle_add(on_complete, [])
+                return
+            if on_complete is not None:
+                self._shutdown_callbacks.append(on_complete)
+            if thread is not None and not self._shutdown_done.is_set():
+                return
+            self._shutdown_done.clear()
+            self._closed = True
+            self._shutdown_event.set()
+            self._api_stop()
+            self._telemetry_epoch += 1
+            with self._chat_lock:
+                for stop_event in self._chat_stop_events.values():
+                    stop_event.set()
+
+            def cleanup() -> None:
+                errors = []
+                try:
+                    # A launch already inside runner.up must finish recording
+                    # its ownership before teardown. Later launches see closed.
+                    with self._launch_lock:
+                        profiles = dict(self.profiles)
+                        try:
+                            for name, profile in discover().items():
+                                profiles.setdefault(name, profile)
+                        except Exception as exc:
+                            errors.append(f"Profile discovery during shutdown failed: {exc}")
+                        errors.extend(runner.shutdown(list(profiles.values())))
+                except Exception as exc:
+                    errors.append(f"Model shutdown failed: {exc}")
+                with self._shutdown_lock:
+                    self._shutdown_errors = errors
+                    callbacks, self._shutdown_callbacks = self._shutdown_callbacks, []
+                    self._shutdown_done.set()
+                for error in errors:
+                    print(f"Siphon Studio shutdown: {error}", flush=True)
+                for callback in callbacks:
+                    GLib.idle_add(callback, errors)
+
+            # Do not allow interpreter exit to abandon model termination.
+            self._shutdown_thread = threading.Thread(
+                target=cleanup, name="siphon-desktop-shutdown", daemon=False,
+            )
+            self._shutdown_thread.start()
+
+    def wait_closed(self) -> list[str]:
+        """Final application shutdown waits for the bounded runner cleanup."""
+        self._ensure_shutdown_state()
+        if self._shutdown_thread is not None:
+            self._shutdown_thread.join()
+        return list(self._shutdown_errors)
 
     def _message_received(
         self,
@@ -682,12 +930,24 @@ class DesktopBridge:
         if not isinstance(message, dict):
             return
         action = str(message.get("action", ""))
+        if self._closed:
+            if action == "window_action" and message.get("name") == "close":
+                self.window.close()
+            return
         if action in {"page_ready", "select_model"}:
-            next_model_key = str(message.get("model", self.model_key))
-            if next_model_key != self.model_key or action == "page_ready":
-                self._telemetry_epoch += 1
-            self.model_key = next_model_key
-            self._schedule_model_info(self.model_key)
+            self._ensure_catalogue_state()
+            with self._catalogue_lock:
+                next_model_key = str(message.get("model", self.model_key))
+                if self._profile_for(next_model_key) is None:
+                    if action == "select_model":
+                        self._schedule_catalogue()
+                        return
+                    next_model_key = next(iter(self.profile_by_model_key), "")
+                if next_model_key != self.model_key or action == "page_ready":
+                    self._telemetry_epoch += 1
+                self.model_key = next_model_key
+                if self.model_key:
+                    self._schedule_model_info(self.model_key)
             if action == "page_ready":
                 self._schedule_catalogue()
                 GLib.idle_add(self._start_polling)
@@ -696,7 +956,23 @@ class DesktopBridge:
             self._schedule_model_info(str(message.get("model", "")))
             return
         if action == "add_model":
-            GLib.idle_add(self._choose_model_file)
+            GLib.idle_add(self._choose_model_folder, str(message.get("scan_id") or uuid.uuid4().hex))
+            return
+        if action == "cancel_model_import":
+            self._cancel_model_import(str(message.get("scan_id", "")))
+            return
+        if action == "import_models":
+            threading.Thread(target=self._import_selected_models,
+                             args=(str(message.get("scan_id", "")), message.get("model_ids", [])),
+                             name="siphon-folder-import", daemon=True).start()
+            return
+        if action == "remove_model":
+            threading.Thread(
+                target=self._remove_model,
+                args=(str(message.get("model", "")), str(message.get("removal_id", ""))),
+                name="siphon-model-removal",
+                daemon=True,
+            ).start()
             return
         if action in {"start_model", "stop_model"}:
             self.model_key = str(message.get("model", self.model_key))
@@ -732,8 +1008,360 @@ class DesktopBridge:
         if action == "pause_telemetry":
             self._poll_paused = bool(message.get("paused", False))
             return
+        if action.startswith("api_"):
+            self._api_message(action, message)
+            return
         if action == "window_action":
             self._window_action(str(message.get("name", "")))
+
+    # -- local API: scoped keys + the 127.0.0.1 gateway (siphon.api) ----------------------------
+    def _api_init(self) -> None:
+        from ..api import gateway as api_gateway
+        from ..api.keys import KeyStore
+        self._api_port = api_gateway.default_port()
+        self._api_keys = KeyStore()
+        self._api_server: Any = None
+        self._api_error = ""
+        self._api_busy = ""
+        self._api_busy_mode = ""
+        self._api_lock = threading.Lock()
+        self._api_trying: set[str] = set()
+        try:
+            self._api_server = api_gateway.Gateway(self._api_port, keys=self._api_keys)
+        except OSError as exc:
+            # another Studio or `siphon api serve` may already own the port; that one serves the same keys
+            if not self._api_external():
+                self._api_error = f"cannot listen on 127.0.0.1:{self._api_port}: {exc.strerror or exc}"
+            return
+        threading.Thread(target=self._api_server.serve_forever, name="siphon-api", daemon=True).start()
+
+    def _api_external(self) -> bool:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self._api_port}/health", timeout=1) as response:
+                return response.headers.get("Server", "").startswith("siphon-api")
+        except (OSError, ValueError):
+            return False
+
+    def _api_stop(self) -> None:
+        server, self._api_server = getattr(self, "_api_server", None), None
+        if server is not None:
+            threading.Thread(target=server.shutdown, name="siphon-api-stop", daemon=True).start()
+            server.keys.flush()
+
+    def _api_engines(self) -> dict[str, str | None]:
+        """Profiles for the selected model: decode (its catalogue profile), decision-only, and decode+decision."""
+        from ..api.gateway import backend_for
+        engines: dict[str, str | None] = {"decode": None, "decision": None, "both": None}
+        current = self._profile_for(self.model_key)
+        if current is None or not current.resolve("MODEL"):
+            return engines
+        model = str(Path(current.resolve("MODEL")).resolve())
+        engines["decode"] = current.name
+        for profile in sorted(discover().values(), key=lambda p: p.name):
+            if not profile.resolve("MODEL") or str(Path(profile.resolve("MODEL")).resolve()) != model:
+                continue
+            backend = backend_for(profile)
+            mode = "both" if backend.decode and backend.decision else "decision" if backend.decision else ""
+            if mode and engines[mode] is None:
+                engines[mode] = profile.name
+        if engines["decision"] is None:
+            engines["both"] = None          # decisions are not set up for this model
+        elif engines["both"] is None:
+            engines["both"] = f"{current.name}-decide"
+        return engines
+
+    # Combined process = the Decode settings + a decision context. The expert cache is capped because the
+    # decision compute buffer and the preloaded kernels must fit next to it (2816 MiB OOMs on a 6 GB GPU).
+    _COMBINED_GPU_CACHE_MAX_MIB = 2560
+    _DECISION_DEFAULTS = {"MOE_GPU_CACHE_MIB": "3456", "MOE_PINNED_CACHE_MIB": "5632", "LLAMA_ARG_DECISION_CTX": "512"}
+
+    def _api_sync_combined(self, engines: dict[str, str | None]) -> Profile | None:
+        decode = discover().get(engines.get("decode") or "")
+        decision = discover().get(engines.get("decision") or "")
+        if decode is None or decision is None or not engines.get("both"):
+            return None
+        env = {k: v for k, v in decode.env.items() if not k.startswith("CPU_")}
+        try:
+            gpu_cache = int(env.get("MOE_GPU_CACHE_MIB", "2816"))
+        except ValueError:
+            gpu_cache = self._COMBINED_GPU_CACHE_MAX_MIB
+        env.update({
+            "ALIAS": env.get("ALIAS", decode.name),
+            "SIPHON_EXECUTION_MODE": "gpu",
+            "MOE_GPU_CACHE_MIB": str(min(gpu_cache, self._COMBINED_GPU_CACHE_MAX_MIB)),
+            "LLAMA_ARG_DECISION_CTX": decision.env.get("LLAMA_ARG_DECISION_CTX", "512"),
+            "LLAMA_ARG_DECISION_UBATCH": decision.env.get("LLAMA_ARG_DECISION_UBATCH", "128"),
+            "LLAMA_ARG_DECISION_CHUNK": decision.env.get("LLAMA_ARG_DECISION_CHUNK", "24"),
+            "GGML_CUDA_PRELOAD_MMQ": "1",
+        })
+        if decision.env.get("SIPHON_SERVER_BIN"):
+            env["SIPHON_SERVER_BIN"] = decision.env["SIPHON_SERVER_BIN"]
+        env.pop("LLAMA_ARG_DECISION_ONLY", None)
+        # Whole-layer prefill ubatches need a larger compute buffer than fits next to the decision context, so the
+        # combined process keeps the clamped prefill and the ubatch of at most 128 tokens it was sized with.
+        if env.pop("MOE_FULL_LAYER_UBATCH", "0") == "1":
+            try:
+                env["UBATCH"] = str(min(int(env.get("UBATCH", "128")), 128))
+            except ValueError:
+                env["UBATCH"] = "128"
+        profile = Profile.create_app(engines["both"], env, script=decode.script_rel)
+        profile.save()
+        return profile
+
+    def _api_decision_settings(self, engines: dict[str, str | None]) -> dict[str, Any] | None:
+        profile = discover().get(engines.get("decision") or "")
+        if profile is None:
+            return None
+        values = {key: profile.env.get(key, default) for key, default in self._DECISION_DEFAULTS.items()}
+        return {"profile": profile.name, "vram_mib": int(values["MOE_GPU_CACHE_MIB"]),
+                "ram_mib": int(values["MOE_PINNED_CACHE_MIB"]), "ctx": int(values["LLAMA_ARG_DECISION_CTX"]),
+                "defaults": {"vram_mib": 3456, "ram_mib": 5632, "ctx": 512},
+                "combined_gpu_cache_max_mib": self._COMBINED_GPU_CACHE_MAX_MIB}
+
+    def _api_save_decision_settings(self, values: Any) -> None:
+        engines = self._api_engines()
+        profile = discover().get(engines.get("decision") or "")
+        if profile is None or not isinstance(values, dict):
+            self._emit_async({"type": "api_error", "message": "Decisions are not set up for this model."})
+            return
+        try:
+            vram, ram, ctx = int(values.get("vram_mib")), int(values.get("ram_mib")), int(values.get("ctx"))
+        except (TypeError, ValueError):
+            self._emit_async({"type": "api_error", "message": "Decision settings must be whole numbers."})
+            return
+        problems = []
+        if not 1024 <= vram <= 3456:
+            problems.append("GPU memory must be 1024-3456 MiB (more runs out of GPU memory)")
+        if not 1024 <= ram <= 8192:
+            problems.append("RAM must be 1024-8192 MiB")
+        if ctx not in (256, 512, 1024):
+            problems.append("longest request must be 256, 512 or 1024 tokens")
+        if problems:
+            message = "; ".join(problems)
+            self._emit_async({"type": "api_error", "message": message[0].upper() + message[1:] + "."})
+            return
+        profile.env.update({"MOE_GPU_CACHE_MIB": str(vram), "MOE_PINNED_CACHE_MIB": str(ram),
+                            "LLAMA_ARG_DECISION_CTX": str(ctx)})
+        profile.save()
+        self._emit_async({"type": "api_decision_saved"})
+        self._emit_async(self._api_state())
+
+    def _api_state(self) -> dict[str, Any]:
+        running = None
+        try:
+            from ..api.gateway import backend_for
+            profiles = runner.running_profiles()
+            if profiles:
+                backend = backend_for(profiles[0])
+                health = fetch_health(profiles[0].base_url, timeout=1.0)
+                running = {"profile": backend.profile, "mode": backend.mode, "model": backend.alias,
+                           "ready": health.ok}
+        except Exception:
+            pass
+        gateway = "running" if self._api_server is not None else "error" if self._api_error else "external"
+        engines = self._api_engines()
+        decode_profile = discover().get(engines.get("decode") or "")
+        return {
+            "type": "api_state",
+            "endpoint": f"http://127.0.0.1:{self._api_port}",
+            "gateway": gateway,
+            "error": self._api_error,
+            "running": running,
+            "engines": engines,
+            "model": decode_profile.env.get("ALIAS", decode_profile.name) if decode_profile else None,
+            "decision": self._api_decision_settings(engines),
+            "busy": self._api_busy,
+            "busy_mode": self._api_busy_mode,
+            "keys": {scope: record.public(with_key=True) for scope, record in self._api_keys.all().items()},
+            "key_file": self._api_key_file(),
+            "apps": api_connect.status(),
+            "activity": self._api_server.activity.snapshot() if self._api_server is not None else None,
+            "trying": sorted(self._api_trying),
+        }
+
+    def _api_key_file(self) -> str:
+        path, home = str(self._api_keys.path), str(Path.home())
+        return "~" + path[len(home):] if path.startswith(home + os.sep) else path
+
+    def _api_connect_target(self) -> "api_connect.Target":
+        """What connected apps should point at: the gateway, the decode key, and the decode model's alias."""
+        profile = discover().get(self._api_engines().get("decode") or "")
+        model, context = "siphon", 65536
+        if profile is not None:
+            model = profile.env.get("ALIAS", profile.name)
+            try:
+                context = int(profile.env.get("CTX", context))
+            except ValueError:
+                pass
+        return api_connect.Target(endpoint=f"http://127.0.0.1:{self._api_port}",
+                                  key=self._api_keys.get("decode").key, model=model, context=context)
+
+    def _api_connect_app(self, app_id: str, connect: bool) -> None:
+        try:
+            if connect:
+                api_connect.connect(app_id, self._api_connect_target())
+                self._emit_async({"type": "api_notice", "message": f"{api_connect.APPS[app_id]['name']} CONNECTED"})
+            else:
+                api_connect.disconnect(app_id)
+                self._emit_async({"type": "api_notice", "message": f"{api_connect.APPS[app_id]['name']} DISCONNECTED"})
+        except (api_connect.ConnectError, OSError) as exc:
+            self._emit_async({"type": "api_error", "message": str(exc)})
+        self._emit_async(self._api_state())
+
+    def _api_emit_state(self) -> None:
+        threading.Thread(target=lambda: self._emit_async(self._api_state()),
+                         name="siphon-api-state", daemon=True).start()
+
+    def _api_message(self, action: str, message: dict[str, Any]) -> None:
+        if action == "api_state":
+            self._api_emit_state()
+        elif action == "api_regenerate_key":
+            try:
+                self._api_keys.regenerate(str(message.get("scope", "")))
+            except ValueError as exc:
+                self._emit_event({"type": "api_error", "message": str(exc)})
+                return
+            notice = "NEW KEY CREATED · UPDATE YOUR APPS"
+            if message.get("scope") == "decode":
+                try:
+                    target = self._api_connect_target()
+                    if api_connect.refresh(target.key, target):
+                        notice = "NEW KEY CREATED · CONNECTED APPS UPDATED · UPDATE ANY OTHER APPS"
+                except (api_connect.ConnectError, OSError) as exc:
+                    self._emit_event({"type": "api_error", "message": f"Could not update connected apps: {exc}"})
+            self._emit_event({"type": "api_notice", "message": notice})
+            self._api_emit_state()
+        elif action in {"api_copy", "api_copy_key"}:
+            text = str(message.get("text", ""))
+            if action == "api_copy_key":
+                try:
+                    text = self._api_keys.get(str(message.get("scope", ""))).key
+                except ValueError:
+                    return
+            display = Gdk.Display.get_default()
+            if display is not None:
+                display.get_clipboard().set_content(Gdk.ContentProvider.new_for_value(text))
+        elif action == "api_try":
+            scope = str(message.get("scope", ""))
+            with self._api_lock:
+                if scope not in {"decode", "decision"} or scope in self._api_trying:
+                    return
+                self._api_trying.add(scope)
+            threading.Thread(target=self._api_try, args=(scope, message.get("request")),
+                             name="siphon-api-try", daemon=True).start()
+        elif action in {"api_connect_app", "api_disconnect_app"}:
+            threading.Thread(target=self._api_connect_app,
+                             args=(str(message.get("app", "")), action == "api_connect_app"),
+                             name="siphon-api-connect", daemon=True).start()
+        elif action == "api_engine":
+            self._api_switch_engine(str(message.get("mode", "")))
+        elif action == "api_decision_settings":
+            threading.Thread(target=self._api_save_decision_settings, args=(message.get("settings"),),
+                             name="siphon-api-settings", daemon=True).start()
+
+    def _api_try(self, scope: str, request: Any) -> None:
+        """Send one request through the gateway with the path's own key (API tab test console / playground)."""
+        request = request if isinstance(request, dict) else {}
+        if scope == "decode":
+            text = str(request.get("text") or "").strip()[:2000] or "Say hello in five words."
+            route = "/v1/chat/completions"
+            body: dict[str, Any] = {"messages": [{"role": "user", "content": text}], "max_tokens": 96,
+                                    "stream": False, "chat_template_kwargs": {"enable_thinking": False}}
+        else:
+            route = "/v1/decide"
+            body = {k: request[k] for k in ("input", "question", "options", "context", "threshold") if k in request}
+        event: dict[str, Any] = {"type": "api_try_result", "scope": scope, "route": route}
+        t0 = time.perf_counter()
+        try:
+            key = self._api_keys.get(scope).key
+            http_request = urllib.request.Request(
+                f"http://127.0.0.1:{self._api_port}{route}", json.dumps(body).encode(),
+                {"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(http_request, timeout=900) as response:
+                    status, data = response.status, json.loads(response.read() or b"{}")
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                try:
+                    data = json.loads(exc.read() or b"{}")
+                except ValueError:
+                    data = {}
+            event.update(status=status, ok=200 <= status < 300, ms=(time.perf_counter() - t0) * 1000)
+            if not event["ok"]:
+                error = data.get("error") if isinstance(data, dict) else None
+                event["error"] = (error.get("message") if isinstance(error, dict) else str(error or "")) or f"HTTP {status}"
+            elif scope == "decode":
+                choice = (data.get("choices") or [{}])[0].get("message") or {}
+                usage, timings = data.get("usage") or {}, data.get("timings") or {}
+                event["result"] = {"reply": str(choice.get("content") or "").strip(),
+                                   "completion_tokens": usage.get("completion_tokens"),
+                                   "prompt_tokens": usage.get("prompt_tokens"),
+                                   "tokens_per_second": timings.get("predicted_per_second"),
+                                   "model": data.get("model")}
+            else:
+                event["result"] = data
+        except (urllib.error.URLError, OSError) as exc:
+            event.update(status=0, ok=False, ms=(time.perf_counter() - t0) * 1000,
+                         error=f"gateway unreachable: {getattr(exc, 'reason', exc)}")
+        except Exception as exc:    # malformed reply: report it instead of leaving the button spinning
+            event.update(status=0, ok=False, ms=(time.perf_counter() - t0) * 1000, error=f"unexpected reply: {exc}")
+        finally:
+            with self._api_lock:
+                self._api_trying.discard(scope)
+        self._emit_async(event)
+        self._emit_async(self._api_state())
+
+    def _api_switch_engine(self, mode: str) -> None:
+        """Run exactly one engine profile for the selected model (or none for mode 'stop')."""
+        self._ensure_shutdown_state()
+        engines = self._api_engines()
+        if mode != "stop" and not engines.get(mode):
+            self._emit_event({"type": "api_error", "message": f"No {mode} profile is configured for this model."})
+            return
+        with self._api_lock:
+            if self._api_busy:
+                return
+            labels = {"decode": "decode", "decision": "decision", "both": "decode + decision", "stop": ""}
+            self._api_busy = f"Starting {labels.get(mode, mode)} engine…" if mode != "stop" else "Stopping engine…"
+            self._api_busy_mode = mode
+        self._api_emit_state()
+
+        def work() -> None:
+            ok, note = True, ""
+            try:
+                if mode == "both":
+                    target = self._api_sync_combined(engines)
+                else:
+                    target = self.profiles.get(engines.get(mode) or "") or discover().get(engines.get(mode) or "")
+                with self._launch_lock:
+                    if self._shutdown_event.is_set():
+                        return
+                    for profile in runner.running_profiles():
+                        if target is None or profile.name != target.name:
+                            runner.down(profile, force=True)
+                    if target is not None:
+                        offset = _file_size(target.log_file)
+                        ok, note = runner.up(target)
+                if ok and target is not None:
+                    healthy = runner.wait_healthy(target, timeout=600.0, interval=1.0,
+                                                  cancel_event=self._shutdown_event)
+                    failure = _startup_log_error(target.log_file, offset)
+                    if not healthy or failure:
+                        ok, note = False, failure or "engine did not become healthy"
+                        runner.down(target, force=True)
+            except Exception as exc:
+                ok, note = False, f"Engine switch failed: {exc}"
+            finally:
+                with self._api_lock:
+                    self._api_busy = ""
+                    self._api_busy_mode = ""
+            if self._shutdown_event.is_set():
+                return
+            if not ok:
+                self._emit_async({"type": "api_error", "message": note})
+            self._emit_async(self._api_state())
+
+        threading.Thread(target=work, name="siphon-api-engine", daemon=True).start()
 
     def _window_action(self, name: str) -> None:
         if name == "minimize":
@@ -747,72 +1375,265 @@ class DesktopBridge:
             self.window.close()
 
     def _profile_for(self, model_key: str) -> Profile | None:
-        profile_name = self.profile_by_model_key.get(model_key)
-        if not profile_name:
-            return None
-        return self.profiles.get(profile_name)
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            if model_key in self._excluded_model_keys:
+                return None
+            profile_name = self.profile_by_model_key.get(model_key)
+            if not profile_name:
+                return None
+            return self.profiles.get(profile_name)
+
+    def _ensure_catalogue_state(self) -> None:
+        """Supply catalogue state for older tests and bridge instances made via __new__."""
+        self._ensure_shutdown_state()
+        if not hasattr(self, "_catalogue_lock"):
+            self._catalogue_lock = threading.RLock()
+        if not hasattr(self, "_excluded_model_keys"):
+            self._excluded_model_keys = set()
+        if not hasattr(self, "_all_profile_by_model_key"):
+            self._all_profile_by_model_key = dict(self.profile_by_model_key)
+        if not hasattr(self, "_registration_generations"):
+            self._registration_generations = {}
+        if not hasattr(self, "_starting_models"):
+            self._starting_models = set()
+        if not hasattr(self, "_stopping_models"):
+            self._stopping_models = set()
+
+    def _visible_profiles(self) -> list[Profile]:
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            return [
+                self.profiles[profile_name]
+                for model_key, profile_name in self.profile_by_model_key.items()
+                if model_key not in self._excluded_model_keys
+                and profile_name in self.profiles
+            ]
+
+    def _catalogue_totals(self) -> tuple[int, float]:
+        profiles = self._visible_profiles()
+        available_paths: set[str] = set()
+        model_parts: set[Path] = set()
+        for profile in profiles:
+            try:
+                parts = _profile_model_parts(profile)
+                model_parts.update(path.resolve() for path in parts if path.is_file())
+                if _profile_model_available(profile):
+                    available_paths.add(str(Path(profile.resolve("MODEL")).resolve()))
+            except (OSError, ValueError):
+                continue
+        storage_bytes = 0
+        for path in model_parts:
+            try:
+                storage_bytes += path.stat().st_size
+            except OSError:
+                continue
+        return len(available_paths), round(storage_bytes / (1024 ** 3), 2)
+
+    def _remove_model(self, model_key: str, removal_id: str) -> None:
+        self._ensure_catalogue_state()
+        result = {
+            "type": "model_removed",
+            "model_key": model_key,
+            "removal_id": removal_id,
+            "ok": False,
+            "message": "",
+        }
+        with self._catalogue_lock:
+            profile = self._profile_for(model_key)
+            if profile is None:
+                result["message"] = f"No registered model matches {model_key}."
+            elif profile.name in self._starting_models:
+                result["message"] = "Wait for the model to finish starting before removing it."
+            elif profile.name in self._stopping_models:
+                result["message"] = "Wait for the model to finish stopping before removing it."
+            else:
+                try:
+                    status = runner.status(profile, include_metrics=False)
+                    if getattr(status, "running", False):
+                        result["message"] = "Stop the model before removing it."
+                    else:
+                        exclusions = set(self._excluded_model_keys)
+                        exclusions.add(model_key)
+                        save_excluded_model_keys(exclusions)
+                        self._excluded_model_keys = exclusions
+                        self.profile_by_model_key.pop(model_key, None)
+                        self._registration_generations[model_key] = (
+                            self._registration_generations.get(model_key, 0) + 1
+                        )
+                        self._telemetry_epoch = getattr(self, "_telemetry_epoch", 0) + 1
+                        result.update(ok=True, message="Model removed from Studio.")
+                except Exception as exc:
+                    result["message"] = f"Could not remove model: {exc}"
+
+            self._emit_async(result)
+            if result["ok"]:
+                self._schedule_catalogue()
 
     def _schedule_catalogue(self) -> None:
-        entries = [
-            {"model_key": key, "profile": name}
-            for key, name in self.profile_by_model_key.items()
-            if name in self.profiles and self.profiles[name].resolve("MODEL")
-        ]
-        self._emit_async({"type": "catalogue", "models": entries})
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            entries = [
+                {"model_key": key, "profile": name,
+                 "available": _profile_model_available(self.profiles[name])}
+                for key, name in list(self.profile_by_model_key.items())
+                if key not in self._excluded_model_keys
+                and name in self.profiles and self.profiles[name].resolve("MODEL")
+            ]
+            library_count, library_storage_gib = self._catalogue_totals()
+            self._emit_async({
+                "type": "catalogue",
+                "models": entries,
+                "library_count": library_count,
+                "library_storage_gib": library_storage_gib,
+            })
 
-    def _choose_model_file(self) -> bool:
+    def _choose_model_folder(self, scan_id: str) -> bool:
         # Gtk.FileChooserNative on some Ubuntu GTK 4 builds corrupts its
         # internal file-system model when opened from a WebKit-hosted app and
         # ends in repeated GTK_IS_FILE_SYSTEM_MODEL assertions followed by a
         # segfault. Gtk.FileDialog is the supported GTK 4 asynchronous API and
         # keeps the chooser owned by the application for the whole operation.
         dialog = Gtk.FileDialog.new()
-        dialog.set_title("Add a GGUF model")
+        dialog.set_title("Add a model folder")
+        with self._import_lock:
+            self._import_scan_id = scan_id
+            self._import_candidates = {}
 
         def responded(file_dialog: Gtk.FileDialog, result: Any, _data: Any) -> None:
             try:
-                selected = file_dialog.open_finish(result)
+                selected = file_dialog.select_folder_finish(result)
                 selected_path = selected.get_path() if selected else None
                 if selected_path:
                     threading.Thread(
-                        target=self._import_model,
-                        args=(Path(selected_path),),
+                        target=self._scan_model_folder,
+                        args=(Path(selected_path), scan_id),
                         name="siphon-model-import",
                         daemon=True,
                     ).start()
+                else:
+                    self._finish_folder_scan(scan_id, "", [], "Choose a folder on the local filesystem.")
             except GLib.Error as exc:
                 # Cancellation is normal; other chooser errors should be
                 # reported in the UI rather than terminating the desktop host.
-                if "cancel" not in str(exc).lower():
-                    self._emit_async({"type": "model_imported", "ok": False,
-                                      "message": f"Could not open model chooser: {exc}"})
+                if "cancel" in str(exc).lower() or "dismiss" in str(exc).lower():
+                    self._cancel_model_import(scan_id)
+                else:
+                    self._finish_folder_scan(scan_id, "", [], f"Could not open folder chooser: {exc}")
 
-        dialog.open(self.window, None, responded, None)
+        dialog.select_folder(self.window, None, responded, None)
         return GLib.SOURCE_REMOVE
 
-    def _import_model(self, model_path: Path) -> None:
+    def _cancel_model_import(self, scan_id: str) -> None:
+        with self._import_lock:
+            if scan_id != self._import_scan_id:
+                return
+            self._import_scan_id = ""
+            self._import_candidates = {}
+        self._emit_async({"type": "model_folder_scan", "scan_id": scan_id,
+                          "phase": "cancelled", "models": []})
+
+    def _scan_model_folder(self, folder: Path, scan_id: str) -> None:
+        with self._import_lock:
+            if scan_id != self._import_scan_id or self._closed:
+                return
+        self._emit_async({"type": "model_folder_scan", "scan_id": scan_id,
+                          "phase": "scanning", "folder": str(folder), "models": []})
+        try:
+            candidates = scan_model_folder(folder)
+            self._finish_folder_scan(scan_id, str(folder), candidates)
+        except Exception as exc:
+            self._finish_folder_scan(scan_id, str(folder), [], f"Could not scan folder: {exc}")
+
+    def _finish_folder_scan(self, scan_id: str, folder: str,
+                            candidates: list[dict[str, Any]], error: str = "") -> None:
+        with self._import_lock:
+            if scan_id != self._import_scan_id or self._closed:
+                return
+            for entry in candidates:
+                if entry.get("available"):
+                    try:
+                        entry["fingerprint"] = model_fingerprint([Path(p) for p in entry["parts"]])
+                    except (OSError, ValueError) as exc:
+                        entry.update(available=False, error=f"Files changed during scan: {exc}")
+            self._import_candidates = {entry["id"]: entry for entry in candidates}
+            self._emit_async({"type": "model_folder_scan", "scan_id": scan_id,
+                              "phase": "error" if error else "ready", "folder": folder,
+                              "models": candidates, "message": error})
+
+    def _import_selected_models(self, scan_id: str, model_ids: Any) -> None:
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            self._import_selected_models_locked(scan_id, model_ids)
+
+    def _import_selected_models_locked(self, scan_id: str, model_ids: Any) -> None:
+        results = []
+        with self._import_lock:
+            if scan_id != self._import_scan_id or not scan_id:
+                results.append({"ok": False, "message": "Folder scan expired; choose the folder again."})
+            elif not isinstance(model_ids, list) or not model_ids:
+                results.append({"ok": False, "message": "Select at least one model."})
+            else:
+                for model_id in dict.fromkeys(str(value) for value in model_ids):
+                    candidate = self._import_candidates.get(model_id)
+                    if not candidate or not candidate.get("available"):
+                        results.append({"id": model_id, "ok": False,
+                                        "message": "This model is not a valid selection from the current scan."})
+                        continue
+                    try:
+                        fingerprint = model_fingerprint([Path(p) for p in candidate["parts"]])
+                        if candidate.get("fingerprint", fingerprint) != fingerprint:
+                            raise ValueError("Model files changed after the preview; scan the folder again.")
+                    except (OSError, ValueError) as exc:
+                        results.append({"id": model_id, "ok": False, "message": str(exc)})
+                        continue
+                    result = self._import_model(Path(candidate["path"]), emit=False)
+                    results.append({"id": model_id, **result})
+                self._schedule_catalogue()
+            self._emit_async({"type": "model_folder_imported", "scan_id": scan_id,
+                              "results": results,
+                              "message": f"{sum(bool(r['ok']) for r in results)} model(s) added or already registered."})
+
+    def _import_model(self, model_path: Path, *, emit: bool = True) -> dict[str, Any]:
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            return self._import_model_locked(model_path, emit=emit)
+
+    def _import_model_locked(self, model_path: Path, *, emit: bool = True) -> dict[str, Any]:
+        def finished(result: dict[str, Any]) -> dict[str, Any]:
+            if emit:
+                self._emit_async({"type": "model_imported", **result})
+                if result.get("ok"):
+                    self._schedule_catalogue()
+            return result
+
         if model_path.suffix.lower() != ".gguf" or not model_path.is_file():
-            self._emit_async({"type": "model_imported", "ok": False,
-                              "message": "Select a readable .gguf model file."})
-            return
+            return finished({"ok": False, "message": "Model file is missing or unreadable."})
         try:
             canonical_path = model_path.resolve()
-            for existing_key, profile_name in self.profile_by_model_key.items():
+            fingerprint = model_fingerprint(model_part_paths(canonical_path))
+            metadata = inspect_model_files(canonical_path)
+            if fingerprint != model_fingerprint([Path(p) for p in metadata["parts"]]):
+                raise ValueError("Model files changed while importing; scan the folder again.")
+            canonical_path = Path(metadata["parts"][0])
+            full_profile_map = dict(self._all_profile_by_model_key)
+            full_profile_map.update(self.profile_by_model_key)
+            for existing_key, profile_name in full_profile_map.items():
                 existing = self.profiles.get(profile_name)
                 if existing and Path(existing.resolve("MODEL")).resolve() == canonical_path:
-                    self._emit_async({"type": "model_imported", "ok": True,
-                                      "model_key": existing_key,
-                                      "message": "That model is already in the catalogue."})
-                    return
-            from gguf.gguf_reader import GGUFReader
-            reader = GGUFReader(model_path)
-            architecture = str(_model_field(reader, "general.architecture", ""))
-            if not architecture:
-                raise ValueError("The GGUF does not declare general.architecture")
-            native_context = int(_model_field(reader, f"{architecture}.context_length", 32768) or 32768)
-            expert_count = int(_model_field(reader, f"{architecture}.expert_count", 0) or 0)
-            expert_used = int(_model_field(reader, f"{architecture}.expert_used_count", 0) or 0)
-            display_name = str(_model_field(reader, "general.name", model_path.stem))
+                    if existing_key in self._excluded_model_keys:
+                        exclusions = set(self._excluded_model_keys)
+                        exclusions.discard(existing_key)
+                        save_excluded_model_keys(exclusions)
+                        self._excluded_model_keys = exclusions
+                    self._all_profile_by_model_key[existing_key] = profile_name
+                    self.profile_by_model_key[existing_key] = profile_name
+                    return finished({"ok": True, "model_key": existing_key,
+                                     "message": "That model is registered again; saved settings preserved."})
+            native_context = int(metadata["native_context"] or 32768)
+            expert_count = metadata["expert_count"]
+            expert_used = metadata["expert_used_count"]
+            display_name = metadata["name"]
             if expert_count <= 0 or expert_used <= 0:
                 raise ValueError(
                     f"{display_name} does not expose valid routed-MoE expert_count "
@@ -822,7 +1643,9 @@ class DesktopBridge:
             resources = _resource_state(system)
             profile_name = f"imported-{hashlib.sha256(str(canonical_path).encode()).hexdigest()[:12]}"
             used_ports = {p.port for p in self.profiles.values()}
-            port = next((candidate for candidate in range(8090, 8190) if candidate not in used_ports), 8190)
+            port = next((candidate for candidate in range(8090, 65536) if candidate not in used_ports), None)
+            if port is None:
+                raise ValueError("No unused model-server port is available.")
             ram_safe, vram_safe = int(resources["ram_safe_mib"]), int(resources["vram_safe_mib"])
             prompt_mib = min(2048, max(0, ram_safe // 4))
             pinned_mib = min(8192, max(0, ram_safe - prompt_mib))
@@ -849,38 +1672,51 @@ class DesktopBridge:
                 "METRICS": "1", "N_PARALLEL": "1", "REASONING": "off",
                 "REASONING_FORMAT": "deepseek", "REASONING_BUDGET": "0",
                 "SIPHON_TEMPERATURE": "0.70", "SIPHON_TOP_K": "40", "SIPHON_TOP_P": "0.95",
-            }).save()
-            self.profiles[profile.name] = profile
+            })
+            profile.model_files = metadata["parts"]
+            profile.model_folder = str(canonical_path.parent)
+            profile.save()
             model_key = _model_key_for_profile(profile)
+            if model_key in self._excluded_model_keys:
+                exclusions = set(self._excluded_model_keys)
+                exclusions.discard(model_key)
+                save_excluded_model_keys(exclusions)
+                self._excluded_model_keys = exclusions
+            _write_metadata_cache({"path": str(canonical_path), **metadata, "fingerprint": fingerprint})
+            self.profiles[profile.name] = profile
+            self._all_profile_by_model_key[model_key] = profile.name
             self.profile_by_model_key[model_key] = profile.name
+            if not hasattr(self, "_log_offsets"):
+                self._log_offsets = {}
             self._log_offsets[profile.name] = _file_size(profile.log_file)
-            self._schedule_catalogue()
-            self._emit_async({"type": "model_imported", "ok": True, "model_key": model_key,
-                              "message": f"Added {display_name}"})
             self._schedule_model_info(model_key)
+            return finished({"ok": True, "model_key": model_key,
+                             "message": f"Added {display_name} ({metadata['part_count']} part(s)); runtime compatibility checked at startup."})
         except Exception as exc:
-            self._emit_async({"type": "model_imported", "ok": False,
-                              "message": f"Could not add model: {exc}"})
+            return finished({"ok": False, "message": f"Could not add model: {exc}"})
 
     def _schedule_model_info(self, model_key: str) -> None:
-        profile = self._profile_for(model_key)
-        if profile is None:
-            self._emit_async({"type": "model_info", "model_key": model_key, "available": False})
-            return
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            if model_key in self._excluded_model_keys:
+                return
+            profile = self._profile_for(model_key)
+            if profile is None:
+                self._emit_async({"type": "model_info", "model_key": model_key, "available": False})
+                return
+            registration_generation = self._registration_generations.get(model_key, 0)
 
-        # Apply the profile defaults immediately. GGUF tensor inspection can
-        # take noticeable time for multi-gigabyte models, but settings such as
-        # CTX=86016 must not wait for that metadata pass.
-        model_path = Path(profile.resolve("MODEL"))
-        self._emit_async({
-            "type": "model_info",
-            "phase": "profile",
-            "model_key": model_key,
-            "available": model_path.is_file(),
-            "profile": profile.name,
-            "path": str(model_path),
-            "config": _profile_config(profile),
-        })
+            # Apply profile defaults before doing potentially slow GGUF work.
+            model_path = Path(profile.resolve("MODEL"))
+            self._emit_async({
+                "type": "model_info",
+                "phase": "profile",
+                "model_key": model_key,
+                "available": _profile_model_available(profile),
+                "profile": profile.name,
+                "path": str(model_path),
+                "config": _profile_config(profile),
+            })
 
         def work() -> None:
             try:
@@ -894,36 +1730,42 @@ class DesktopBridge:
                     payload = _model_info(current_profile, model_key)
                     if payload.get("available") and not payload.get("metadata_error"):
                         _write_metadata_cache(payload)
-                model_paths = {
-                    Path(item.resolve("MODEL"))
-                    for item in self.profiles.values()
-                    if item.resolve("MODEL")
-                }
-                sizes = [
-                    path.stat().st_size for path in model_paths if path.is_file()
-                ]
-                payload["library_storage_gib"] = round(
-                    sum(sizes) / (1024 ** 3), 2
+                payload["library_count"], payload["library_storage_gib"] = (
+                    self._catalogue_totals()
                 )
-                payload["library_count"] = len(sizes)
                 # Re-read after the expensive scan too: settings may have
                 # been saved while GGUF metadata was being inspected.
                 latest_profile = self._profile_for(model_key) or current_profile
                 payload["config"] = _profile_config(latest_profile)
                 system = fetch_sys_stats()
-                payload["resources"] = _resource_state(system)
+                payload["memory_layout"] = _profile_memory_layout(latest_profile) or payload.get("memory_layout")
+                payload["resources"] = _resource_state(system, payload["config"], payload.get("memory_layout"),
+                                                       running=runner.status(latest_profile, include_metrics=False).running)
+                payload["memory_layout"] = payload["resources"]["memory_layout"]
                 payload["recommended"] = _recommended_settings(
-                    payload["config"], system
+                    payload["config"], system, payload.get("memory_layout")
                 )
             except Exception as exc:  # metadata must never block the desktop shell
                 payload = {"type": "model_info", "model_key": model_key,
                            "available": False, "metadata_error": str(exc)}
-            GLib.idle_add(self._finish_model_info, payload)
+            GLib.idle_add(self._finish_model_info, payload, registration_generation)
 
         threading.Thread(target=work, name="siphon-model-metadata", daemon=True).start()
 
-    def _finish_model_info(self, payload: dict[str, Any]) -> bool:
-        self._emit_event(payload)
+    def _finish_model_info(
+        self, payload: dict[str, Any], registration_generation: int | None = None
+    ) -> bool:
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            if payload.get("model_key") in self._excluded_model_keys:
+                return GLib.SOURCE_REMOVE
+            # Re-adding clears an exclusion, but does not make work from the
+            # previous registration current again.
+            if (registration_generation is not None and registration_generation !=
+                    self._registration_generations.get(payload.get("model_key"), 0)):
+                return GLib.SOURCE_REMOVE
+            payload["library_count"], payload["library_storage_gib"] = self._catalogue_totals()
+            self._emit_event(payload)
         return GLib.SOURCE_REMOVE
 
     def _apply_settings(self, model_key: str, values: Any) -> None:
@@ -936,8 +1778,54 @@ class DesktopBridge:
             })
             return
 
+        running = runner.status(profile, include_metrics=False).running
+        current_config = _profile_config(profile)
+        selected_mode = values.get("execution_mode", current_config["execution_mode"])
+        if selected_mode not in {"cpu", "gpu"}:
+            self._emit_async({"type": "settings_applied", "ok": False, "message": "Choose CPU or GPU execution."})
+            return
+        if running and selected_mode != current_config["execution_mode"]:
+            self._emit_async({"type": "settings_applied", "ok": False, "message": "Stop the model before changing execution mode."})
+            return
+        candidate = Profile(name=profile.name, env={**profile.env, "SIPHON_EXECUTION_MODE": selected_mode}, script=profile.script)
+        selected_config = _profile_config(candidate)
+        cpu_mode = selected_mode == "cpu"
+        cpu_keys = {"CTX", "BATCH", "UBATCH", "CACHE_TYPE", "CACHE_RAM_MIB", "SPEC_TYPE", "SPEC_DRAFT_N_MAX", "SPEC_DRAFT_P_MIN", "THREADS", "MODEL_DRAFT"}
+        def setting_key(key: str) -> str:
+            return "CPU_" + key if cpu_mode and key in cpu_keys else key
+        current_cache = {
+            "vram_cache": selected_config["l1_cache"],
+            "pinned_cache": selected_config["l2_cache"],
+            "cache_ram": selected_config["cache_ram"],
+        }
+        try:
+            requested_cache = {
+                name: max(0, int(values[name] if name in values else current))
+                for name, current in current_cache.items()
+            }
+            if cpu_mode:
+                requested_cache.update(vram_cache=0, pinned_cache=0)
+        except (TypeError, ValueError):
+            self._emit_async({
+                "type": "settings_applied",
+                "ok": False,
+                "message": "Memory allocations must be valid numbers.",
+            })
+            return
+        if running and requested_cache != current_cache:
+            self._emit_async({
+                "type": "settings_applied",
+                "ok": False,
+                "message": "Stop the model before changing memory allocations.",
+            })
+            return
+
         resources_ok, resource_message = _validate_resource_settings(
-            values, fetch_sys_stats()
+            {**selected_config, **values, **requested_cache, "execution_mode": selected_mode},
+            fetch_sys_stats(),
+            enforce_memory_capacity=not running,
+            memory_layout=_profile_memory_layout(profile, inspect=True),
+            require_model_budget=_profile_model_available(profile),
         )
         if not resources_ok:
             self._emit_async({
@@ -947,22 +1835,32 @@ class DesktopBridge:
             })
             return
 
+        # Work on a copy so a later validation/save failure cannot alter the
+        # in-memory profile or an unrelated execution mode.
+        original_profile = profile
+        profile = Profile(name=profile.name, env=dict(profile.env), script=profile.script,
+                          source=profile.source, path=profile.path,
+                          model_files=list(profile.model_files), model_folder=profile.model_folder)
+
         def int_setting(name: str, env_key: str, minimum: int = 0) -> None:
             raw = values.get(name)
             try:
                 value = max(minimum, int(raw))
             except (TypeError, ValueError):
                 return
-            profile.env[env_key] = str(value)
+            profile.env[setting_key(env_key)] = str(value)
 
         int_setting("context", "CTX", 1024)
         int_setting("batch", "BATCH", 1)
         int_setting("microbatch", "UBATCH", 1)
-        int_setting("gpu_layers", "GPU_LAYERS", 0)
-        int_setting("vram_cache", "MOE_GPU_CACHE_MIB", 0)
-        int_setting("pinned_cache", "MOE_PINNED_CACHE_MIB", 0)
+        if not cpu_mode:
+            int_setting("gpu_layers", "GPU_LAYERS", 0)
+            int_setting("vram_cache", "MOE_GPU_CACHE_MIB", 0)
+            int_setting("pinned_cache", "MOE_PINNED_CACHE_MIB", 0)
         int_setting("cache_ram", "CACHE_RAM_MIB", 0)
-        int_setting("gds_threads", "GDS_READ_THREADS", 1)
+        int_setting("cpu_threads", "THREADS", 1)
+        if not cpu_mode:
+            int_setting("gds_threads", "GDS_READ_THREADS", 1)
         int_setting("draft_tokens", "SPEC_DRAFT_N_MAX", 0)
         int_setting("checkpoints", "LLAMA_ARG_CTX_CHECKPOINTS", 0)
         int_setting("promotion_hits", "LLAMA_DSTORAGE_EVICT_TO_RAM_MIN_DECODE_HITS", 1)
@@ -971,7 +1869,7 @@ class DesktopBridge:
 
         cache_type = str(values.get("cache_type", "")).strip().lower()
         if cache_type in {"f32", "f16", "bf16", "q8_0", "q6_k", "q5_k", "q4_k", "q3_k", "tq1_0", "tq2_0", "tq3_0"}:
-            profile.env["CACHE_TYPE"] = cache_type
+            profile.env[setting_key("CACHE_TYPE")] = cache_type
         rope_scaling = str(values.get("rope_scaling", "auto")).strip().lower()
         if rope_scaling in {"auto", "none", "linear", "yarn"}:
             if rope_scaling == "auto":
@@ -983,14 +1881,14 @@ class DesktopBridge:
 
         spec_type = str(values.get("spec_type", "")).strip()
         if spec_type in {"draft-mtp", "draft-simple", "draft-dflash", "none", "off"}:
-            profile.env["SPEC_TYPE"] = spec_type
+            profile.env[setting_key("SPEC_TYPE")] = spec_type
         draft_model = str(values.get("draft_model", "")).strip()
         if draft_model in {"Native MTP / NextN", "Disabled", ""}:
-            profile.env.pop("MODEL_DRAFT", None)
+            profile.env.pop(setting_key("MODEL_DRAFT"), None)
             if draft_model == "Disabled":
-                profile.env["SPEC_TYPE"] = "none"
+                profile.env[setting_key("SPEC_TYPE")] = "none"
         elif draft_model == "Qwen3 0.6B Q8":
-            candidate = profile.env.get("MODEL_DRAFT", "")
+            candidate = profile.env.get(setting_key("MODEL_DRAFT"), "")
             if not candidate:
                 candidate = self.profiles.get("qwen3-coder-next-draft", profile).env.get("MODEL_DRAFT", "")
             candidate_path = Path(candidate)
@@ -1003,13 +1901,13 @@ class DesktopBridge:
                     "message": "The selected draft model is not available on this host.",
                 })
                 return
-            profile.env["MODEL_DRAFT"] = candidate
+            profile.env[setting_key("MODEL_DRAFT")] = candidate
         for name, env_key in (("draft_probability", "SPEC_DRAFT_P_MIN"),
                               ("temperature", "SIPHON_TEMPERATURE"),
                               ("top_p", "SIPHON_TOP_P")):
             raw = values.get(name)
             try:
-                profile.env[env_key] = str(float(raw))
+                profile.env[setting_key(env_key)] = str(float(raw))
             except (TypeError, ValueError):
                 pass
         try:
@@ -1017,7 +1915,7 @@ class DesktopBridge:
         except (TypeError, ValueError):
             pass
 
-        if "evict_to_ram" in values:
+        if "evict_to_ram" in values and not cpu_mode:
             profile.env["LLAMA_DSTORAGE_EVICT_TO_RAM"] = (
                 "1" if bool(values["evict_to_ram"]) else "0"
             )
@@ -1027,6 +1925,8 @@ class DesktopBridge:
             )
 
         try:
+            if "execution_mode" in values:
+                profile.env["SIPHON_EXECUTION_MODE"] = selected_mode
             if profile.is_bundled:
                 profile = Profile.create_app(
                     profile.name, profile.env, profile.script_rel
@@ -1037,7 +1937,7 @@ class DesktopBridge:
             profile.save()
             self.profiles[profile.name] = profile
             env_path = profile.materialize_env()
-            running = runner.status(profile).running
+            original_profile.env = dict(profile.env)
             self._sampling[model_key] = {
                 key: float(values[key])
                 for key in ("temperature", "top_p", "top_k")
@@ -1082,6 +1982,8 @@ class DesktopBridge:
         history: Any,
         generation_id: str,
     ) -> None:
+        if self._closed:
+            return
         profile = self._profile_for(model_key)
         if profile is None:
             self._emit_async({"type": "chat_error", "generation_id": generation_id,
@@ -1381,21 +2283,36 @@ class DesktopBridge:
         })
 
     def _run_model_action(self, starting: bool, model_key: str) -> None:
-        profile = self._profile_for(model_key)
-        if profile is None:
-            self._emit_event({
-                "type": "runtime_complete",
-                "starting": starting,
-                "ok": False,
-                "message": f"No launcher profile is configured for {model_key}.",
-            })
+        self._ensure_catalogue_state()
+        if getattr(self, "_closed", False):
             return
+        with self._catalogue_lock:
+            profile = self._profile_for(model_key)
+            if profile is None:
+                self._emit_event({
+                    "type": "runtime_complete",
+                    "starting": starting,
+                    "ok": False,
+                    "message": f"No launcher profile is configured for {model_key}.",
+                })
+                return
 
-        def work() -> None:
+            if starting:
+                # Reserve startup before spawning work so removal cannot race it.
+                self._starting_models.add(profile.name)
+            else:
+                self._stopping_models.add(profile.name)
+        launched = False
+
+        def run_action() -> None:
+            nonlocal launched
+            if self._shutdown_event.is_set():
+                return
             if starting:
                 config = _profile_config(profile)
                 resources_ok, resource_message = _validate_resource_settings(
-                    config, fetch_sys_stats()
+                    config, fetch_sys_stats(), memory_layout=_profile_memory_layout(profile, inspect=True),
+                    require_model_budget=_profile_model_available(profile),
                 )
                 if not resources_ok:
                     GLib.idle_add(
@@ -1403,11 +2320,11 @@ class DesktopBridge:
                         starting,
                         False,
                         resource_message,
+                        profile.name,
                     )
                     return
-                # Capture before launching: startup output remains visible to
-                # the log parser, while metrics from an earlier server run do
-                # not leak into this new model session.
+                # Keep startup output available for failure detection. Only
+                # output after the readiness probe belongs to user telemetry.
                 self._log_offsets[profile.name] = _file_size(profile.log_file)
                 self._request_metrics.pop(profile.name, None)
                 self._active_generations[profile.name] = False
@@ -1415,22 +2332,52 @@ class DesktopBridge:
                 self._live_timing_samples.pop(profile.name, None)
                 self._live_stream_metrics.pop(profile.name, None)
                 self._dstorage_rate_samples.pop(profile.name, None)
-                ok, message = runner.up(profile)
+                with self._launch_lock:
+                    if self._shutdown_event.is_set():
+                        return
+                    ok, message = runner.up(profile)
+                if self._shutdown_event.is_set():
+                    return
                 if ok:
-                    healthy = runner.wait_healthy(profile, timeout=600.0, interval=1.0)
+                    launched = True
+                    startup_timeout = 600.0
+                    healthy = runner.wait_healthy(
+                        profile, timeout=startup_timeout, interval=1.0,
+                        cancel_event=self._shutdown_event,
+                    )
+                    if self._shutdown_event.is_set():
+                        return
                     probe_error = _probe_inference(profile) if healthy else None
+                    if self._shutdown_event.is_set():
+                        return
                     startup_error = _startup_log_error(
                         profile.log_file, self._log_offsets[profile.name]
                     )
                     if healthy and probe_error is None and startup_error is None:
+                        _record_runtime_memory(profile, config, self._log_offsets[profile.name])
                         message = f"{message}; model health is ready"
                     else:
                         ok = False
-                        runner.down(profile, force=True)
                         failure = startup_error or probe_error
-                        message = (f"{message}; DirectStorage startup failed: {failure}"
-                                   if failure else
-                                   f"{message}; model did not become healthy within 10 minutes")
+                        still_running = (
+                            not healthy
+                            and failure is None
+                            and runner.status(profile, include_metrics=False).running
+                        )
+                        runner.down(profile, force=True)
+                        if failure:
+                            message = f"{message}; model startup failed: {failure}"
+                        elif still_running:
+                            timeout_minutes = int(startup_timeout // 60)
+                            message = (
+                                f"{message}; model did not become healthy within "
+                                f"{timeout_minutes} minutes"
+                            )
+                        else:
+                            message = (
+                                f"{message}; model process exited before becoming healthy"
+                            )
+                    self._log_offsets[profile.name] = _file_size(profile.log_file)
             else:
                 # A visible Stop action is an explicit user request; allow it
                 # to clean up a process even if /health has already degraded.
@@ -1440,23 +2387,58 @@ class DesktopBridge:
                 self._live_timing_samples.pop(profile.name, None)
                 self._live_stream_metrics.pop(profile.name, None)
                 self._dstorage_rate_samples.pop(profile.name, None)
-                ok, message = runner.down(profile, force=True)
+                with self._launch_lock:
+                    if self._shutdown_event.is_set():
+                        return
+                    ok, message = runner.down(profile, force=True)
             GLib.idle_add(
                 self._finish_model_action,
                 starting,
                 ok,
                 message,
+                profile.name,
             )
 
-        threading.Thread(target=work, name="siphon-model-action", daemon=True).start()
+        def work() -> None:
+            try:
+                run_action()
+            except Exception as exc:
+                if self._shutdown_event.is_set():
+                    return
+                message = f"Model action failed: {exc}"
+                if starting and launched:
+                    try:
+                        runner.down(profile, force=True)
+                    except Exception as cleanup_error:
+                        message += f"; model cleanup failed: {cleanup_error}"
+                    # Even a failed readiness probe is not a user response.
+                    self._log_offsets[profile.name] = _file_size(profile.log_file)
+                GLib.idle_add(
+                    self._finish_model_action, starting, False,
+                    message, profile.name,
+                )
 
-    def _finish_model_action(self, starting: bool, ok: bool, message: str) -> bool:
-        self._emit_event({
-            "type": "runtime_complete",
-            "starting": starting,
-            "ok": ok,
-            "message": message,
-        })
+        thread = threading.Thread(target=work, name="siphon-model-action", daemon=True)
+        with self._catalogue_lock:
+            self._model_action_threads = [t for t in self._model_action_threads if t.is_alive()]
+            self._model_action_threads.append(thread)
+        thread.start()
+
+    def _finish_model_action(
+        self, starting: bool, ok: bool, message: str, profile_name: str
+    ) -> bool:
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            self._starting_models.discard(profile_name)
+            self._stopping_models.discard(profile_name)
+            # Discard any poll that began during startup/stop and finishes later.
+            self._telemetry_epoch += 1
+            self._emit_event({
+                "type": "runtime_complete",
+                "starting": starting,
+                "ok": ok,
+                "message": message,
+            })
         return GLib.SOURCE_REMOVE
 
     def _start_polling(self) -> bool:
@@ -1471,40 +2453,51 @@ class DesktopBridge:
             return GLib.SOURCE_CONTINUE
         if self._poll_busy:
             return GLib.SOURCE_CONTINUE
-        profile = self._profile_for(self.model_key)
-        if profile is None:
-            self._emit_event({"type": "telemetry", "running": False})
-            return GLib.SOURCE_CONTINUE
-
-        self._poll_busy = True
-        telemetry_epoch = self._telemetry_epoch
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            profile = self._profile_for(self.model_key)
+            if profile is None:
+                self._emit_event({"type": "telemetry", "running": False})
+                return GLib.SOURCE_CONTINUE
+            self._poll_busy = True
+            telemetry_epoch = self._telemetry_epoch
 
         def work() -> None:
             try:
                 status = runner.status(profile, include_metrics=False)
+                request_ready = profile.name not in self._starting_models
                 # Prometheus still supplies health/slot metadata. Throughput
                 # comes from request-scoped live counters below, never from
                 # its last-completed-request throughput gauges.
                 metrics = fetch_metrics(profile.base_url) if status.running else status.metrics
                 system = fetch_sys_stats()
-                slots = fetch_slots(profile.base_url) if status.running else None
+                config = _profile_config(profile)
+                layout = _profile_memory_layout(profile)
+                resources = _resource_state(system, config, layout, running=status.running)
+                slots = (
+                    fetch_slots(profile.base_url)
+                    if status.running and request_ready else None
+                )
                 dstorage_raw = (
                     fetch_dstorage_metrics(profile.base_url)
-                    if status.running else {}
+                    if status.running and request_ready else {}
                 )
                 live_timing = _live_engine_metrics(
                     dstorage_raw,
                     self._live_timing_samples.setdefault(profile.name, {}),
                 )
-                live_stream = self._live_stream_metrics.get(profile.name, {})
+                live_stream = (
+                    self._live_stream_metrics.get(profile.name, {})
+                    if request_ready else {}
+                )
                 dstore = (
                     parse_log_tail(
                         profile.log_file,
                         start_offset=self._log_offsets.get(profile.name, 0),
                     )
-                    if status.running else None
+                    if status.running and request_ready else None
                 )
-                request_active = bool(
+                request_active = request_ready and bool(
                     self._active_generations.get(profile.name, False)
                     or (slots and slots.busy > 0)
                     or metrics.n_processing > 0
@@ -1517,7 +2510,10 @@ class DesktopBridge:
                     dstorage_raw,
                     self._dstorage_rate_samples.setdefault(profile.name, {}),
                 ) if request_active else {}
-                cached_request = self._request_metrics.get(profile.name, {})
+                cached_request = (
+                    self._request_metrics.get(profile.name, {})
+                    if request_ready else {}
+                )
                 dstorage_request = _dstorage_request_metrics(
                     dstorage_raw,
                     self._dstorage_baselines.get(profile.name, {}),
@@ -1587,7 +2583,10 @@ class DesktopBridge:
                         or cached_request.get("n_prompt")
                         if has_request_data else None
                     ),
-                    "n_processing": (slots.busy if slots else metrics.n_processing),
+                    "n_processing": (
+                        (slots.busy if slots else metrics.n_processing)
+                        if request_ready else 0
+                    ),
                     "cpu_util": system.cpu if system.mem_total_gb else None,
                     "cpu_temp": system.cpu_temp if system.cpu_temp > 0 else None,
                     "ram_used_gb": system.mem_used_gb if system.mem_total_gb else None,
@@ -1601,14 +2600,13 @@ class DesktopBridge:
                     if system.gpu_mib_total else None,
                     "vram_available_gb": (system.gpu_mib_free / 1024)
                     if system.gpu_mib_total else None,
-                    "ram_safe_mib": _resource_state(system)["ram_safe_mib"],
-                    "vram_safe_mib": _resource_state(system)["vram_safe_mib"],
+                    **resources,
                     "ram_headroom_mib": RAM_HEADROOM_MIB,
                     "vram_headroom_mib": VRAM_HEADROOM_MIB,
                     "cpu_threads": _resource_state(system)["cpu_threads"],
                     "gds_threads_max": _resource_state(system)["gds_threads_max"],
                     "recommended": _recommended_settings(
-                        _profile_config(profile), system
+                        config, system, layout
                     ),
                     "gpu_name": getattr(system, "gpu_name", "") or "GPU telemetry unavailable",
                     "cpu_name": _cpu_label(),
@@ -1661,9 +2659,11 @@ class DesktopBridge:
         return GLib.SOURCE_CONTINUE
 
     def _finish_poll(self, payload: dict[str, Any], telemetry_epoch: int) -> bool:
-        self._poll_busy = False
-        if telemetry_epoch == self._telemetry_epoch:
-            self._emit_event(payload)
+        self._ensure_catalogue_state()
+        with self._catalogue_lock:
+            self._poll_busy = False
+            if telemetry_epoch == self._telemetry_epoch:
+                self._emit_event(payload)
         return GLib.SOURCE_REMOVE
 
     def _emit_event(self, payload: dict[str, Any]) -> None:
@@ -1685,6 +2685,7 @@ class SiphonApplication(Gtk.Application):
         super().__init__(application_id=APP_ID)
         self.window: Gtk.ApplicationWindow | None = None
         self.bridge: DesktopBridge | None = None
+        self._closing = False
 
     def do_activate(self) -> None:
         if self.window is not None:
@@ -1734,9 +2735,33 @@ class SiphonApplication(Gtk.Application):
         webview.load_html(html, "file:///siphon-studio-error.html")
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
-        if self.bridge is not None:
-            self.bridge.close()
-        return False
+        if self.bridge is None:
+            return False
+        if not self._closing:
+            self._closing = True
+            _window.set_sensitive(False)
+            _window.set_title("Siphon Studio — Stopping models…")
+            self.bridge.close(self._finish_close)
+        # Keep GTK alive until model/launcher cleanup is verified complete.
+        return True
+
+    def _finish_close(self, errors: list[str]) -> bool:
+        if self.window is not None:
+            if errors:
+                self._closing = False
+                self.window.set_sensitive(True)
+                self.window.set_title("Siphon Studio — Model shutdown failed; close again to retry")
+            else:
+                self.window.destroy()
+        return GLib.SOURCE_REMOVE
+
+    def do_shutdown(self) -> None:
+        try:
+            if self.bridge is not None:
+                self.bridge.close()
+                self.bridge.wait_closed()
+        finally:
+            Gtk.Application.do_shutdown(self)
 
 
 def run() -> int:
@@ -1748,4 +2773,9 @@ def run() -> int:
         )
         return 3
     app = SiphonApplication()
-    return app.run(None)
+    try:
+        return app.run(None)
+    finally:
+        if app.bridge is not None:
+            app.bridge.close()
+            app.bridge.wait_closed()

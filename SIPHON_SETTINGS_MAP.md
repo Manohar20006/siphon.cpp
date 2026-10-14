@@ -99,6 +99,16 @@ These are the actual command-line switches implemented in `common/arg.cpp`:
   `--dstorage-moe`.
 - `--moe-gpu-cache-mib N`: allocate the VRAM expert-slot budget.
 - `--moe-pinned-cache-mib N`: allocate the pinned host expert-cache budget.
+- `--moe-full-layer-ubatch` (`LLAMA_ARG_MOE_FULL_LAYER_UBATCH`, wrapper
+  `MOE_FULL_LAYER_UBATCH=1`): let prefill ubatches cover whole layers instead
+  of clamping them to `top-K x tokens <= pool slots`. Every expert of a layer
+  is then loaded at most once per ubatch, so a larger `-ub` (512) needs far
+  fewer expert reads. It requires every pool group to hold all experts of a
+  layer (at least 256 slots per group; `LLAMA_DSTORAGE_LARGE_DOWN_SLOTS=264`)
+  and is incompatible with `--dstorage-moe-prefetch` (and therefore with the
+  prerouter). Measured on the RTX 4050 profile with `-ub 512` and a 2560 MiB
+  VRAM cache: prompt processing 72 -> 153 tok/s at unchanged decode speed;
+  the larger compute buffer is why the cache drops from 2816 to 2560 MiB.
 - `-ngl`, `--gpu-layers`: layer offload placement inherited from llama.cpp;
   Siphon’s launchers use `-ngl 999` so normal dense/non-expert weights are
   offloaded as far as VRAM allows.
@@ -171,6 +181,20 @@ mode:
 `LLAMA_GDS_STAGE_UNALIGNED_DEST`, `LLAMA_GDS_THREAD_FILE_HANDLES`,
 `LLAMA_GDS_PLAIN_READ`, and `LLAMA_GDS_IO_PROFILE`.
 
+### Graph evaluation
+
+With `-dsm` the scheduler asks the expert-routing callback about every graph
+node, and by default the callback asks to see each one, so every node runs
+and synchronizes on its own (no CUDA op fusion). `LLAMA_DSTORAGE_GROUPED_EVAL=1`
+groups the nodes between routing callbacks for all graphs (the decision
+profile sets it together with `GGML_CUDA_DISABLE_FUSION=1`).
+`LLAMA_DSTORAGE_GROUPED_EVAL_DECODE=1` groups only graphs of at most 8 tokens
+(decode, MTP drafts and verification) and keeps fusion on; contexts with
+`moe_pooled_mmq` (decisions) are excluded, so decisions stay bit-exact in a
+combined server. The Studio decode profile sets it: decode 19.4 -> 21.0 tok/s
+(+8.5%), prompt processing unchanged. Decode text can differ slightly from
+ungrouped runs because fused kernels round differently.
+
 ### Prefetch and staging
 
 `LLAMA_DSTORAGE_PREDICTIVE_PREFETCH`, `LLAMA_DSTORAGE_PREFETCH_POLICY`,
@@ -193,6 +217,15 @@ temporary expert workspace on top of the persistent cache. Lookahead is still
 configured but has no effect while that workspace path is disabled.
 
 ### Cache layout and policy experiments
+
+The default VRAM eviction policy for decode-sized batches (MTP verification and
+draft steps) is "next use": it evicts the expert expected to be needed last,
+estimated as the layer distance to its next forward pass plus `1/p - 1` passes,
+where `p` is the expert's decayed per-pass use rate.
+`LLAMA_DSTORAGE_NEXT_USE_HALF_LIFE` (default 3 passes) sets the decay.
+Prompt-sized batches keep the older retention score, which measured better
+there. `LLAMA_DSTORAGE_CACHE_POLICY=legacy` restores the older score for every
+batch; the summary line reports `cache_policy=next_use|legacy`.
 
 `LLAMA_DSTORAGE_CACHE_POLICY=hybrid_arc`,
 `LLAMA_DSTORAGE_DECODE_HOT_CACHE`,

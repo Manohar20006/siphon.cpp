@@ -1660,6 +1660,9 @@ static void ggml_cuda_op_mul_mat_cublas(
         row_diff == src0->ne[1] &&
         dst->op_params[0] == GGML_PREC_DEFAULT;
 
+    // stays false if cuBLAS rejects the BF16 GEMM below, in which case the F32 path at the end is used instead
+    bool bf16_gemm_done = false;
+
     if (supports_bf16 && src0->type == GGML_TYPE_BF16 && ggml_is_contiguous(src0) && row_diff == src0->ne[1]) {
         ggml_cuda_pool_alloc<nv_bfloat16> src1_as_bf16(ctx.pool(id));
         if (src1->type != GGML_TYPE_BF16) {
@@ -1677,18 +1680,34 @@ static void ggml_cuda_op_mul_mat_cublas(
         const float beta_f32  = 0.0f;
 
         CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));
-        CUBLAS_CHECK(
+        const cublasStatus_t status_bf16 =
             cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
                     row_diff, src1_ncols, ne10,
                     &alpha_f32,  src0_ptr,       CUDA_R_16BF, ne00,
                                  src1_ptr,       CUDA_R_16BF, ne10,
                     &beta_f32,   dst_bf16.get(), CUDA_R_16BF, ldc,
                     CUBLAS_COMPUTE_32F,
-                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                    CUBLAS_GEMM_DEFAULT_TENSOR_OP);
 
-        const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_BF16);
-        to_fp32_cuda(dst_bf16.get(), dst_dd_i, row_diff*src1_ncols, stream);
-    } else if (fast_fp16_hardware_available(cc) && use_fp16) {
+        if (status_bf16 == CUBLAS_STATUS_NOT_SUPPORTED) {
+            // cuBLAS has no BF16 kernel for some small/thin shapes (e.g. MTP draft batches through BF16 router or
+            // shared-expert gate weights that neither MMVF nor MMF take); fall back to the F32 GEMM path below
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                GGML_LOG_WARN("%s: cuBLAS BF16 GEMM not supported for %s (m=%" PRId64 ", n=%" PRId64 ", k=%" PRId64
+                              ", lda=%" PRId64 ", ldb=%" PRId64 ", ldc=%" PRId64 "), falling back to F32 GEMM\n",
+                              __func__, src0->name, row_diff, src1_ncols, ne10, ne00, ne10, ldc);
+            }
+        } else {
+            CUBLAS_CHECK(status_bf16);
+
+            const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_BF16);
+            to_fp32_cuda(dst_bf16.get(), dst_dd_i, row_diff*src1_ncols, stream);
+            bf16_gemm_done = true;
+        }
+    }
+
+    if (fast_fp16_hardware_available(cc) && use_fp16) {
         // convert src0 and src1 to fp16, multiply as fp16, convert dst to fp32
         ggml_cuda_pool_alloc<half> src0_as_f16(ctx.pool(id));
         if (src0->type != GGML_TYPE_F16) {
@@ -1747,7 +1766,7 @@ static void ggml_cuda_op_mul_mat_cublas(
             const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
             to_fp32_cuda(dst_f16.get(), dst_dd_i, row_diff*src1_ncols, stream);
         }
-    } else {
+    } else if (!bf16_gemm_done) {
         ggml_cuda_pool_alloc<float> src0_ddq_as_f32(ctx.pool(id));
         ggml_cuda_pool_alloc<float> src1_ddq_as_f32(ctx.pool(id));
 
@@ -2550,8 +2569,190 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
     return use_mul_mat_vec_q;
 }
 
+static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
+
+// Range of absolute prompt positions covered by an op with n token rows (see prompt_chunk_* in
+// ggml_backend_cuda_context). Rows that are not the described batch (e.g. output-pruned rows)
+// are treated as a prompt of n tokens starting at position 0.
+struct ggml_cuda_prompt_range {
+    int64_t from, to, end;
+};
+
+static ggml_cuda_prompt_range ggml_cuda_prompt_chunk_range(const ggml_backend_cuda_context & ctx, int64_t n) {
+    if (ctx.prompt_chunk_tokens > 0 && n == ctx.prompt_chunk_tokens) {
+        return { ctx.prompt_chunk_from, ctx.prompt_chunk_from + n, ctx.prompt_chunk_end };
+    }
+    return { 0, n, n };
+}
+
+static bool ggml_cuda_prompt_range_needs_split(const ggml_cuda_prompt_range & r, int64_t width) {
+    return r.to - r.from > width || r.from % width != 0 || (r.to < r.end && r.to % width != 0);
+}
+
+// Disables prompt chunking while the per-chunk kernels are dispatched.
+struct ggml_cuda_prompt_chunk_pause {
+    ggml_backend_cuda_context & ctx;
+    const int64_t width;
+    explicit ggml_cuda_prompt_chunk_pause(ggml_backend_cuda_context & ctx) : ctx(ctx), width(ctx.prompt_chunk_width) {
+        ctx.prompt_chunk_width = 0;
+    }
+    ~ggml_cuda_prompt_chunk_pause() {
+        ctx.prompt_chunk_width = width;
+    }
+};
+
+// Dense weight matmul per absolute prompt chunk. A chunk the batch covers only partly is computed
+// at its reference width with zero columns in place of the absent tokens, whose outputs are
+// discarded. Returns false when the op is not eligible (handled by the regular dispatch).
+static bool ggml_cuda_mul_mat_prompt_chunked(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    const int64_t width = ctx.prompt_chunk_width;
+    // only graph MUL_MAT nodes; per-expert slices of MUL_MAT_ID keep their regular dispatch
+    if (dst->op != GGML_OP_MUL_MAT || dst->src[0] != src0 || dst->src[1] != src1 ||
+            !src0->buffer || ggml_backend_buffer_get_usage(src0->buffer) != GGML_BACKEND_BUFFER_USAGE_WEIGHTS ||
+            src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
+            src1->ne[2] != 1 || src1->ne[3] != 1 || dst->ne[1] != src1->ne[1] || dst->ne[2] != 1 || dst->ne[3] != 1 ||
+            src1->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float)) {
+        return false;
+    }
+    const ggml_cuda_prompt_range r = ggml_cuda_prompt_chunk_range(ctx, src1->ne[1]);
+    GGML_ASSERT(r.from >= 0 && r.end >= r.to);
+    if (!ggml_cuda_prompt_range_needs_split(r, width)) {
+        return false;
+    }
+
+    ggml_cuda_prompt_chunk_pause pause(ctx);
+    cudaStream_t stream = ctx.stream();
+    for (int64_t c0 = r.from - r.from % width; c0 < r.to; c0 += width) {
+        const int64_t c1   = std::min<int64_t>(c0 + width, r.end);
+        const int64_t lo   = std::max<int64_t>(r.from, c0);
+        const int64_t hi   = std::min<int64_t>(r.to, c1);
+        const int64_t cols = c1 - c0, lead = lo - c0, rows = hi - lo;
+        ggml_tensor s1 = *src1;
+        ggml_tensor d  = *dst;
+        if (lead == 0 && rows == cols) {
+            s1.ne[1] = rows;
+            s1.nb[2] = s1.nb[1]*rows; s1.nb[3] = s1.nb[2];
+            s1.data  = (char *) src1->data + (lo - r.from)*src1->nb[1];
+            d.ne[1]  = rows;
+            d.nb[2]  = d.nb[1]*rows;  d.nb[3]  = d.nb[2];
+            d.data   = (char *) dst->data + (lo - r.from)*dst->nb[1];
+            d.src[1] = &s1;
+            ggml_cuda_mul_mat(ctx, src0, &s1, &d);
+            continue;
+        }
+        const size_t s1_row = src1->ne[0]*sizeof(float);
+        const size_t d_row  = dst->ne[0]*sizeof(float);
+        ggml_cuda_pool_alloc<char> s1_buf(ctx.pool(), s1_row*cols);
+        ggml_cuda_pool_alloc<char> d_buf(ctx.pool(), d_row*cols);
+        CUDA_CHECK(cudaMemsetAsync(s1_buf.get(), 0, s1_row*cols, stream));
+        CUDA_CHECK(cudaMemcpy2DAsync(s1_buf.get() + s1_row*lead, s1_row,
+                (const char *) src1->data + (lo - r.from)*src1->nb[1], src1->nb[1],
+                s1_row, rows, cudaMemcpyDeviceToDevice, stream));
+        s1.ne[1] = cols; s1.nb[1] = s1_row; s1.nb[2] = s1_row*cols; s1.nb[3] = s1.nb[2];
+        s1.data  = s1_buf.get(); s1.view_src = nullptr; s1.view_offs = 0;
+        d.ne[1]  = cols; d.nb[1] = d_row; d.nb[2] = d_row*cols; d.nb[3] = d.nb[2];
+        d.data   = d_buf.get(); d.view_src = nullptr; d.view_offs = 0;
+        d.src[1] = &s1;
+        ggml_cuda_mul_mat(ctx, src0, &s1, &d);
+        CUDA_CHECK(cudaMemcpy2DAsync((char *) dst->data + (lo - r.from)*dst->nb[1], dst->nb[1],
+                d_buf.get() + d_row*lead, d_row, d_row, rows, cudaMemcpyDeviceToDevice, stream));
+    }
+    return true;
+}
+
+// Flash attention per absolute prompt chunk of queries. A chunk the batch covers only partly runs
+// at its reference width with dummy rows (zero Q, causal mask) for the absent positions; their
+// outputs are discarded. Requires a causal mask whose KV cell index equals the token position
+// (single sequence, filled from position 0), which is validated for partial chunks.
+static bool ggml_cuda_flash_attn_ext_prompt_chunked(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const int64_t width = ctx.prompt_chunk_width;
+    const ggml_tensor * q    = dst->src[0];
+    const ggml_tensor * mask = dst->src[3];
+    const int64_t queries = q->ne[1];
+    const ggml_cuda_prompt_range r = ggml_cuda_prompt_chunk_range(ctx, queries);
+    GGML_ASSERT(r.from >= 0 && r.end >= r.to);
+    if (!ggml_cuda_prompt_range_needs_split(r, width)) {
+        return false;
+    }
+    if (!mask || mask->type != GGML_TYPE_F16 || mask->ne[1] < queries || mask->ne[2] != 1 || mask->ne[3] != 1 ||
+            q->type != GGML_TYPE_F32 || q->ne[3] != 1 || dst->type != GGML_TYPE_F32 ||
+            dst->ne[2] != queries || dst->ne[3] != 1 ||
+            dst->nb[2] != size_t(dst->ne[0]*dst->ne[1])*sizeof(float) ||
+            q->nb[2] != q->ne[0]*sizeof(float) || q->nb[1] != size_t(q->ne[0]*q->ne[2])*sizeof(float)) {
+        GGML_LOG_WARN("%s: unsupported layout for prompt chunking of %s; using one dispatch\n", __func__, dst->name);
+        return false;
+    }
+
+    ggml_cuda_prompt_chunk_pause pause(ctx);
+    cudaStream_t stream = ctx.stream();
+    const int64_t n_kv = mask->ne[0];
+    const size_t row_halves = mask->nb[1] / sizeof(uint16_t);
+    for (int64_t c0 = r.from - r.from % width; c0 < r.to; c0 += width) {
+        const int64_t c1 = std::min<int64_t>(c0 + width, r.end);
+        const int64_t lo = std::max<int64_t>(r.from, c0), hi = std::min<int64_t>(r.to, c1);
+        const int64_t cols = c1 - c0, lead = lo - c0, rows = hi - lo, start = lo - r.from;
+        ggml_tensor tile_q = *q, tile_mask = *mask, tile_out = *dst;
+        if (lead == 0 && rows == cols) {
+            tile_q.ne[1] = rows;
+            tile_q.data = (char *) q->data + start*q->nb[1];
+            tile_mask.ne[1] = rows;
+            tile_mask.data = (char *) mask->data + start*mask->nb[1];
+            tile_out.ne[2] = rows;
+            tile_out.data = (char *) dst->data + start*dst->nb[2];
+            tile_out.src[0] = &tile_q; tile_out.src[3] = &tile_mask;
+            ggml_cuda_flash_attn_ext(ctx, &tile_out);
+            continue;
+        }
+
+        // the first real row must be causal at position lo: zeros for cells <= lo, -inf after
+        std::vector<uint16_t> real(row_halves);
+        CUDA_CHECK(cudaMemcpyAsync(real.data(), (const char *) mask->data + start*mask->nb[1], mask->nb[1],
+                cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        int64_t zeros = 0;
+        while (zeros < n_kv && (real[zeros] == 0x0000 || real[zeros] == 0x8000)) {
+            ++zeros;
+        }
+        for (int64_t j = zeros; j < n_kv; ++j) {
+            GGML_ASSERT(real[j] == 0xFC00 && "prompt chunking requires a causal mask");
+        }
+        GGML_ASSERT(zeros == lo + 1 && "prompt chunking requires KV cell index == position");
+
+        std::vector<uint16_t> rows_host(size_t(cols) * row_halves, 0xFC00);
+        for (int64_t i = 0; i < cols; ++i) {
+            std::fill_n(rows_host.begin() + size_t(i) * row_halves, std::min<int64_t>(c0 + i + 1, n_kv), uint16_t(0));
+        }
+        ggml_cuda_pool_alloc<char> q_buf(ctx.pool(), size_t(cols) * q->nb[1]);
+        ggml_cuda_pool_alloc<char> m_buf(ctx.pool(), size_t(cols) * mask->nb[1]);
+        const size_t out_bytes = size_t(cols) * dst->nb[2];
+        // slack after the output, as for a full-size destination allocation
+        ggml_cuda_pool_alloc<char> o_buf(ctx.pool(), out_bytes + (size_t(8) << 20));
+        CUDA_CHECK(cudaMemsetAsync(q_buf.get(), 0, size_t(cols) * q->nb[1], stream));
+        CUDA_CHECK(cudaMemcpyAsync(q_buf.get() + size_t(lead) * q->nb[1], (const char *) q->data + start*q->nb[1],
+                size_t(rows) * q->nb[1], cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(m_buf.get(), rows_host.data(), size_t(cols) * mask->nb[1], cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(m_buf.get() + size_t(lead) * mask->nb[1], (const char *) mask->data + start*mask->nb[1],
+                size_t(rows) * mask->nb[1], cudaMemcpyDeviceToDevice, stream));
+        tile_q.ne[1] = cols; tile_q.data = q_buf.get(); tile_q.view_src = nullptr; tile_q.view_offs = 0;
+        tile_mask.ne[1] = cols; tile_mask.data = m_buf.get(); tile_mask.view_src = nullptr; tile_mask.view_offs = 0;
+        tile_out.ne[2] = cols; tile_out.nb[3] = out_bytes; tile_out.data = o_buf.get();
+        tile_out.view_src = nullptr; tile_out.view_offs = 0;
+        tile_out.src[0] = &tile_q; tile_out.src[3] = &tile_mask;
+        ggml_cuda_flash_attn_ext(ctx, &tile_out);
+        CUDA_CHECK(cudaMemcpyAsync((char *) dst->data + start*dst->nb[2], o_buf.get() + size_t(lead) * dst->nb[2],
+                size_t(rows) * dst->nb[2], cudaMemcpyDeviceToDevice, stream));
+        // rows_host must outlive the host-to-device copy
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+    return true;
+}
+
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
+
+    if (ctx.prompt_chunk_width > 0 && !split && ggml_cuda_mul_mat_prompt_chunked(ctx, src0, src1, dst)) {
+        return;
+    }
 
     // If src0 is a temporary compute buffer it may have some padding that needs to be cleared for mul_mat_vec_q or mul_mat_q.
     // But if src0 is also a view of another tensor then this cannot be done safely because it may overwrite valid tensor data.
@@ -2658,14 +2859,14 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
-        // DirectStorage MoE expert pools may use a padded slot stride.  The
-        // MMVQ fast path assumes the canonical contiguous expert stride and
-        // computes addresses from that assumption.  Falling through to MMQ
-        // keeps the explicit nb[2] stride intact for pooled expert tensors.
-        const bool canonical_expert_stride = src0->nb[2] == src0->nb[1] * src0->ne[1];
-        const bool dstorage_expert_ids = ids != nullptr &&
-                ids->name[0] != '\0' && strstr(ids->name, "_ds") != nullptr;
-        if (ne2 <= MMVQ_MAX_BATCH_SIZE && canonical_expert_stride && !dstorage_expert_ids) {
+        // DirectStorage MoE expert pools may use a padded slot stride (nb[2] > nb[1]*ne[1]). MMVQ addresses experts
+        // in units of quant blocks (nb[2]/type size), exactly like MMQ, so any stride that is a whole number of blocks
+        // works. MMQ would launch tiles for every pool slot, which costs ~0.1-0.3 ms per matmul for a single token.
+        // A backend with pooled_moe_mmq set keeps pooled experts on MMQ, the kernel earlier builds used for them.
+        const bool block_expert_stride = src0->nb[2] % ggml_type_size(src0->type) == 0;
+        const bool pooled_experts = src0->nb[2] != src0->nb[1] * src0->ne[1] ||
+                (ids != nullptr && ids->name[0] != '\0' && strstr(ids->name, "_ds") != nullptr);
+        if (ne2 <= MMVQ_MAX_BATCH_SIZE && block_expert_stride && !(ctx.pooled_moe_mmq && pooled_experts)) {
             if (ggml_is_quantized(src0->type)) {
                 const int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
                 if (ne2 <= mmvq_mmid_max) {
@@ -3099,7 +3300,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_op_argsort(ctx, dst);
             break;
         case GGML_OP_FLASH_ATTN_EXT:
-            ggml_cuda_flash_attn_ext(ctx, dst);
+            if (ctx.prompt_chunk_width == 0 || !ggml_cuda_flash_attn_ext_prompt_chunked(ctx, dst)) {
+                ggml_cuda_flash_attn_ext(ctx, dst);
+            }
             break;
         case GGML_OP_CROSS_ENTROPY_LOSS:
             ggml_cuda_cross_entropy_loss(ctx, dst);
@@ -4494,10 +4697,42 @@ static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx, co
 }
 #endif // USE_CUDA_GRAPH
 
+// GGML_CUDA_PRELOAD_MMQ=1: the first time a quantized type shows up as a matmul weight, load all of its MMQ kernel
+// variants (see mul_mat_q_preload). Without it a variant is loaded lazily on first use, which can fail with out of
+// memory long after startup when VRAM is fully committed.
+static void ggml_cuda_preload_mmq_kernels(int device, const ggml_cgraph * cgraph) {
+    static const bool enabled = [] {
+        const char * env = getenv("GGML_CUDA_PRELOAD_MMQ");
+        return env != nullptr && atoi(env) != 0;
+    }();
+    static std::mutex mutex;
+    static bool done[GGML_CUDA_MAX_DEVICES][GGML_TYPE_COUNT] = {};
+    if (!enabled) {
+        return;
+    }
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        const ggml_tensor * node = cgraph->nodes[i];
+        if ((node->op != GGML_OP_MUL_MAT && node->op != GGML_OP_MUL_MAT_ID) || node->src[0] == nullptr) {
+            continue;
+        }
+        const ggml_type type = node->src[0]->type;
+        if (!ggml_is_quantized(type) || done[device][type]) {
+            continue;
+        }
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!done[device][type]) {
+            ggml_cuda_mmq_preload(type);
+            done[device][type] = true;
+            GGML_LOG_INFO("%s: device %d: preloaded MMQ kernels for %s\n", __func__, device, ggml_type_name(type));
+        }
+    }
+}
+
 static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
 
     ggml_cuda_set_device(cuda_ctx->device);
+    ggml_cuda_preload_mmq_kernels(cuda_ctx->device, cgraph);
 
     bool use_cuda_graph             = false;
     bool cuda_graph_update_required = false;
@@ -4509,7 +4744,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     ggml_cuda_graph_set_enabled(cuda_ctx, graph_key);
 
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
-    if (graph->is_enabled()) {
+    // prompt chunking pads partial chunks with host-synchronized copies, which cannot be captured
+    if (graph->is_enabled() && cuda_ctx->prompt_chunk_width == 0) {
         const bool graph_compatible = ggml_cuda_graph_check_compability(cgraph);
         if (graph_compatible) {
             const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
@@ -5636,6 +5872,22 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
     GGML_UNUSED(reg);
 }
 
+void ggml_backend_cuda_set_prompt_chunking(ggml_backend_t backend, int32_t width, int64_t from, int64_t n_tokens, int64_t end) {
+    GGML_ASSERT(ggml_backend_is_cuda(backend));
+    GGML_ASSERT(width >= 0 && from >= 0 && n_tokens >= 0 && (width == 0 || end >= from + n_tokens));
+    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+    cuda_ctx->prompt_chunk_width  = width;
+    cuda_ctx->prompt_chunk_from   = width > 0 ? from : 0;
+    cuda_ctx->prompt_chunk_tokens = width > 0 ? n_tokens : 0;
+    cuda_ctx->prompt_chunk_end    = width > 0 ? end : 0;
+}
+
+void ggml_backend_cuda_set_pooled_moe_mmq(ggml_backend_t backend, bool enabled) {
+    GGML_ASSERT(ggml_backend_is_cuda(backend));
+    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+    cuda_ctx->pooled_moe_mmq = enabled;
+}
+
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
     if (strcmp(name, "ggml_backend_comm_init") == 0) {
@@ -5655,6 +5907,12 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_unregister_host_buffer") == 0) {
         return (void *)ggml_backend_cuda_unregister_host_buffer;
+    }
+    if (strcmp(name, "ggml_backend_cuda_set_prompt_chunking") == 0) {
+        return (void *)ggml_backend_cuda_set_prompt_chunking;
+    }
+    if (strcmp(name, "ggml_backend_cuda_set_pooled_moe_mmq") == 0) {
+        return (void *)ggml_backend_cuda_set_pooled_moe_mmq;
     }
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;

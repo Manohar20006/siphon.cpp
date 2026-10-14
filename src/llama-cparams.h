@@ -47,7 +47,9 @@ struct llama_cparams {
     bool pipeline_parallel;
     bool dstorage_moe;
     bool dstorage_moe_prefetch;
+    bool moe_pooled_mmq;        // reference numerics (decisions): no fused grouped evaluation of decode graphs
     std::string dstorage_prerouter_path;
+    uint32_t n_expert_used; // routed experts per token for this context (resolved, never 0 for MoE)
     bool moe_routing_trace;
 
     enum llama_context_type ctx_type;

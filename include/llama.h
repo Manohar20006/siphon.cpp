@@ -389,6 +389,13 @@ extern "C" {
 bool dstorage_moe; // enable DirectStorage MoE eval callback
         bool dstorage_moe_prefetch; // speculatively prefetch future-layer experts from previous-token routing
         const char * dstorage_prerouter_path; // optional Edge0 safetensors checkpoint, copied at context creation
+        int32_t n_expert_used; // routed experts per token for this context; 0 = model default
+                               // (after LLAMA_MOE_EXPERT_USED_OVERRIDE), -1 = native count, otherwise 1..native
+        bool moe_full_layer_ubatch; // DirectStorage MoE: do not bound n_ubatch by top-k * tokens when every expert
+                                    // pool group can hold all experts of a layer (requires prefetch off)
+        bool moe_pooled_mmq;        // DirectStorage MoE (CUDA): pooled expert matmuls use MMQ at every batch size instead
+                                    // of MMVQ for <= 8 tokens; slower for single tokens, but reproduces the numerics of
+                                    // builds before MMVQ handled expert pools (bit-exact decision references)
 
         struct llama_context * ctx_other; // other context to share weights/models with (dflash etc.)
 

@@ -175,3 +175,9 @@ AGENTS.local.md
 /moe-trace-prompts-*.manifest.json
 *.nsys-rep
 *.sqlite
+# Added by code-review-graph
+.code-review-graph/
+
+# Siphon Studio local state and per-machine imported model profiles
+/siphon-studio/state/
+/siphon-studio/profiles/imported-*.json

@@ -217,14 +217,67 @@ llama_context::llama_context(
     cparams.n_batch = cparams.causal_attn ? std::min(cparams.n_ctx, params.n_batch) : params.n_batch;
 
     cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 ? params.n_batch : params.n_ubatch);
-    if (params.dstorage_moe && hparams.n_expert_used > 0) {
-        const uint32_t dstorage_prefill_ubatch = uint32_t(
+
+    // Routed experts per token are per context, so one loaded model can serve contexts
+    // with different K (e.g. reduced-K generation next to native-K scoring).
+    cparams.n_expert_used = hparams.n_expert_used;
+    if (params.n_expert_used != 0) {
+        if (hparams.n_expert == 0 || params.n_expert_used < -1 ||
+                (params.n_expert_used > 0 && uint32_t(params.n_expert_used) > hparams.n_expert_used_native)) {
+            throw std::runtime_error("n_expert_used must be 0, -1 or 1.." +
+                    std::to_string(hparams.n_expert_used_native) + " for this model");
+        }
+        cparams.n_expert_used = params.n_expert_used < 0 ? hparams.n_expert_used_native : uint32_t(params.n_expert_used);
+        if (cparams.n_expert_used != hparams.n_expert_used) {
+            LLAMA_LOG_INFO("%s: n_expert_used = %u (model default %u)\n", __func__,
+                    cparams.n_expert_used, hparams.n_expert_used);
+        }
+    }
+
+    if (params.dstorage_moe && cparams.n_expert_used > 0) {
+        if (params.moe_full_layer_ubatch && (params.dstorage_moe_prefetch ||
+                llama_env_flag_enabled_local("LLAMA_DSTORAGE_PREFILL_WORKSPACE"))) {
+            throw std::runtime_error("moe_full_layer_ubatch requires persistent expert pools and no prefetch");
+        }
+        uint32_t dstorage_prefill_ubatch = uint32_t(
                 DStorageSlotManager::calculate_prefill_token_chunk(
-                        int(hparams.n_expert_used),
+                        int(cparams.n_expert_used),
                         DStorageSlotManager::max_prefill_workspace_experts()));
+        if (dstorage_prefill_ubatch == 0) {
+            throw std::runtime_error("DirectStorage workspace cannot fit one token's routed experts");
+        }
+        // A memory-fit probe (no_alloc) has no pools to query: size it for the full ubatch, which whole-layer
+        // prefill uses once the pools are allocated (an upper bound when they turn out too small).
+        if (hparams.no_alloc && params.moe_full_layer_ubatch) {
+            dstorage_prefill_ubatch = cparams.n_ubatch;
+        }
+        if (!hparams.no_alloc && !llama_env_flag_enabled_local("LLAMA_DSTORAGE_PREFILL_WORKSPACE")) {
+            if (DStorageSlotManager * slots = model.dstorage_slots()) {
+                // Opt-in phase-sized caches change their pools later. Preserve
+                // that experimental policy; this query is for fixed budgets.
+                if (!slots->cache_phase_policy_enabled()) {
+                    const int capacity = slots->get_prefill_token_capacity(int(cparams.n_expert_used));
+                    if (capacity <= 0) {
+                        throw std::runtime_error("DirectStorage expert cache cannot fit one token's routed experts; increase the GPU expert cache allocation");
+                    }
+                    dstorage_prefill_ubatch = std::min(dstorage_prefill_ubatch, uint32_t(capacity));
+                    // A layer has at most n_expert distinct experts, so when every pool group keeps
+                    // that many slots (even with speculative reservations) any ubatch size fits.
+                    if (params.moe_full_layer_ubatch) {
+                        if (slots->can_hold_full_layer_prefill()) {
+                            dstorage_prefill_ubatch = cparams.n_ubatch;
+                        } else {
+                            LLAMA_LOG_WARN("%s: moe_full_layer_ubatch: smallest expert pool group has %d usable slots < %u experts; "
+                                    "keeping the top-k bound (raise LLAMA_DSTORAGE_LARGE_DOWN_SLOTS or the GPU expert cache)\n",
+                                    __func__, slots->full_layer_prefill_slots(), hparams.n_expert);
+                        }
+                    }
+                }
+            }
+        }
         if (cparams.n_ubatch > dstorage_prefill_ubatch) {
             LLAMA_LOG_INFO(
-                    "%s: limiting DirectStorage prefill microbatch from %u to %u tokens (%d expert workspace slots)\n",
+                    "%s: limiting DirectStorage prefill microbatch from %u to %u tokens to fit the expert cache (workspace ceiling %d slots)\n",
                     __func__,
                     cparams.n_ubatch,
                     dstorage_prefill_ubatch,
@@ -239,13 +292,18 @@ llama_context::llama_context(
     cparams.kv_unified = params.kv_unified;
     cparams.dstorage_moe = params.dstorage_moe;
     cparams.dstorage_moe_prefetch = params.dstorage_moe_prefetch;
+    cparams.moe_pooled_mmq = params.moe_pooled_mmq;
+    dstorage_profile_enabled = llama_env_flag_enabled_local("LLAMA_DSTORAGE_PREROUTER_PROFILE");
     cparams.dstorage_prerouter_path = params.dstorage_prerouter_path ? params.dstorage_prerouter_path : "";
-    if (!cparams.dstorage_prerouter_path.empty()) {
+    if (!cparams.dstorage_prerouter_path.empty() && params.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT) {
         if (!cparams.dstorage_moe || !cparams.dstorage_moe_prefetch || model.arch != LLM_ARCH_QWEN35MOE) {
             throw std::runtime_error("DirectStorage prerouter requires Qwen3.6 MoE with DirectStorage prefetch enabled");
         }
+        if (cparams.n_expert_used != hparams.n_expert_used) {
+            throw std::runtime_error("DirectStorage prerouter requires the model's default n_expert_used");
+        }
         std::string error;
-        dstorage_prerouter = llama_prerouter::load(
+        dstorage_prerouter = llama_prerouter::load_shared(
                 cparams.dstorage_prerouter_path, (int) hparams.n_layer(),
                 (int) hparams.n_embd, (int) hparams.n_expert,
                 (int) hparams.n_expert_used, error);
@@ -253,9 +311,14 @@ llama_context::llama_context(
             throw std::runtime_error("DirectStorage prerouter: " + error);
         }
         dstorage_prerouter_hidden.resize(model.layers.size());
-        dstorage_prerouter_previous_ids.resize(model.layers.size());
-        dstorage_prerouter_current_ids.resize(model.layers.size());
-        LLAMA_LOG_INFO("%s: loaded optional prerouter checkpoint for prefetch-only mode\n", __func__);
+        dstorage_prerouter_job_valid = std::make_shared<std::atomic<bool>>(true);
+        const char * mode = std::getenv("LLAMA_DSTORAGE_PREROUTER_MODE");
+        if (mode && std::strcmp(mode, "shadow") != 0 && std::strcmp(mode, "prefetch") != 0) {
+            throw std::runtime_error("LLAMA_DSTORAGE_PREROUTER_MODE must be shadow or prefetch");
+        }
+        dstorage_prerouter_prefetch = mode && std::strcmp(mode, "prefetch") == 0;
+        LLAMA_LOG_INFO("%s: shared optional prerouter checkpoint; base verification only, mode=%s\n", __func__,
+                dstorage_prerouter_prefetch ? "prefetch" : "shadow");
     }
     const char * moe_routing_trace_path = std::getenv("LLAMA_MOE_ROUTING_TRACE");
     const bool moe_routing_trace_requested =
@@ -374,6 +437,17 @@ llama_context::llama_context(
                 if (ggml_backend_set_n_threads_fn) {
                     set_n_threads_fns.emplace_back(backend.get(), ggml_backend_set_n_threads_fn);
                 }
+                auto set_prompt_chunking_fn = (ggml_backend_set_prompt_chunking_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_set_prompt_chunking");
+                if (set_prompt_chunking_fn) {
+                    set_prompt_chunking_fns.emplace_back(backend.get(), set_prompt_chunking_fn);
+                }
+                if (params.moe_pooled_mmq) {
+                    using set_pooled_moe_mmq_t = void (*)(ggml_backend_t, bool);
+                    auto set_pooled_moe_mmq_fn = (set_pooled_moe_mmq_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_set_pooled_moe_mmq");
+                    if (set_pooled_moe_mmq_fn) {
+                        set_pooled_moe_mmq_fn(backend.get(), true);
+                    }
+                }
             }
         }
 
@@ -491,6 +565,32 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
+    if (dstorage_prerouter) {
+        dstorage_prerouter_job_valid->store(false);
+        std::fprintf(stderr,
+                "PREROUTER_SHADOW context=base predictions=%" PRIu64 " prediction_us=%" PRIu64
+                " capture_us=%" PRIu64 " comparisons=%" PRIu64 " hits=%" PRIu64
+                " expert_positions=%" PRIu64 " lead_us=%" PRIu64 " submissions=%" PRIu64
+                " nonresident_candidates=%" PRIu64 " residency_samples=%" PRIu64
+                " resets=%" PRIu64 " skipped_capacity=%" PRIu64 " disabled=%d scope=attempted_verification\n",
+                dstorage_prerouter_predictions, dstorage_prerouter_prediction_us,
+                dstorage_prerouter_capture_us, dstorage_prerouter_comparisons,
+                dstorage_prerouter_hits, dstorage_prerouter_positions, dstorage_prerouter_lead_us,
+                dstorage_prerouter_submissions, dstorage_prerouter_nonresident,
+                dstorage_prerouter_residency_samples, dstorage_prerouter_resets,
+                dstorage_prerouter_skipped_capacity,
+                dstorage_prerouter_policy_disabled ? 1 : 0);
+    }
+    if (dstorage_profile_enabled) {
+        std::fprintf(stderr,
+                "PREROUTER_GRAPH_PROFILE context=%s graphs=%" PRIu64 " batched_graphs=%" PRIu64
+                " graph_us=%" PRIu64 " expert_ensure_us=%" PRIu64
+                " small_graph_us=%" PRIu64 " small_ensure_us=%" PRIu64 "\n",
+                cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP ? "draft" : "base",
+                dstorage_profile_graphs, dstorage_profile_batched_graphs,
+                dstorage_profile_graph_us, dstorage_profile_ensure_us,
+                dstorage_profile_small_graph_us, dstorage_profile_small_ensure_us);
+    }
     if (!graph_component_profile_printed) {
         graph_component_profile_print();
     }
@@ -1219,6 +1319,25 @@ void llama_context::set_embeddings_nextn(bool value, bool masked) {
     cparams.embeddings_nextn_masked = masked;
 }
 
+bool llama_context::set_prompt_chunking(int32_t width, int32_t prompt_end) {
+    if (width < 0 || (width > 0 && prompt_end <= 0)) {
+        LLAMA_LOG_ERROR("%s: invalid width %d / prompt end %d\n", __func__, width, prompt_end);
+        return false;
+    }
+    if (width > 0 && set_prompt_chunking_fns.empty()) {
+        LLAMA_LOG_WARN("%s: no backend of this context supports prompt chunking\n", __func__);
+        return false;
+    }
+    prompt_chunk_width = width;
+    prompt_chunk_end   = width > 0 ? prompt_end : 0;
+    if (width == 0) {
+        for (const auto & [backend, set_fn] : set_prompt_chunking_fns) {
+            set_fn(backend, 0, 0, 0, 0);
+        }
+    }
+    return true;
+}
+
 void llama_context::set_causal_attn(bool value) {
     LLAMA_LOG_DEBUG("%s: value = %d\n", __func__, value);
 
@@ -1379,55 +1498,149 @@ bool llama_context::set_adapter_cvec(
     return res;
 }
 
-llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
-    const auto check_prerouter_capacity = [&]() {
-        if (!dstorage_prerouter || dstorage_prerouter_capacity_disabled) {
+void llama_context::dstorage_prerouter_reset() {
+    dstorage_prerouter_job_valid->store(false);
+    dstorage_prerouter_job_valid = std::make_shared<std::atomic<bool>>(true);
+    dstorage_prerouter_state.reset();
+    dstorage_prerouter_rows.clear();
+    dstorage_prerouter_candidates.clear();
+    dstorage_prerouter_decode_active = false;
+    dstorage_prerouter_seq_id = -1;
+    dstorage_prerouter_last_pos = -1;
+    dstorage_prerouter_resets++;
+}
+
+void llama_context::dstorage_prerouter_begin_batch(const llama_ubatch & ubatch, llm_graph_type gtype) {
+    if (!dstorage_prerouter) {
+        return;
+    }
+    dstorage_prerouter_decode_active = false;
+    dstorage_prerouter_candidates.clear();
+    dstorage_prerouter_rows.clear();
+    // Only the base verification graph has the trained owner/consumer layers.
+    // Large prompt batches and coupled sequences deliberately use the native path.
+    if (gtype != LLM_GRAPH_TYPE_DEFAULT || dstorage_prerouter_policy_disabled ||
+            ubatch.n_tokens == 0 || ubatch.n_tokens > 8 || !ubatch.pos ||
+            !ubatch.seq_id || !ubatch.n_seq_id || cparams.warmup) {
+        dstorage_prerouter_reset();
+        return;
+    }
+    for (uint32_t row = 0; row < ubatch.n_tokens; ++row) {
+        if (ubatch.n_seq_id[row] != 1 || !ubatch.seq_id[row]) {
+            dstorage_prerouter_reset();
             return;
         }
-        if (DStorageSlotManager * slots = model.dstorage_slots()) {
-            const int available = slots->get_n_slots();
-            const int required = (int) model.hparams.n_layer() * (int) model.hparams.n_expert_used + 16;
-            if (available > 0 && available < required) {
-                LLAMA_LOG_WARN("%s: prerouter prefetch disabled: %d expert slots available, %d required for safe speculative headroom\n",
-                        __func__, available, required);
-                dstorage_prerouter_capacity_disabled = true;
-                dstorage_prerouter_decode_active = false;
-            }
-        }
-    };
-    check_prerouter_capacity();
-    if (dstorage_prerouter) {
-        const bool single_sequence_token =
-                !dstorage_prerouter_capacity_disabled && !dstorage_prerouter_policy_disabled &&
-                ubatch.n_tokens == 1 && ubatch.n_seq_id && ubatch.n_seq_id[0] == 1 &&
-                ubatch.seq_id && ubatch.seq_id[0] && ubatch.pos;
-        dstorage_prerouter_decode_active = single_sequence_token;
-        for (auto & hidden : dstorage_prerouter_hidden) {
-            hidden.clear();
-        }
-        for (auto & route : dstorage_prerouter_current_ids) {
-            route.clear();
-        }
-        if (single_sequence_token) {
-            const llama_seq_id seq_id = ubatch.seq_id[0][0];
-            const llama_pos pos = ubatch.pos[0];
-            if (seq_id != dstorage_prerouter_seq_id || pos != dstorage_prerouter_last_pos + 1) {
-                for (auto & route : dstorage_prerouter_previous_ids) {
-                    route.clear();
-                }
-                dstorage_prerouter_next_owner = 6;
-            }
-            dstorage_prerouter_seq_id = seq_id;
-            dstorage_prerouter_last_pos = pos;
-        } else {
-            for (auto & route : dstorage_prerouter_previous_ids) {
-                route.clear();
-            }
-            dstorage_prerouter_seq_id = -1;
-            dstorage_prerouter_last_pos = -1;
-            dstorage_prerouter_next_owner = 6;
+        dstorage_prerouter_rows.emplace_back(ubatch.seq_id[row][0], ubatch.pos[row]);
+    }
+    const auto first = dstorage_prerouter_rows.front();
+    if (first.first != dstorage_prerouter_seq_id || int64_t(first.second) != int64_t(dstorage_prerouter_last_pos) + 1) {
+        // A rollback/gap/slot switch invalidates any outstanding learned job.
+        // Do not wait for it here; its task retires any launched DMA safely.
+        dstorage_prerouter_job_valid->store(false);
+        dstorage_prerouter_job_valid = std::make_shared<std::atomic<bool>>(true);
+        dstorage_prerouter_resets++;
+    }
+    if (!dstorage_prerouter_state.begin_batch(dstorage_prerouter_rows)) {
+        dstorage_prerouter_reset();
+        return;
+    }
+    dstorage_prerouter_seq_id = dstorage_prerouter_rows.back().first;
+    dstorage_prerouter_last_pos = dstorage_prerouter_rows.back().second;
+    dstorage_prerouter_owner = dstorage_prerouter_next_owner;
+    dstorage_prerouter_next_owner = dstorage_prerouter_next_owner == 38 ? 6 : dstorage_prerouter_next_owner + 1;
+    for (auto & hidden : dstorage_prerouter_hidden) {
+        hidden.clear();
+    }
+    dstorage_prerouter_decode_active = true;
+    // Conservative automatic CPU-cost/quality kill switches; native scheduling
+    // remains enabled regardless of whether a learned prediction is admitted.
+    if (dstorage_prerouter_comparisons >= 64 &&
+            (dstorage_prerouter_hits * 4 < dstorage_prerouter_positions ||
+             (dstorage_prerouter_graph_us > 0 &&
+              (dstorage_prerouter_prediction_us + dstorage_prerouter_capture_us) * 10 > dstorage_prerouter_graph_us))) {
+        dstorage_prerouter_policy_disabled = true;
+        dstorage_prerouter_decode_active = false;
+        dstorage_prerouter_job_valid->store(false);
+        LLAMA_LOG_WARN("%s: prerouter disabled after measured low recall or excessive prediction overhead; native prefetch retained\n", __func__);
+    }
+    // Calibration still runs before the recall gate. Afterward, do not capture
+    // features or evaluate a CPU head when staging cannot make progress. This
+    // is only a read-only hint; admission rechecks capacity under the slot lock.
+    if (dstorage_prerouter_decode_active && dstorage_prerouter_prefetch &&
+            dstorage_prerouter_comparisons >= 8) {
+        DStorageSlotManager * slots = model.dstorage_slots();
+        if (!slots || slots->learned_prefetch_available_slots(dstorage_prerouter_owner + 1) == 0) {
+            dstorage_prerouter_owner = -1;
+            dstorage_prerouter_skipped_capacity++;
         }
     }
+}
+
+void llama_context::dstorage_prerouter_record_routes(int layer, const std::vector<int32_t> & ids) {
+    dstorage_prerouter_candidates.clear();
+    if (!dstorage_prerouter_decode_active) {
+        return;
+    }
+    const size_t k = cparams.n_expert_used;
+    if (ids.size() != dstorage_prerouter_rows.size() * k) {
+        return;
+    }
+    const auto & hidden = dstorage_prerouter_hidden[layer];
+    const size_t width = model.hparams.n_embd;
+    for (size_t row = 0; row < dstorage_prerouter_rows.size(); ++row) {
+        const auto key = dstorage_prerouter_rows[row];
+        const std::vector<int32_t> route(ids.begin() + row * k, ids.begin() + (row + 1) * k);
+        // Observe the original expert IDs BEFORE they are remapped to cache slots.
+        const auto result = dstorage_prerouter_state.observe(key.first, key.second, layer, route);
+        if (result) {
+            dstorage_prerouter_comparisons++;
+            dstorage_prerouter_hits += result->hits;
+            dstorage_prerouter_positions += result->total;
+            dstorage_prerouter_lead_us += uint64_t(std::max<int64_t>(0, result->lead_us));
+        }
+        const bool predict_row = layer == dstorage_prerouter_owner &&
+                llama_prerouter_state::should_predict_row(
+                        dstorage_prerouter_prefetch, dstorage_prerouter_rows.size(), row);
+        const auto previous = predict_row
+                ? dstorage_prerouter_state.previous_route(key.first, key.second, layer)
+                : std::vector<int32_t>{};
+        dstorage_prerouter_state.route(key.first, key.second, layer, route);
+        if (!predict_row || hidden.size() != width * dstorage_prerouter_rows.size()) {
+            continue;
+        }
+        const int64_t begin = ggml_time_us();
+        const auto prediction = dstorage_prerouter->predict(layer, hidden.data() + row * width, width, route, previous);
+        dstorage_prerouter_prediction_us += uint64_t(std::max<int64_t>(0, ggml_time_us() - begin));
+        if (prediction.empty()) {
+            continue;
+        }
+        dstorage_prerouter_predictions++;
+        dstorage_prerouter_state.predict(key.first, key.second, layer, prediction);
+        if (DStorageSlotManager * slots = model.dstorage_slots()) {
+            const int nonresident = slots->count_learned_nonresident(layer + 1,
+                    prediction.data(), (int) prediction.size());
+            if (nonresident >= 0) {
+                dstorage_prerouter_nonresident += uint64_t(nonresident);
+                dstorage_prerouter_residency_samples++;
+            }
+        }
+        // The selected row targets the final in-batch route for MTP, or the
+        // next position for single-token decode. Exact routing remains intact.
+        // Initial quality must be measured, not fabricated as route history.
+        const bool one_sequence = std::all_of(dstorage_prerouter_rows.begin(), dstorage_prerouter_rows.end(),
+                [&](const auto & token) { return token.first == key.first; });
+        if (dstorage_prerouter_prefetch && one_sequence &&
+                dstorage_prerouter_comparisons >= 8 && dstorage_prerouter_positions > 0 &&
+                double(dstorage_prerouter_hits) / dstorage_prerouter_positions >= 0.35) {
+            dstorage_prerouter_candidates = prediction;
+            dstorage_prerouter_target = layer + 1;
+        }
+    }
+}
+
+llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+    dstorage_profile_small_graph = ubatch.n_tokens <= 8;
+    dstorage_prerouter_begin_batch(ubatch, gtype);
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -1491,50 +1704,33 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
+    const int64_t profile_start = (dstorage_profile_enabled || dstorage_prerouter_decode_active) ? ggml_time_us() : 0;
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens);
+    if (dstorage_profile_enabled || dstorage_prerouter_decode_active) {
+        // Accurate GPU wall timing is opt-in. Do not insert an extra graph-end
+        // fence merely to run the CPU-cost guard: graph_compute already includes
+        // the existing exact-router waits. Its host duration is a conservative
+        // denominator for that guard, not a GPU-completion measurement.
+        if (dstorage_profile_enabled) {
+            ggml_backend_sched_synchronize(sched.get());
+        }
+        const uint64_t elapsed = uint64_t(std::max<int64_t>(0, ggml_time_us() - profile_start));
+        if (dstorage_profile_enabled) {
+            dstorage_profile_graphs++;
+            dstorage_profile_batched_graphs += ubatch.n_tokens > 1 ? 1 : 0;
+            dstorage_profile_graph_us += elapsed;
+            if (dstorage_profile_small_graph) {
+                dstorage_profile_small_graph_us += elapsed;
+            }
+        }
+        if (dstorage_prerouter_decode_active) {
+            dstorage_prerouter_graph_us += elapsed;
+        }
+    }
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
-    }
-
-    check_prerouter_capacity();
-
-    if (dstorage_prerouter && dstorage_prerouter_decode_active) {
-        if (DStorageSlotManager * slots = model.dstorage_slots()) {
-            // Keep prediction and speculative I/O bounded on each decode step.
-            // Fall back to native prefetch if the cache rejects repeated predictions.
-            bool submitted = false;
-            for (int attempt = 0; attempt < 8; ++attempt) {
-                const int owner = dstorage_prerouter_next_owner;
-                dstorage_prerouter_next_owner = owner == 38 ? 6 : owner + 1;
-                const auto & hidden = dstorage_prerouter_hidden[owner];
-                const auto & current = dstorage_prerouter_current_ids[owner];
-                if (hidden.empty() || current.empty()) {
-                    continue;
-                }
-                const auto experts = dstorage_prerouter->predict(
-                        (int) owner, hidden.data(), hidden.size(), current,
-                        dstorage_prerouter_previous_ids[owner]);
-                if (!experts.empty() &&
-                        slots->prefetch_experts_async(owner + 1, experts.data(), (int) experts.size())) {
-                    LLAMA_DSTORAGE_DEBUG_LOG("DStorage DEBUG prerouter:prefetch owner=%d target=%d ids=%zu\n",
-                            owner, owner + 1, experts.size());
-                    slots->wait_for_layer_prefetch(owner + 1);
-                    submitted = true;
-                    break;
-                }
-            }
-            dstorage_prerouter_rejected_steps = submitted ? 0 : dstorage_prerouter_rejected_steps + 1;
-            if (dstorage_prerouter_rejected_steps >= 8) {
-                dstorage_prerouter_policy_disabled = true;
-                LLAMA_LOG_WARN("%s: prerouter predictions were not admitted for 8 decode steps; falling back to native prefetch\n",
-                        __func__);
-            }
-            for (int owner = 6; owner <= 38; ++owner) {
-                dstorage_prerouter_previous_ids[owner] = dstorage_prerouter_current_ids[owner];
-            }
-        }
     }
 
     ret = GGML_STATUS_SUCCESS;
@@ -1904,6 +2100,22 @@ int llama_context::decode(const llama_batch & batch_inp) {
     const uint32_t n_tokens_all  = balloc->get_n_tokens();
     const uint32_t n_outputs_all = balloc->get_n_outputs();
 
+    if (prompt_chunk_width > 0) {
+        const llama_batch & batch = balloc->get_batch();
+        for (uint32_t i = 0; i < n_tokens_all; ++i) {
+            if ((batch.n_seq_id && batch.n_seq_id[i] != 1) || (batch.seq_id && batch.seq_id[i][0] != 0) ||
+                    batch.pos[i] != batch.pos[0] + llama_pos(i)) {
+                LLAMA_LOG_ERROR("%s: prompt chunking requires sequence 0 with consecutive positions\n", __func__);
+                return -1;
+            }
+        }
+        if (batch.pos[0] + int64_t(n_tokens_all) > prompt_chunk_end) {
+            LLAMA_LOG_ERROR("%s: batch ends at %lld, after the chunked prompt end %d\n", __func__,
+                    (long long) (batch.pos[0] + n_tokens_all), prompt_chunk_end);
+            return -1;
+        }
+    }
+
     if (output_all) {
         // require that all tokens are output
         if (n_outputs_all != n_tokens_all) {
@@ -2004,6 +2216,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
             // needs to happen before the graph is built
             n_outputs = n_outputs_new;
+        }
+
+        if (prompt_chunk_width > 0) {
+            GGML_ASSERT(ubatch.pos[ubatch.n_tokens - 1] == ubatch.pos[0] + llama_pos(ubatch.n_tokens) - 1);
+            for (const auto & [backend, set_fn] : set_prompt_chunking_fns) {
+                set_fn(backend, prompt_chunk_width, ubatch.pos[0], ubatch.n_tokens, prompt_chunk_end);
+            }
         }
 
         ggml_status status;
@@ -2480,7 +2699,7 @@ void llama_context::output_reorder() {
 //
 
 uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
-    if (model.arch == LLM_ARCH_QWEN3NEXT || model.arch == LLM_ARCH_KIMI_LINEAR || model.arch == LLM_ARCH_QWEN35 || model.arch == LLM_ARCH_QWEN35MOE) {
+    if (model.arch == LLM_ARCH_QWEN3NEXT || model.arch == LLM_ARCH_KIMI_LINEAR || model.arch == LLM_ARCH_QWEN35 || model.arch == LLM_ARCH_QWEN35MOE || model.arch == LLM_ARCH_QWEN4EXP) {
         return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
     }
     uint32_t res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
@@ -3302,6 +3521,9 @@ size_t llama_context::state_write_data(llama_io_write_i & io) {
 }
 
 size_t llama_context::state_read_data(llama_io_read_i & io) {
+    if (dstorage_prerouter) {
+        dstorage_prerouter_reset();
+    }
     LLAMA_LOG_DEBUG("%s: reading state\n", __func__);
 
     // read model info
@@ -3338,6 +3560,9 @@ size_t llama_context::state_seq_write_data(llama_io_write_i & io, llama_seq_id s
 }
 
 size_t llama_context::state_seq_read_data(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    if (dstorage_prerouter) {
+        dstorage_prerouter_reset();
+    }
     GGML_UNUSED(seq_id);
 
     if (memory) {
@@ -3684,6 +3909,27 @@ static int llama_env_int_clamped(const char * name, int fallback, int min_value,
     return std::max(min_value, std::min(std::atoi(value), max_value));
 }
 
+// Let ordinary graph nodes run together between the expert-cache boundaries (routers, MoE
+// outputs) instead of submitting and synchronizing every node separately.
+static bool llama_dstorage_grouped_eval_enabled() {
+    static const bool enabled = [] {
+        const char * value = std::getenv("LLAMA_DSTORAGE_GROUPED_EVAL");
+        return value != nullptr && std::strcmp(value, "") != 0 && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+// LLAMA_DSTORAGE_GROUPED_EVAL_DECODE=1: group nodes between expert-routing callbacks only for graphs of at most
+// 8 tokens (decode, MTP drafts and verification). Without grouping the scheduler runs and synchronizes every node on
+// its own; grouping also enables CUDA op fusion, so contexts that need reference numerics (moe_pooled_mmq) opt out.
+static bool llama_dstorage_grouped_eval_decode_enabled() {
+    static const bool enabled = [] {
+        const char * value = std::getenv("LLAMA_DSTORAGE_GROUPED_EVAL_DECODE");
+        return value != nullptr && std::strcmp(value, "") != 0 && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
 bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
     if (ask && graph_component_profile_active) {
         graph_component_profile_ask_calls++;
@@ -3723,33 +3969,43 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
     const bool is_router = is_dstorage_router || is_trace_router;
     const bool is_moe_out = std::strncmp(name, moe_out_prefix, std::strlen(moe_out_prefix)) == 0;
     const bool is_prerouter_hidden = dstorage_prerouter && dstorage_prerouter_decode_active &&
-            std::strncmp(name, prerouter_hidden_prefix, std::strlen(prerouter_hidden_prefix)) == 0;
+            std::strncmp(name, prerouter_hidden_prefix, std::strlen(prerouter_hidden_prefix)) == 0 &&
+            std::atoi(name + std::strlen(prerouter_hidden_prefix)) == dstorage_prerouter_owner;
 
     if (ask) {
         if (is_router || is_prerouter_hidden || (cparams.dstorage_moe && is_moe_out)) {
             return true;
         }
-        return cparams.cb_eval ? cparams.cb_eval(t, ask, cparams.cb_eval_user_data) : true;
+        const bool grouped = llama_dstorage_grouped_eval_enabled() ||
+                (llama_dstorage_grouped_eval_decode_enabled() && dstorage_profile_small_graph && !cparams.moe_pooled_mmq);
+        return cparams.cb_eval ? cparams.cb_eval(t, ask, cparams.cb_eval_user_data) : !grouped;
     }
 
     if (is_prerouter_hidden) {
         const int layer_idx = std::atoi(name + std::strlen(prerouter_hidden_prefix));
         if (layer_idx >= 0 && layer_idx < (int) dstorage_prerouter_hidden.size() &&
                 dstorage_prerouter->has_owner(layer_idx) &&
-                ggml_nelements(t) == (int64_t) model.hparams.n_embd && ggml_is_contiguous(t)) {
+                ggml_nelements(t) == (int64_t) model.hparams.n_embd * (int64_t) dstorage_prerouter_rows.size() &&
+                ggml_is_contiguous(t)) {
+            const int64_t capture_start = ggml_time_us();
             auto & hidden = dstorage_prerouter_hidden[layer_idx];
-            hidden.resize(model.hparams.n_embd);
+            hidden.resize(model.hparams.n_embd * dstorage_prerouter_rows.size());
+            const size_t first_row = dstorage_prerouter_prefetch && dstorage_prerouter_rows.size() > 1
+                    ? dstorage_prerouter_rows.size() - 2 : 0;
+            const size_t first = first_row * model.hparams.n_embd;
+            const size_t count = dstorage_prerouter_prefetch ? model.hparams.n_embd : hidden.size();
             if (t->type == GGML_TYPE_F32) {
-                ggml_backend_tensor_get(t, hidden.data(), 0, hidden.size() * sizeof(float));
+                ggml_backend_tensor_get(t, hidden.data() + first, first * sizeof(float), count * sizeof(float));
             } else if (t->type == GGML_TYPE_F16) {
-                std::vector<ggml_fp16_t> half(hidden.size());
-                ggml_backend_tensor_get(t, half.data(), 0, half.size() * sizeof(ggml_fp16_t));
+                std::vector<ggml_fp16_t> half(count);
+                ggml_backend_tensor_get(t, half.data(), first * sizeof(ggml_fp16_t), half.size() * sizeof(ggml_fp16_t));
                 for (size_t i = 0; i < half.size(); ++i) {
-                    hidden[i] = ggml_fp16_to_fp32(half[i]);
+                    hidden[first + i] = ggml_fp16_to_fp32(half[i]);
                 }
             } else {
                 hidden.clear();
             }
+            dstorage_prerouter_capture_us += uint64_t(std::max<int64_t>(0, ggml_time_us() - capture_start));
         }
         return cparams.cb_eval ? cparams.cb_eval(t, ask, cparams.cb_eval_user_data) : true;
     }
@@ -3816,13 +4072,8 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
     }
     trace_us("read_expert_ids", layer_idx, t0, llama_dstorage_debug_enabled() ? ggml_time_us() : 0);
 
-    const int dstorage_topk = (int) model.hparams.n_expert_used;
-    if (dstorage_prerouter && dstorage_prerouter_decode_active &&
-            n_ids == dstorage_topk && layer_idx < (int) dstorage_prerouter_current_ids.size()) {
-        if (dstorage_prerouter->has_owner(layer_idx)) {
-            dstorage_prerouter_current_ids[layer_idx] = expert_ids;
-        }
-    }
+    const int dstorage_topk = (int) cparams.n_expert_used;
+    dstorage_prerouter_record_routes(layer_idx, expert_ids);
     const dstorage_moe_phase phase =
             n_ids > dstorage_topk ? dstorage_moe_phase::prefill : dstorage_moe_phase::decode;
     if (is_trace_router) {
@@ -3857,6 +4108,7 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
     slot_manager->set_speculative_prefetch_enabled(
             cparams.dstorage_moe_prefetch &&
             (phase == dstorage_moe_phase::decode || dstorage_prefill_layer_preload));
+    slot_manager->set_request_top_k(dstorage_topk);
     if (dstorage_prefill_layer_preload) {
         if (dstorage_prefill_preloaded_pass.size() < model.layers.size()) {
             dstorage_prefill_preloaded_pass.resize(model.layers.size(), 0);
@@ -3867,6 +4119,7 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
         dstorage_prefill_last_layer = layer_idx;
     }
     t0 = llama_dstorage_debug_enabled() ? ggml_time_us() : 0;
+    const int64_t profile_ensure_start = dstorage_profile_enabled ? ggml_time_us() : 0;
     const bool loaded_ok = dstorage_prefill_workspace
             ? slot_manager->prefill_workspace_activate_layer(
                     layer_idx,
@@ -3881,6 +4134,13 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
                     pool_ptrs,
                     remapped_ids,
                     phase);
+    if (dstorage_profile_enabled) {
+        const uint64_t elapsed = uint64_t(std::max<int64_t>(0, ggml_time_us() - profile_ensure_start));
+        dstorage_profile_ensure_us += elapsed;
+        if (dstorage_profile_small_graph) {
+            dstorage_profile_small_ensure_us += elapsed;
+        }
+    }
     if (!loaded_ok) {
         LLAMA_LOG_ERROR("%s: failed to stream experts for layer %d\n", __func__, layer_idx);
         return false;
@@ -4080,8 +4340,7 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
 	               std::strcmp(value, "FALSE") != 0;
 	    };
 
-	    if (cparams.dstorage_moe_prefetch && dstorage_decode_like_for_prefetch &&
-                !(dstorage_prerouter && dstorage_prerouter_decode_active)) {
+	    if (cparams.dstorage_moe_prefetch && dstorage_decode_like_for_prefetch) {
 	        slot_manager->set_speculative_prefetch_enabled(true);
 	        if (predictive_prefetch_enabled()) {
 	            int submitted = 0;
@@ -4125,7 +4384,7 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
                     std::vector<int32_t> history_prediction =
                             slot_manager->history_prefetch_candidates(
                                     target_layer,
-                                    (int) model.hparams.n_expert_used);
+                                    (int) cparams.n_expert_used);
                     submit_prefetch(target_layer, history_prediction, "submit_predictive_history_prefetch");
                 }
             }
@@ -4134,7 +4393,7 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
                 std::vector<int32_t> same_layer_prediction =
                         slot_manager->history_prefetch_candidates(
                                 layer_idx,
-                                (int) model.hparams.n_expert_used);
+                                (int) cparams.n_expert_used);
 	                submit_prefetch(layer_idx, same_layer_prediction, "submit_predictive_same_layer_prefetch");
 	            }
 	            if (use_global_prefetch && submitted > 0) {
@@ -4179,7 +4438,7 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
                 std::vector<int32_t> history_prediction =
                         slot_manager->history_prefetch_candidates(
                                 next_layer,
-                                (int) model.hparams.n_expert_used);
+                                (int) cparams.n_expert_used);
                 if (!history_prediction.empty()) {
                     t0 = llama_dstorage_debug_enabled() ? ggml_time_us() : 0;
                     slot_manager->prefetch_experts_async(
@@ -4194,7 +4453,7 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
             std::vector<int32_t> same_layer_prediction =
                     slot_manager->history_prefetch_candidates(
                             layer_idx,
-                            (int) model.hparams.n_expert_used);
+                            (int) cparams.n_expert_used);
             if (!same_layer_prediction.empty()) {
                 t0 = llama_dstorage_debug_enabled() ? ggml_time_us() : 0;
                 slot_manager->prefetch_experts_async(
@@ -4205,6 +4464,12 @@ bool llama_context::dstorage_eval_callback(ggml_tensor * t, bool ask) {
             }
         }
         }
+    }
+    if (!dstorage_prerouter_candidates.empty() &&
+            slot_manager->prefetch_learned_experts_async(dstorage_prerouter_target,
+                    dstorage_prerouter_candidates.data(), (int) dstorage_prerouter_candidates.size(),
+                    dstorage_prerouter_job_valid)) {
+        dstorage_prerouter_submissions++;
     }
     if (cparams.dstorage_moe_prefetch || llama_dstorage_debug_enabled()) {
         if (dstorage_moe_compute_start_us.size() < model.layers.size()) {
@@ -4477,7 +4742,10 @@ llama_context_params llama_context_default_params() {
         /*.dstorage_moe                =*/ false,
         /*.dstorage_moe_prefetch       =*/ false,
         /*.dstorage_prerouter_path     =*/ nullptr,
-        /*.ctx_other                   =*/ nullptr,
+        /*.n_expert_used               =*/ 0,
+        /*.moe_full_layer_ubatch       =*/ false,
+        /*.moe_pooled_mmq              =*/ false,
+        /*.ctx_other                  =*/ nullptr,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
     };
@@ -4700,6 +4968,10 @@ float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
 
 void llama_set_embeddings_nextn(llama_context * ctx, bool value, bool masked) {
     ctx->set_embeddings_nextn(value, masked);
+}
+
+bool llama_set_prompt_chunking(llama_context * ctx, int32_t width, int32_t prompt_end) {
+    return ctx->set_prompt_chunking(width, prompt_end);
 }
 
 float * llama_get_embeddings_nextn(llama_context * ctx) {

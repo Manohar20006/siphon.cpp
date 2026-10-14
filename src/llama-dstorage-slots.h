@@ -10,6 +10,7 @@
 #include <deque>
 #include <future>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -88,6 +89,9 @@ struct ExpertSlot {
     bool occupied    = false;
     bool admission_pending = false;
     bool transfer_pending = false;
+    bool transfer_quarantined = false;
+    bool learned_prefetch = false;
+    bool learned_prefetch_used = false;
     uint32_t execution_pins = 0;
     uint64_t last_used_tick = 0;
     uint32_t prefill_hits = 0;
@@ -95,6 +99,7 @@ struct ExpertSlot {
     uint32_t prefetch_hits = 0;
     dstorage_arc_segment arc_segment = dstorage_arc_segment::none;
     uint8_t contiguous_neighbors = 0;
+    bool static_resident = false; // VRAM-static placement: kept resident, never evicted
 };
 
 class DStorageSlotManager {
@@ -118,6 +123,16 @@ public:
         uint64_t pinned_transfer_bytes = 0;
         uint64_t pinned_transfer_us = 0;
         uint64_t stream_total_us = 0;
+        uint64_t learned_prefetch_submitted_calls = 0;
+        uint64_t learned_prefetch_submitted_experts = 0;
+        uint64_t learned_prefetch_loaded_experts = 0;
+        uint64_t learned_prefetch_completed_ok = 0;
+        uint64_t learned_prefetch_completed_failed = 0;
+        uint64_t learned_prefetch_rejected = 0;
+        uint64_t learned_prefetch_rejected_full = 0;
+        uint64_t learned_prefetch_cancelled = 0;
+        uint64_t learned_prefetch_useful_hits = 0;
+        uint64_t learned_prefetch_recycled_slots = 0;
     };
 
     struct CacheLayout {
@@ -208,10 +223,68 @@ public:
     }
 
     static int calculate_prefill_token_chunk(int n_expert_used, int max_workspace_experts) {
-        if (n_expert_used <= 0 || max_workspace_experts <= 0) {
-            return 1;
+        if (n_expert_used <= 0 || max_workspace_experts < n_expert_used) {
+            return 0;
         }
-        return std::max(1, max_workspace_experts / n_expert_used);
+        return max_workspace_experts / n_expert_used;
+    }
+
+    static int calculate_prefill_speculative_reserve(
+            int n_slots,
+            int n_expert_used,
+            bool speculative_enabled,
+            bool prefill_preload_may_reserve,
+            bool reserve_always,
+            bool has_explicit_slots,
+            int explicit_slots) {
+        if (n_slots < 64 || n_expert_used <= 0 ||
+                !(speculative_enabled || prefill_preload_may_reserve || reserve_always)) {
+            return 0;
+        }
+        if (reserve_always && (!has_explicit_slots || explicit_slots <= 0)) {
+            return 0;
+        }
+        if (has_explicit_slots) {
+            return explicit_slots <= 0 ? 0 : std::min(n_slots / 4, explicit_slots);
+        }
+
+        const int64_t default_reserve = std::max<int64_t>(32, int64_t(n_expert_used) * 8);
+        return int(std::min<int64_t>(n_slots / 4, default_reserve));
+    }
+
+    static int calculate_prefill_pool_group_capacity(
+            const std::vector<int> & group_slot_counts,
+            int speculative_slots) {
+        if (group_slot_counts.empty()) {
+            return 0;
+        }
+
+        int64_t total_slots = 0;
+        for (const int group_slots : group_slot_counts) {
+            if (group_slots < 0) {
+                return 0;
+            }
+            total_slots += group_slots;
+        }
+        if (total_slots <= 0) {
+            return 0;
+        }
+
+        int min_prefill_slots = std::numeric_limits<int>::max();
+        for (const int group_slots : group_slot_counts) {
+            if (group_slots <= 0) {
+                return 0;
+            }
+
+            int reserved_slots = 0;
+            if (speculative_slots > 0) {
+                const int64_t distributed = int64_t(speculative_slots) * group_slots / total_slots;
+                reserved_slots = std::max(1, int(distributed));
+                reserved_slots = std::min(group_slots, reserved_slots);
+            }
+            min_prefill_slots = std::min(min_prefill_slots, group_slots - reserved_slots);
+        }
+        return min_prefill_slots;
     }
 
     static constexpr int max_prefill_workspace_experts() {
@@ -429,6 +502,24 @@ public:
         return candidate.last_used_tick < current_best.last_used_tick;
     }
 
+    // Expected number of forward passes until an expert is routed again: the fraction of a pass until its layer
+    // runs next, plus (1/p - 1) whole passes for an expert used with probability p per pass. p is estimated from
+    // the use count decayed by `decay` per pass (a count of 1/(1-decay) means "used in every recent pass").
+    // Evicting the largest value approximates Belady's MIN for the cyclic layer order of the forward passes.
+    static double calculate_expected_passes_to_next_use(
+            double decayed_use_count,
+            double decay,
+            int expert_layer,
+            int current_layer,
+            int total_layers) {
+        const double p = std::min(1.0, std::max(1e-6, decayed_use_count * (1.0 - decay)));
+        const int n_layers = std::max(1, total_layers);
+        const int distance = expert_layer > current_layer
+                ? expert_layer - current_layer
+                : n_layers - current_layer + expert_layer;
+        return double(distance) / n_layers + (1.0 / p - 1.0);
+    }
+
     static int64_t calculate_retention_score(
             const ExpertSlot & slot,
             uint32_t request_decode_count,
@@ -505,7 +596,70 @@ public:
     }
 
     static bool slot_is_protected(const ExpertSlot & slot) {
-        return slot.execution_pins > 0 || slot.transfer_pending || slot.admission_pending;
+        return slot.execution_pins > 0 || slot.transfer_pending ||
+               slot.transfer_quarantined || slot.admission_pending ||
+               slot.static_resident;
+    }
+
+    static constexpr int max_learned_prefetch_experts() {
+        return 4;
+    }
+
+    static bool learned_prefetch_request_valid(
+            const int32_t * expert_ids,
+            int count,
+            int n_experts,
+            bool token_valid) {
+        if (!token_valid || expert_ids == nullptr || count <= 0 ||
+                count > max_learned_prefetch_experts() || n_experts <= 0) {
+            return false;
+        }
+        for (int i = 0; i < count; ++i) {
+            if (expert_ids[i] < 0 || expert_ids[i] >= n_experts) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool learned_prefetch_slot_available(
+            const ExpertSlot & slot,
+            bool speculative_and_compatible,
+            int target_layer = -1) {
+        if (!speculative_and_compatible || slot_is_protected(slot)) {
+            return false;
+        }
+        if (!slot.occupied) {
+            return true;
+        }
+        return slot.learned_prefetch && slot.learned_prefetch_used &&
+               (target_layer < 0 ||
+                (slot.layer_idx != target_layer && slot.layer_idx != target_layer - 1));
+    }
+
+    static int learned_prefetch_available_slots(
+            const std::vector<ExpertSlot> & slots,
+            const std::vector<uint8_t> & speculative_and_compatible,
+            int target_layer = -1) {
+        if (slots.size() != speculative_and_compatible.size()) {
+            return 0;
+        }
+        int available = 0;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            available += learned_prefetch_slot_available(
+                    slots[i], speculative_and_compatible[i] != 0, target_layer) ? 1 : 0;
+        }
+        return available;
+    }
+
+    static bool learned_prefetch_has_capacity(
+            int required_slots,
+            const std::vector<ExpertSlot> & slots,
+            const std::vector<uint8_t> & speculative_and_compatible,
+            int target_layer = -1) {
+        return required_slots >= 0 && slots.size() == speculative_and_compatible.size() &&
+               learned_prefetch_available_slots(
+                       slots, speculative_and_compatible, target_layer) >= required_slots;
     }
 
     static int calculate_speculative_slot_count(int n_slots, int n_expert_used) {
@@ -522,6 +676,10 @@ public:
             return 0;
         }
         return std::min(n_slots / 4, requested);
+    }
+
+    static bool should_reserve_speculative(bool enabled, bool always) {
+        return enabled || always;
     }
 
     bool slot_in_speculative_partition(int slot_idx, int speculative_slots) const {
@@ -596,12 +754,14 @@ public:
     // out_id_map: receives the mapping from position i -> slot index
     // Returns true on success.
     bool ensure_experts_loaded(
-        int layer_idx,
-        const int32_t * expert_ids,
-        int n_selected,
-        std::unordered_map<std::string, uint64_t> & out_pool_ptrs,
-        std::vector<int32_t> & out_id_map,
-        dstorage_moe_phase phase = dstorage_moe_phase::decode
+            int layer_idx,
+            const int32_t * expert_ids,
+            int n_selected,
+            std::unordered_map<std::string, uint64_t> & out_pool_ptrs,
+            std::vector<int32_t> & out_id_map,
+            dstorage_moe_phase phase = dstorage_moe_phase::decode,
+            bool free_only = false,
+            std::shared_ptr<std::atomic<bool>> valid = nullptr
     );
 
     // Best-effort speculative cache warmup. This uses the same cache and streaming
@@ -616,10 +776,22 @@ public:
     // remains authoritative and will naturally wait if it reaches the same shared
     // cache while a speculative prefetch is still mutating it.
     bool prefetch_experts_async(
-        int layer_idx,
-        const int32_t * expert_ids,
-        int n_selected
+            int layer_idx,
+            const int32_t * expert_ids,
+            int n_selected
     );
+    bool prefetch_learned_experts_async(
+            int layer_idx,
+            const int32_t * ids,
+            int count,
+            std::shared_ptr<std::atomic<bool>> valid);
+    // Read-only shadow statistic. Returns -1 if the slot lock is contended or
+    // the request is invalid; otherwise returns the number not resident now.
+    int count_learned_nonresident(int layer_idx, const int32_t * ids, int count);
+    // Best-effort read-only count of free or consumed learned-prefetch slots
+    // available to this layer. Returns zero on contention or when staging is
+    // unavailable, including while another learned-prefetch job is in flight.
+    int learned_prefetch_available_slots(int layer_idx);
     bool prefetch_experts_async_force(
         int layer_idx,
         const int32_t * expert_ids,
@@ -661,6 +833,18 @@ public:
     // Get number of slots
     int get_n_slots() const { return n_slots_; }
     int get_active_slot_count() const { return active_slot_count_; }
+    uint64_t get_allocated_pool_bytes();
+    bool cache_phase_policy_enabled() const { return phase_cache_policy_; }
+    // top_k: routed experts per token of the querying context (0 = model default).
+    int get_prefill_token_capacity(int top_k = 0);
+    // Smallest pool-group slot count left for one prefill ubatch, assuming speculative reservations
+    // are active. When it reaches the expert count, a prefill ubatch of any size fits because one
+    // layer has at most n_expert distinct experts. Requires allocated pools (0 otherwise).
+    int full_layer_prefill_slots() const;
+    bool can_hold_full_layer_prefill() const;
+    // Routed experts per token of the context issuing the current request. Only the
+    // per-call capacity check uses it; cache policy stays keyed to the model default.
+    void set_request_top_k(int top_k) { request_top_k_.store(top_k, std::memory_order_relaxed); }
 
     // Get actual slot stride (in bytes) allocated for a given tensor type pool
     uint64_t get_slot_stride(const std::string & tensor_name);
@@ -724,6 +908,8 @@ private:
     bool static_pinned_entry(uint64_t expert_key) const;
     void pin_index_update(uint64_t expert_key);
     bool preload_static_pinned_layers();
+    void select_vram_static_experts();
+    void maybe_mark_vram_static(int slot_idx);
     void release_prefill_only_pinned_cache();
     bool cache_evicted_expert_to_ram(int slot_idx);
     bool prefetch_global_batch(std::vector<QueuedGlobalPrefetch> batch);
@@ -751,11 +937,17 @@ private:
             uint64_t stream_file_bytes,
             uint64_t transfer_us,
             uint64_t total_us);
+    int64_t request_eviction_score(
+            const ExpertSlot & slot,
+            int current_layer) const;
+    void record_expert_use(int layer_idx, const std::vector<int32_t> & unique_experts);
+    double expected_passes_to_next_use(const ExpertSlot & slot, int current_layer) const;
     bool is_better_request_eviction_candidate(
             const ExpertSlot & candidate,
             const ExpertSlot & current_best,
             int current_layer) const;
     int speculative_slot_count() const;
+    int explicit_speculative_slot_count() const;
     bool ensure_prefill_workspaces_allocated();
     bool load_prefill_workspace_layer(int workspace_idx, int layer_idx, const std::vector<int32_t> & expert_ids);
 
@@ -822,9 +1014,34 @@ private:
     uint64_t pool_budget_bytes_decode_ = 0;
     dstorage_moe_phase current_allocated_phase_ = dstorage_moe_phase::prefill;
     bool pools_allocated_ = false;
+    uint64_t allocated_pool_bytes_ = 0;
     bool phase_cache_policy_ = false;
     bool hybrid_arc_policy_ = false;
+    // Default eviction policy for decode-sized batches (single tokens and MTP verification): evict the resident
+    // expert expected to be needed furthest in the future, from a per-expert use rate decayed per forward pass.
+    // Prompt batches keep the older request-count/layer-urgency score, which measured faster for them.
+    // LLAMA_DSTORAGE_CACHE_POLICY=legacy uses the older score for every batch.
+    bool legacy_eviction_policy_ = false;
+    bool eviction_for_prompt_batch_ = false; // set per ensure_experts_loaded call
+    double expert_use_decay_ = 0.0;
+    std::vector<double> expert_use_decay_pow_; // expert_use_decay_^age for small ages
+    std::vector<float> expert_use_freq_;      // [layer * n_experts_ + expert]
+    std::vector<uint32_t> expert_use_pass_of_; // pass at which expert_use_freq_ was last decayed
+    uint32_t expert_use_pass_ = 0;
+    int expert_use_last_layer_ = -1;
     std::atomic<bool> speculative_prefetch_enabled_{false};
+    std::atomic<int> request_top_k_{0};
+    std::atomic<bool> learned_prefetch_in_flight_{false};
+    std::atomic<uint64_t> learned_prefetch_submitted_calls_{0};
+    std::atomic<uint64_t> learned_prefetch_submitted_experts_{0};
+    std::atomic<uint64_t> learned_prefetch_loaded_experts_{0};
+    std::atomic<uint64_t> learned_prefetch_completed_ok_{0};
+    std::atomic<uint64_t> learned_prefetch_completed_failed_{0};
+    std::atomic<uint64_t> learned_prefetch_rejected_{0};
+    std::atomic<uint64_t> learned_prefetch_rejected_full_{0};
+    std::atomic<uint64_t> learned_prefetch_cancelled_{0};
+    std::atomic<uint64_t> learned_prefetch_useful_hits_{0};
+    std::atomic<uint64_t> learned_prefetch_recycled_slots_{0};
     uint64_t use_tick_ = 0;
     uint64_t pinned_budget_bytes_ = 0;
     uint64_t pinned_used_bytes_ = 0;
@@ -865,6 +1082,15 @@ private:
     std::vector<int> static_pinned_layers_;
     std::vector<std::pair<int, int>> static_pinned_expert_selection_;
     bool static_pinned_preload_done_ = false;
+    // VRAM-static placement (LLAMA_DSTORAGE_VRAM_STATIC_EXPERTS_FILE, ranked): the selected
+    // experts stay resident once loaded. Each pool group keeps a dynamic reserve for the
+    // misses of one layer; the RAM seed skips the selection so the two tiers are exclusive.
+    std::vector<std::pair<int, int>> vram_static_expert_selection_;
+    std::unordered_set<uint64_t> vram_static_experts_;
+    std::vector<int> vram_static_counts_; // per pool group
+    std::vector<int> vram_static_caps_;   // per pool group
+    bool vram_static_selected_ = false;
+    uint64_t vram_static_demotions_ = 0;
     bool prefill_only_pinned_released_ = false;
     std::unordered_map<uint64_t, uint32_t> pinned_frequency_;
     std::unordered_map<uint64_t, int> resident_experts_;

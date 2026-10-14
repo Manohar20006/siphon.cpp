@@ -201,6 +201,28 @@ static __global__ void flash_attn_ext_vec(
         }
 
         __syncthreads();
+    } else if constexpr (type_K == GGML_TYPE_TQ3_0) {
+        // Rotate Q into the TQ3_0 code domain once, so that K rows are dotted without inverse WHTs (see fattn-common).
+        constexpr int n = D/nthreads_KQ;
+        const int i0 = (nthreads_KQ == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_KQ) * n;
+#pragma unroll
+        for (int j = 0; j < ncols; ++j) {
+            const float * Q_j = (const float *) (Q + j*nb01) + i0;
+            float q[n];
+#pragma unroll
+            for (int l = 0; l < n; ++l) {
+                q[l] = ncols == 1 || ic0 + j < int(ne01.z) ? Q_j[l]*scale : 0.0f;
+            }
+            tq3_0_rotate_fwd<n>(q, i0 % QK_TQ3_0);
+#pragma unroll
+            for (int l = 0; l < n; l += 2) {
+#ifdef V_DOT2_F32_F16_AVAILABLE
+                Q_reg[j][l/2] = make_half2(q[l], q[l + 1]);
+#else
+                Q_reg[j][l/2] = make_float2(q[l], q[l + 1]);
+#endif // V_DOT2_F32_F16_AVAILABLE
+            }
+        }
     } else {
 #ifdef V_DOT2_F32_F16_AVAILABLE
         const half2 scale_h2 = make_half2(scale, scale);
@@ -413,6 +435,7 @@ static __global__ void flash_attn_ext_vec(
 
     __shared__ float KQ_max_shared[ncols][WARP_SIZE];
     __shared__ float KQ_sum_shared[ncols][WARP_SIZE];
+    __shared__ float VKQ_tq3_0[type_V == GGML_TYPE_TQ3_0 ? D : 1];
 #pragma unroll
     for (int j = 0; j < ncols; ++j) {
         if (threadIdx.y == 0) {
@@ -483,6 +506,25 @@ static __global__ void flash_attn_ext_vec(
 
         __syncthreads();
 
+        if constexpr (type_V == GGML_TYPE_TQ3_0) {
+            // V was accumulated in the TQ3_0 code domain: combine the warps first, then rotate back per output value.
+            if (nthreads <= D || tid < D) {
+#pragma unroll
+                for (int i0 = 0; i0 < D; i0 += nthreads) {
+                    float val = 0.0f;
+#pragma unroll
+                    for (int w = 0; w < nwarps; ++w) {
+#pragma unroll
+                        for (int v = 0; v < V_cols_per_iter; ++v) {
+                            val += float(KQ[w*V_cols_per_iter*D + v*D + i0 + tid]);
+                        }
+                    }
+                    VKQ_tq3_0[i0 + tid] = val;
+                }
+            }
+            __syncthreads();
+        }
+
         if (nthreads <= D || tid < D) {
             KQ_sum[j_VKQ] = KQ_sum_shared[j_VKQ][threadIdx.x];
             KQ_sum[j_VKQ] = warp_reduce_sum(KQ_sum[j_VKQ]);
@@ -490,11 +532,16 @@ static __global__ void flash_attn_ext_vec(
 #pragma unroll
             for (int i0 = 0; i0 < D; i0 += nthreads) {
                 float dst_val = 0;
+                if constexpr (type_V == GGML_TYPE_TQ3_0) {
+                    const int i = i0 + tid;
+                    dst_val = tq3_0_rotate_inv_one(VKQ_tq3_0 + (i - i % QK_TQ3_0), i % QK_TQ3_0);
+                } else {
 #pragma unroll
-                for (int w = 0; w < nwarps; ++w) {
+                    for (int w = 0; w < nwarps; ++w) {
 #pragma unroll
-                    for (int v = 0; v < V_cols_per_iter; ++v) {
-                        dst_val += float(KQ[w*V_cols_per_iter*D + v*D + i0 + tid]);
+                        for (int v = 0; v < V_cols_per_iter; ++v) {
+                            dst_val += float(KQ[w*V_cols_per_iter*D + v*D + i0 + tid]);
+                        }
                     }
                 }
                 if (gridDim.y == 1) {

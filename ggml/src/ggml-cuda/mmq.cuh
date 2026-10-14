@@ -4137,29 +4137,86 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
     }
 }
 
-#define DECL_MMQ_CASE(type)                                                        \
-    template void mul_mat_q_case<type>(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) \
+// Load every tile-width variant of the MMQ kernels for one type (GGML_CUDA_PRELOAD_MMQ). With CUDA lazy module
+// loading a variant is loaded on first use, which needs device memory; when the rest of VRAM is already taken (e.g. a
+// full MoE expert cache) a variant first needed mid-run fails with out of memory. Preloading moves that to startup.
+// Must be instantiated in the same translation unit as mul_mat_q_case: each TU carries its own kernel copies.
+template <ggml_type type, int mmq_x>
+static void mul_mat_q_preload_one(const int cc, const int mmq_y, const int warp_size, const int nwarps, const size_t smpbo) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if (mmq_x > get_mmq_x_max_host(cc) || mmq_x % mmq_get_granularity_host(mmq_x, cc) != 0) {
+        return;
+    }
+    const int nbytes_shared = mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size, nwarps);
+    if ((size_t) nbytes_shared > smpbo) {
+        return;
+    }
+    cudaFuncAttributes attr;
+    CUDA_CHECK(cudaFuncSetAttribute(mul_mat_q<type, mmq_x, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared));
+    CUDA_CHECK(cudaFuncSetAttribute(mul_mat_q<type, mmq_x,  true>, cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared));
+    CUDA_CHECK(cudaFuncGetAttributes(&attr, mul_mat_q_stream_k_fixup<type, mmq_x, false>));
+    CUDA_CHECK(cudaFuncGetAttributes(&attr, mul_mat_q_stream_k_fixup<type, mmq_x,  true>));
+#else
+    GGML_UNUSED_VARS(cc, mmq_y, warp_size, nwarps, smpbo);
+#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+}
 
-extern DECL_MMQ_CASE(GGML_TYPE_Q4_0);
-extern DECL_MMQ_CASE(GGML_TYPE_Q4_1);
-extern DECL_MMQ_CASE(GGML_TYPE_Q5_0);
-extern DECL_MMQ_CASE(GGML_TYPE_Q5_1);
-extern DECL_MMQ_CASE(GGML_TYPE_Q8_0);
-extern DECL_MMQ_CASE(GGML_TYPE_MXFP4);
-extern DECL_MMQ_CASE(GGML_TYPE_NVFP4);
-extern DECL_MMQ_CASE(GGML_TYPE_Q2_K);
-extern DECL_MMQ_CASE(GGML_TYPE_Q3_K);
-extern DECL_MMQ_CASE(GGML_TYPE_Q4_K);
-extern DECL_MMQ_CASE(GGML_TYPE_Q5_K);
-extern DECL_MMQ_CASE(GGML_TYPE_Q6_K);
-extern DECL_MMQ_CASE(GGML_TYPE_IQ2_XXS);
-extern DECL_MMQ_CASE(GGML_TYPE_IQ2_XS);
-extern DECL_MMQ_CASE(GGML_TYPE_IQ2_S);
-extern DECL_MMQ_CASE(GGML_TYPE_IQ3_XXS);
-extern DECL_MMQ_CASE(GGML_TYPE_IQ3_S);
-extern DECL_MMQ_CASE(GGML_TYPE_IQ1_S);
-extern DECL_MMQ_CASE(GGML_TYPE_IQ4_NL);
-extern DECL_MMQ_CASE(GGML_TYPE_IQ4_XS);
+template <ggml_type type>
+void mul_mat_q_preload() {
+    const int    id        = ggml_cuda_get_device();
+    const int    cc        = ggml_cuda_info().devices[id].cc;
+    const size_t smpbo     = ggml_cuda_info().devices[id].smpbo;
+    const int    warp_size = ggml_cuda_info().devices[id].warp_size;
+    const int    nwarps    = mmq_get_nwarps_host(cc, warp_size);
+    const int    mmq_y     = get_mmq_y_host(cc);
+
+    mul_mat_q_preload_one<type,   8>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  16>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  24>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  32>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  40>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  48>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  56>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  64>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  72>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  80>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  88>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type,  96>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type, 104>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type, 112>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type, 120>(cc, mmq_y, warp_size, nwarps, smpbo);
+    mul_mat_q_preload_one<type, 128>(cc, mmq_y, warp_size, nwarps, smpbo);
+}
+
+// instance files: definitions of both; this header: extern declarations (EXTERN_MMQ_CASE)
+#define DECL_MMQ_CASE(type)                                                        \
+    template void mul_mat_q_case<type>(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream); \
+    template void mul_mat_q_preload<type>()                                        \
+
+#define EXTERN_MMQ_CASE(type)                                                      \
+    extern template void mul_mat_q_case<type>(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream); \
+    extern template void mul_mat_q_preload<type>()                                 \
+
+EXTERN_MMQ_CASE(GGML_TYPE_Q4_0);
+EXTERN_MMQ_CASE(GGML_TYPE_Q4_1);
+EXTERN_MMQ_CASE(GGML_TYPE_Q5_0);
+EXTERN_MMQ_CASE(GGML_TYPE_Q5_1);
+EXTERN_MMQ_CASE(GGML_TYPE_Q8_0);
+EXTERN_MMQ_CASE(GGML_TYPE_MXFP4);
+EXTERN_MMQ_CASE(GGML_TYPE_NVFP4);
+EXTERN_MMQ_CASE(GGML_TYPE_Q2_K);
+EXTERN_MMQ_CASE(GGML_TYPE_Q3_K);
+EXTERN_MMQ_CASE(GGML_TYPE_Q4_K);
+EXTERN_MMQ_CASE(GGML_TYPE_Q5_K);
+EXTERN_MMQ_CASE(GGML_TYPE_Q6_K);
+EXTERN_MMQ_CASE(GGML_TYPE_IQ2_XXS);
+EXTERN_MMQ_CASE(GGML_TYPE_IQ2_XS);
+EXTERN_MMQ_CASE(GGML_TYPE_IQ2_S);
+EXTERN_MMQ_CASE(GGML_TYPE_IQ3_XXS);
+EXTERN_MMQ_CASE(GGML_TYPE_IQ3_S);
+EXTERN_MMQ_CASE(GGML_TYPE_IQ1_S);
+EXTERN_MMQ_CASE(GGML_TYPE_IQ4_NL);
+EXTERN_MMQ_CASE(GGML_TYPE_IQ4_XS);
 
 // -------------------------------------------------------------------------------------------------------------------------
 
@@ -4173,4 +4230,7 @@ void ggml_cuda_op_mul_mat_q(
     const int64_t src1_padded_row_size, cudaStream_t stream);
 
 bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts);
+
+// load all MMQ kernel variants of a quantized type on the current device (no-op for types without MMQ)
+void ggml_cuda_mmq_preload(enum ggml_type type);
 

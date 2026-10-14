@@ -16,6 +16,7 @@
 #include <memory>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -241,6 +242,23 @@ static uint64_t llama_dstorage_expert_file_offset(const ExpertTensorInfo & info,
 static bool llama_dstorage_hybrid_arc_requested() {
     const char * value = std::getenv("LLAMA_DSTORAGE_CACHE_POLICY");
     return value != nullptr && std::strcmp(value, "hybrid_arc") == 0;
+}
+
+static bool llama_dstorage_legacy_cache_policy_requested() {
+    const char * value = std::getenv("LLAMA_DSTORAGE_CACHE_POLICY");
+    return value != nullptr && std::strcmp(value, "legacy") == 0;
+}
+
+// Half-life, in forward passes, of the per-expert use rate behind the default eviction policy. Replaying routing
+// traces of MTP decode and prompt processing put the best value at 3-5 passes.
+static double llama_dstorage_next_use_half_life() {
+    const char * env = std::getenv("LLAMA_DSTORAGE_NEXT_USE_HALF_LIFE");
+    if (env == nullptr || env[0] == '\0') {
+        return 3.0;
+    }
+    char * end = nullptr;
+    const double value = std::strtod(env, &end);
+    return end != env && value > 0.0 ? std::min(value, 1000.0) : 3.0;
 }
 
 static const char * llama_dstorage_routing_trace_path() {
@@ -479,9 +497,10 @@ static std::vector<int> llama_dstorage_parse_static_pinned_layers(int n_layers) 
 
 static std::vector<std::pair<int, int>> llama_dstorage_parse_static_pinned_experts(
         int n_layers,
-        int n_experts) {
+        int n_experts,
+        const char * env_name = "LLAMA_MOE_PINNED_STATIC_EXPERTS_FILE") {
     std::vector<std::pair<int, int>> experts;
-    const char * path = std::getenv("LLAMA_MOE_PINNED_STATIC_EXPERTS_FILE");
+    const char * path = std::getenv(env_name);
     if (path == nullptr || path[0] == '\0') {
         return experts;
     }
@@ -624,6 +643,11 @@ int DStorageSlotManager::get_slot_count(const std::string & tensor_name) {
     return n_slots_;
 }
 
+uint64_t DStorageSlotManager::get_allocated_pool_bytes() {
+    std::lock_guard<std::mutex> slot_lock(slots_mutex_);
+    return pools_allocated_ ? allocated_pool_bytes_ : 0;
+}
+
 uint64_t DStorageSlotManager::get_prefill_workspace_slot_stride(const std::string & tensor_name) {
     std::lock_guard<std::mutex> slot_lock(slots_mutex_);
     auto it = type_strides_.find(get_tensor_type_key(tensor_name));
@@ -661,6 +685,28 @@ static bool llama_dstorage_contiguous_load_slots() {
                std::strcmp(value, "FALSE") != 0;
     }();
     return enabled;
+}
+
+// Queue pinned-RAM expert copies without waiting so the file stream of the same callback
+// overlaps them (default on; LLAMA_DSTORAGE_OVERLAP_PINNED_H2D=0 restores the serial order).
+static bool llama_dstorage_overlap_pinned_h2d() {
+    static const bool enabled = [] {
+        const char * value = std::getenv("LLAMA_DSTORAGE_OVERLAP_PINNED_H2D");
+        return value == nullptr ||
+               (std::strcmp(value, "0") != 0 &&
+                std::strcmp(value, "false") != 0 &&
+                std::strcmp(value, "FALSE") != 0);
+    }();
+    return enabled;
+}
+
+// Dynamic slots each pool group keeps free of VRAM-static experts (one layer's misses).
+static int llama_dstorage_vram_static_reserve() {
+    static const int reserve = [] {
+        const char * value = std::getenv("LLAMA_DSTORAGE_VRAM_STATIC_RESERVE");
+        return value != nullptr && value[0] != '\0' ? std::max(0, std::atoi(value)) : 192;
+    }();
+    return reserve;
 }
 
 static uint64_t llama_dstorage_max_batch_staging_bytes() {
@@ -812,14 +858,99 @@ void DStorageSlotManager::set_speculative_prefetch_enabled(bool enabled) {
 }
 
 int DStorageSlotManager::speculative_slot_count() const {
-    if (!speculative_prefetch_enabled_ || n_slots_ < 64 || n_expert_used_ <= 0) {
+    const char * always_env = std::getenv("LLAMA_DSTORAGE_SPECULATIVE_RESERVE_ALWAYS");
+    const bool always = always_env != nullptr && std::strcmp(always_env, "1") == 0;
+    if (!should_reserve_speculative(speculative_prefetch_enabled_, always) ||
+            n_slots_ < 64 || n_expert_used_ <= 0) {
         return 0;
     }
     const char * env = std::getenv("LLAMA_DSTORAGE_SPECULATIVE_SLOTS");
+    if (always && (env == nullptr || env[0] == '\0' || std::atoi(env) <= 0)) {
+        return 0;
+    }
     if (env != nullptr && env[0] != '\0') {
         return calculate_speculative_slot_count(n_slots_, n_expert_used_);
     }
     return std::min(n_slots_ / 4, std::max(32, n_expert_used_ * 8));
+}
+
+int DStorageSlotManager::explicit_speculative_slot_count() const {
+    const char * always_env = std::getenv("LLAMA_DSTORAGE_SPECULATIVE_RESERVE_ALWAYS");
+    const bool always = always_env != nullptr && std::strcmp(always_env, "1") == 0;
+    if (!should_reserve_speculative(speculative_prefetch_enabled_, always) ||
+            n_slots_ < 64 || n_expert_used_ <= 0) {
+        return 0;
+    }
+    const char * env = std::getenv("LLAMA_DSTORAGE_SPECULATIVE_SLOTS");
+    if (env == nullptr || env[0] == '\0' || std::atoi(env) <= 0) {
+        return 0;
+    }
+    return calculate_speculative_slot_count(n_slots_, n_expert_used_);
+}
+
+int DStorageSlotManager::get_prefill_token_capacity(int top_k) {
+    std::lock_guard<std::mutex> slot_lock(slots_mutex_);
+    if (top_k <= 0) {
+        top_k = n_expert_used_;
+    }
+
+    if (!ensure_pools_allocated()) {
+        throw std::runtime_error(
+                "DirectStorage prefill token capacity is unavailable because expert slot pools could not be allocated");
+    }
+    if (n_expert_used_ <= 0) {
+        throw std::runtime_error("DirectStorage prefill token capacity requires a positive top-k expert count");
+    }
+
+    const char * always_env = std::getenv("LLAMA_DSTORAGE_SPECULATIVE_RESERVE_ALWAYS");
+    const bool reserve_always = always_env != nullptr && std::strcmp(always_env, "1") == 0;
+    const char * preload_env = std::getenv("LLAMA_DSTORAGE_PREFILL_LAYER_PRELOAD");
+    const bool prefill_preload_may_reserve = preload_env != nullptr &&
+            std::strcmp(preload_env, "") != 0 &&
+            std::strcmp(preload_env, "0") != 0 &&
+            std::strcmp(preload_env, "false") != 0 &&
+            std::strcmp(preload_env, "FALSE") != 0;
+
+    const char * slots_env = std::getenv("LLAMA_DSTORAGE_SPECULATIVE_SLOTS");
+    const bool has_explicit_slots = slots_env != nullptr && slots_env[0] != '\0';
+    const int explicit_slots = has_explicit_slots ? std::atoi(slots_env) : 0;
+    const int possible_speculative_slots = calculate_prefill_speculative_reserve(
+            n_slots_,
+            n_expert_used_,
+            speculative_prefetch_enabled_.load(std::memory_order_acquire),
+            prefill_preload_may_reserve,
+            reserve_always,
+            has_explicit_slots,
+            explicit_slots);
+
+    const int min_prefill_slots = calculate_prefill_pool_group_capacity(
+            pool_group_slot_counts_, possible_speculative_slots);
+    const int token_capacity = calculate_prefill_token_chunk(top_k, min_prefill_slots);
+    if (token_capacity <= 0) {
+        throw std::runtime_error(
+                "DirectStorage prefill requires at least " + std::to_string(top_k) +
+                " expert slots for one token, but the smallest active pool group has only " +
+                std::to_string(min_prefill_slots) + " usable slots after speculative reservation");
+    }
+
+    return token_capacity;
+}
+
+int DStorageSlotManager::full_layer_prefill_slots() const {
+    if (n_slots_ <= 0 || pool_group_slot_counts_.empty() || n_expert_used_ <= 0) {
+        return 0;
+    }
+    const char * slots_env = std::getenv("LLAMA_DSTORAGE_SPECULATIVE_SLOTS");
+    const bool has_explicit_slots = slots_env != nullptr && slots_env[0] != '\0';
+    const int explicit_slots = has_explicit_slots ? std::atoi(slots_env) : 0;
+    const int speculative_slots = calculate_prefill_speculative_reserve(
+            n_slots_, n_expert_used_, /*speculative_enabled=*/ true, /*prefill_preload_may_reserve=*/ true,
+            /*reserve_always=*/ false, has_explicit_slots, explicit_slots);
+    return calculate_prefill_pool_group_capacity(pool_group_slot_counts_, speculative_slots);
+}
+
+bool DStorageSlotManager::can_hold_full_layer_prefill() const {
+    return n_experts_ > 0 && full_layer_prefill_slots() >= n_experts_;
 }
 
 bool DStorageSlotManager::hybrid_arc_enabled() const {
@@ -1499,6 +1630,16 @@ bool DStorageSlotManager::init(
     pinned_budget_bytes_ = uint64_t(moe_pinned_cache_mib) * 1024ull * 1024ull;
     phase_cache_policy_ = phase_cache_policy;
     hybrid_arc_policy_ = llama_dstorage_hybrid_arc_requested();
+    legacy_eviction_policy_ = llama_dstorage_legacy_cache_policy_requested();
+    expert_use_decay_ = std::pow(0.5, 1.0 / llama_dstorage_next_use_half_life());
+    expert_use_decay_pow_.resize(256);
+    for (size_t age = 0; age < expert_use_decay_pow_.size(); ++age) {
+        expert_use_decay_pow_[age] = std::pow(expert_use_decay_, double(age));
+    }
+    expert_use_freq_.assign(size_t(std::max(0, n_layers_)) * size_t(std::max(0, n_experts_)), 0.0f);
+    expert_use_pass_of_.assign(expert_use_freq_.size(), 0);
+    expert_use_pass_ = 0;
+    expert_use_last_layer_ = -1;
     pinned_used_bytes_ = 0;
     pinned_pending_bytes_ = 0;
     pinned_tick_ = 0;
@@ -1507,6 +1648,10 @@ bool DStorageSlotManager::init(
             llama_dstorage_parse_static_pinned_experts(n_layers_, n_experts_);
     static_pinned_experts_.clear();
     static_pinned_preload_done_ = false;
+    vram_static_expert_selection_ = llama_dstorage_parse_static_pinned_experts(
+            n_layers_, n_experts_, "LLAMA_DSTORAGE_VRAM_STATIC_EXPERTS_FILE");
+    vram_static_experts_.clear();
+    vram_static_selected_ = false;
     prefill_only_pinned_released_ = false;
     pool_group_slot_counts_.clear();
     layer_pool_groups_.clear();
@@ -1517,6 +1662,17 @@ bool DStorageSlotManager::init(
     decode_stats_ = {};
     prefetch_stats_ = {};
     diagnostic_stats_ = {};
+    learned_prefetch_in_flight_.store(false, std::memory_order_release);
+    learned_prefetch_submitted_calls_.store(0, std::memory_order_relaxed);
+    learned_prefetch_submitted_experts_.store(0, std::memory_order_relaxed);
+    learned_prefetch_loaded_experts_.store(0, std::memory_order_relaxed);
+    learned_prefetch_completed_ok_.store(0, std::memory_order_relaxed);
+    learned_prefetch_completed_failed_.store(0, std::memory_order_relaxed);
+    learned_prefetch_rejected_.store(0, std::memory_order_relaxed);
+    learned_prefetch_rejected_full_.store(0, std::memory_order_relaxed);
+    learned_prefetch_cancelled_.store(0, std::memory_order_relaxed);
+    learned_prefetch_useful_hits_.store(0, std::memory_order_relaxed);
+    learned_prefetch_recycled_slots_.store(0, std::memory_order_relaxed);
     request_activation_stats_ = {};
     last_request_phase_ = dstorage_moe_phase::prefill;
     request_tracking_started_ = false;
@@ -1857,6 +2013,11 @@ bool DStorageSlotManager::ensure_pools_allocated() {
         slots_[i].occupied       = false;
         slots_[i].last_used_tick = 0;
     }
+    vram_static_counts_.assign(n_pool_groups, 0);
+    vram_static_caps_.assign(n_pool_groups, 0);
+    for (int group = 0; group < n_pool_groups; ++group) {
+        vram_static_caps_[group] = std::max(0, pool_group_slot_counts_[group] - llama_dstorage_vram_static_reserve());
+    }
     llama_dstorage_trace_us("slots.ensure_pools", -1, "init_slot_table", t0, llama_dstorage_now_us());
 
     LLAMA_LOG_INFO("%s: DirectStorage MoE cache: %.2f MiB requested, %.2f MiB effective, %.2f MiB max logical slot, %d global slots, %d pool groups\n",
@@ -1958,6 +2119,7 @@ bool DStorageSlotManager::ensure_pools_allocated() {
             allocated_pool_bytes / 1024.0 / 1024.0,
             (uint64_t(n_slots_) * bytes_per_logical_slot - allocated_pool_bytes) / 1024.0 / 1024.0);
 
+    allocated_pool_bytes_ = allocated_pool_bytes;
     pools_allocated_ = true;
     LLAMA_DSTORAGE_DEBUG_LOG("DStorage DEBUG slots:ensure_pools complete n_slots=%d type_pools=%zu\n",
             n_slots_, type_pools_.size());
@@ -2450,57 +2612,102 @@ void DStorageSlotManager::prefill_workspace_preload_layers_async(
 }
 #endif
 
-bool DStorageSlotManager::is_better_request_eviction_candidate(
-        const ExpertSlot & candidate,
-        const ExpertSlot & current_best,
-        int current_layer) const {
-    const auto score = [&](const ExpertSlot & slot) {
-        const uint32_t request_decode_count = request_activation_stats_.count(
-                slot.layer_idx,
-                slot.expert_idx,
-                dstorage_moe_phase::decode);
-        const uint32_t request_prefill_count = request_activation_stats_.count(
-                slot.layer_idx,
-                slot.expert_idx,
-                dstorage_moe_phase::prefill);
-        if (!hybrid_arc_enabled() ||
-                slot.layer_idx < 0 ||
-                slot.layer_idx >= int(layer_arc_.size())) {
-            int64_t score = calculate_retention_score(
-                    slot,
-                    request_decode_count,
-                    request_prefill_count,
-                    current_layer,
-                    n_layers_);
-            if (decode_hot_protected(slot)) {
-                score += 100000000000ll + int64_t(decode_hot_score(
-                            make_expert_key(slot.layer_idx, slot.expert_idx)));
-            }
-            return score;
+void DStorageSlotManager::record_expert_use(int layer_idx, const std::vector<int32_t> & unique_experts) {
+    if (layer_idx < 0 || layer_idx >= n_layers_ || expert_use_freq_.empty()) {
+        return;
+    }
+    if (layer_idx < expert_use_last_layer_) {
+        expert_use_pass_++; // the routers run in layer order, so a lower layer starts the next forward pass
+    }
+    expert_use_last_layer_ = layer_idx;
+    for (const int32_t eid : unique_experts) {
+        if (eid < 0 || eid >= n_experts_) {
+            continue;
         }
+        const size_t idx = size_t(layer_idx) * size_t(n_experts_) + size_t(eid);
+        const uint32_t age = expert_use_pass_ - expert_use_pass_of_[idx];
+        const double decay = age < expert_use_decay_pow_.size()
+                ? expert_use_decay_pow_[age] : std::pow(expert_use_decay_, double(age));
+        expert_use_freq_[idx] = float(expert_use_freq_[idx] * decay + 1.0);
+        expert_use_pass_of_[idx] = expert_use_pass_;
+    }
+}
 
-        const LayerArcState & arc = layer_arc_[slot.layer_idx];
-        int64_t score = calculate_hybrid_retention_score(
+double DStorageSlotManager::expected_passes_to_next_use(const ExpertSlot & slot, int current_layer) const {
+    double use_count = 0.0;
+    if (slot.layer_idx >= 0 && slot.layer_idx < n_layers_ && slot.expert_idx >= 0 && slot.expert_idx < n_experts_ &&
+            !expert_use_freq_.empty()) {
+        const size_t idx = size_t(slot.layer_idx) * size_t(n_experts_) + size_t(slot.expert_idx);
+        const uint32_t age = expert_use_pass_ - expert_use_pass_of_[idx];
+        use_count = expert_use_freq_[idx] * (age < expert_use_decay_pow_.size()
+                ? expert_use_decay_pow_[age] : std::pow(expert_use_decay_, double(age)));
+    }
+    return calculate_expected_passes_to_next_use(
+            use_count, expert_use_decay_, slot.layer_idx, current_layer, n_layers_);
+}
+
+int64_t DStorageSlotManager::request_eviction_score(
+        const ExpertSlot & slot,
+        int current_layer) const {
+    if (!legacy_eviction_policy_ && !eviction_for_prompt_batch_ && !hybrid_arc_enabled()) {
+        // Higher score = keep; expected passes are at most ~1e6, so the scaled value stays below 2e12.
+        int64_t score = -int64_t(std::llround(expected_passes_to_next_use(slot, current_layer) * 1e6));
+        if (decode_hot_protected(slot)) {
+            score += 4000000000000ll + int64_t(decode_hot_score(
+                        make_expert_key(slot.layer_idx, slot.expert_idx)));
+        }
+        return score;
+    }
+    const uint32_t request_decode_count = request_activation_stats_.count(
+            slot.layer_idx,
+            slot.expert_idx,
+            dstorage_moe_phase::decode);
+    const uint32_t request_prefill_count = request_activation_stats_.count(
+            slot.layer_idx,
+            slot.expert_idx,
+            dstorage_moe_phase::prefill);
+    if (!hybrid_arc_enabled() ||
+            slot.layer_idx < 0 ||
+            slot.layer_idx >= int(layer_arc_.size())) {
+        int64_t score = calculate_retention_score(
                 slot,
                 request_decode_count,
                 request_prefill_count,
                 current_layer,
-                n_layers_,
-                arc.recent_residents + arc.frequent_residents,
-                layer_target_slots(slot.layer_idx),
-                arc.target_recent,
-                arc.recent_residents,
-                contiguous_resident_neighbors(slot),
-                expert_reload_bytes(slot.layer_idx));
+                n_layers_);
         if (decode_hot_protected(slot)) {
             score += 100000000000ll + int64_t(decode_hot_score(
                         make_expert_key(slot.layer_idx, slot.expert_idx)));
         }
         return score;
-    };
+    }
 
-    const int64_t candidate_score = score(candidate);
-    const int64_t best_score = score(current_best);
+    const LayerArcState & arc = layer_arc_[slot.layer_idx];
+    int64_t score = calculate_hybrid_retention_score(
+            slot,
+            request_decode_count,
+            request_prefill_count,
+            current_layer,
+            n_layers_,
+            arc.recent_residents + arc.frequent_residents,
+            layer_target_slots(slot.layer_idx),
+            arc.target_recent,
+            arc.recent_residents,
+            contiguous_resident_neighbors(slot),
+            expert_reload_bytes(slot.layer_idx));
+    if (decode_hot_protected(slot)) {
+        score += 100000000000ll + int64_t(decode_hot_score(
+                    make_expert_key(slot.layer_idx, slot.expert_idx)));
+    }
+    return score;
+}
+
+bool DStorageSlotManager::is_better_request_eviction_candidate(
+        const ExpertSlot & candidate,
+        const ExpertSlot & current_best,
+        int current_layer) const {
+    const int64_t candidate_score = request_eviction_score(candidate, current_layer);
+    const int64_t best_score = request_eviction_score(current_best, current_layer);
 
     if (candidate_score != best_score) {
         return candidate_score < best_score;
@@ -2685,6 +2892,41 @@ bool DStorageSlotManager::prewarm_vram_experts(
     return true;
 }
 
+void DStorageSlotManager::select_vram_static_experts() {
+    if (vram_static_selected_ || vram_static_expert_selection_.empty() || vram_static_caps_.empty()) {
+        return;
+    }
+    vram_static_selected_ = true;
+    std::vector<int> taken(vram_static_caps_.size(), 0);
+    for (const auto & target : vram_static_expert_selection_) {
+        const int group = pool_group_for_layer(target.first);
+        if (group < 0 || group >= int(taken.size()) || taken[group] >= vram_static_caps_[group]) {
+            continue;
+        }
+        if (vram_static_experts_.insert(make_expert_key(target.first, target.second)).second) {
+            taken[group]++;
+        }
+    }
+    LLAMA_LOG_INFO("%s: %zu VRAM-static experts selected from %zu ranked (reserve %d dynamic slots per pool group)\n",
+            __func__, vram_static_experts_.size(), vram_static_expert_selection_.size(),
+            llama_dstorage_vram_static_reserve());
+}
+
+void DStorageSlotManager::maybe_mark_vram_static(int slot_idx) {
+    ExpertSlot & slot = slots_[slot_idx];
+    if (slot.static_resident || !slot.occupied || vram_static_experts_.empty()) {
+        return;
+    }
+    const int group = slot.pool_group;
+    if (group < 0 || group >= int(vram_static_counts_.size()) ||
+            vram_static_counts_[group] >= vram_static_caps_[group] ||
+            vram_static_experts_.find(make_expert_key(slot.layer_idx, slot.expert_idx)) == vram_static_experts_.end()) {
+        return;
+    }
+    slot.static_resident = true;
+    vram_static_counts_[group]++;
+}
+
 bool DStorageSlotManager::preload_static_pinned_layers() {
     if (static_pinned_preload_done_) {
         return true;
@@ -2760,6 +3002,9 @@ bool DStorageSlotManager::preload_static_pinned_layers() {
         const std::vector<std::string> & layer_tnames = layer_it->second;
 
         const uint64_t expert_key = make_expert_key(static_layer_idx, eid);
+        if (vram_static_experts_.find(expert_key) != vram_static_experts_.end()) {
+            continue; // held in VRAM instead: keep the tiers exclusive
+        }
         if (pinned_cache_.find(expert_key) != pinned_cache_.end()) {
             static_pinned_experts_.insert(expert_key);
             continue;
@@ -3057,7 +3302,9 @@ bool DStorageSlotManager::prefetch_global_batch(std::vector<QueuedGlobalPrefetch
 
             int target_slot = -1;
             for (int s = 0; s < n_slots_; ++s) {
-                if (slot_allowed(s, request.layer_idx) && !slots_[s].occupied && !slots_[s].admission_pending && !slot_already_reserved(s)) {
+                if (slot_allowed(s, request.layer_idx) && !slots_[s].occupied &&
+                        !slots_[s].admission_pending && !slots_[s].transfer_quarantined &&
+                        !slot_already_reserved(s)) {
                     target_slot = s;
                     break;
                 }
@@ -3093,6 +3340,9 @@ bool DStorageSlotManager::prefetch_global_batch(std::vector<QueuedGlobalPrefetch
             slots_[target_slot].expert_idx = -1;
             slots_[target_slot].occupied = false;
             slots_[target_slot].transfer_pending = true;
+            slots_[target_slot].transfer_quarantined = false;
+            slots_[target_slot].learned_prefetch = false;
+            slots_[target_slot].learned_prefetch_used = false;
             slots_[target_slot].execution_pins = 0;
             slots_[target_slot].prefill_hits = 0;
             slots_[target_slot].decode_hits = 0;
@@ -3255,6 +3505,9 @@ bool DStorageSlotManager::prefetch_global_batch(std::vector<QueuedGlobalPrefetch
         slot.expert_idx = plan.eid;
         slot.occupied = true;
         slot.transfer_pending = false;
+        slot.transfer_quarantined = false;
+        slot.learned_prefetch = false;
+        slot.learned_prefetch_used = false;
         slot.last_used_tick = ++use_tick_;
         slot.prefetch_hits = 1000;
         arc_record_admission(slot, dstorage_moe_phase::prefetch);
@@ -3434,6 +3687,217 @@ bool DStorageSlotManager::prefetch_experts_async(
     }
 }
 
+bool DStorageSlotManager::prefetch_learned_experts_async(
+        int layer_idx,
+        const int32_t * expert_ids,
+        int count,
+        std::shared_ptr<std::atomic<bool>> valid) {
+    auto reject = [this]() {
+        learned_prefetch_rejected_.fetch_add(1, std::memory_order_relaxed);
+        learned_prefetch_in_flight_.store(false, std::memory_order_release);
+        return false;
+    };
+
+    bool expected = false;
+    if (!learned_prefetch_in_flight_.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        learned_prefetch_rejected_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    if (!valid || !valid->load(std::memory_order_acquire)) {
+        if (valid) {
+            learned_prefetch_cancelled_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return reject();
+    }
+#ifdef _WIN32
+    // Windows copy-event failure retirement has not been validated end to end.
+    // Keep learned staging disabled there; native scheduling/shadow are intact.
+    return reject();
+#endif
+    if (!learned_prefetch_request_valid(expert_ids, count, n_experts_, true)) {
+        return reject();
+    }
+
+    std::vector<int32_t> ids;
+    ids.reserve(size_t(count));
+    for (int i = 0; i < count; ++i) {
+        if (std::find(ids.begin(), ids.end(), expert_ids[i]) == ids.end()) {
+            ids.push_back(expert_ids[i]);
+        }
+    }
+
+    // Fast rejection avoids queueing work that cannot possibly fit. The task
+    // repeats this check under the same lock it uses to reserve slots.
+    {
+        std::unique_lock<std::mutex> slot_lock(slots_mutex_, std::try_to_lock);
+        if (!slot_lock.owns_lock()) {
+            return reject();
+        }
+        if (layer_idx < 0 || layer_idx >= n_layers_ || !pools_allocated_ || n_slots_ <= 0 ||
+                slots_.size() != size_t(n_slots_) ||
+                layer_tensors_.find(layer_idx) == layer_tensors_.end()) {
+            return reject();
+        }
+        if (!valid->load(std::memory_order_acquire)) {
+            learned_prefetch_cancelled_.fetch_add(1, std::memory_order_relaxed);
+            return reject();
+        }
+
+        const int speculative_slots = explicit_speculative_slot_count();
+        if (speculative_slots <= 0) {
+            return reject();
+        }
+        int required_slots = 0;
+        for (int32_t eid : ids) {
+            bool resident = false;
+            for (const ExpertSlot & slot : slots_) {
+                if (slot.occupied && slot.layer_idx == layer_idx && slot.expert_idx == eid) {
+                    resident = true;
+                    break;
+                }
+            }
+            required_slots += resident ? 0 : 1;
+        }
+
+        if (required_slots == 0) {
+            return reject();
+        }
+
+        std::vector<uint8_t> speculative_and_compatible(slots_.size(), 0);
+        for (int slot_idx = 0; slot_idx < int(slots_.size()); ++slot_idx) {
+            speculative_and_compatible[size_t(slot_idx)] =
+                    slot_in_speculative_partition(slot_idx, speculative_slots) &&
+                    slot_compatible_with_layer(slot_idx, layer_idx);
+        }
+        if (!learned_prefetch_has_capacity(
+                    required_slots, slots_, speculative_and_compatible, layer_idx)) {
+            learned_prefetch_rejected_full_.fetch_add(1, std::memory_order_relaxed);
+            return reject();
+        }
+    }
+
+    collect_async_prefetches(false);
+    const int submitted_experts = int(ids.size());
+    bool task_started = false;
+    try {
+        std::future<bool> future = std::async(
+                std::launch::async,
+                [this, layer_idx, ids = std::move(ids), valid]() mutable {
+                    bool ok = false;
+                    try {
+                        if (valid && valid->load(std::memory_order_acquire)) {
+                            std::unordered_map<std::string, uint64_t> unused_pool_ptrs;
+                            std::vector<int32_t> unused_id_map;
+                            ok = this->ensure_experts_loaded(
+                                    layer_idx,
+                                    ids.data(),
+                                    int(ids.size()),
+                                    unused_pool_ptrs,
+                                    unused_id_map,
+                                    dstorage_moe_phase::prefetch,
+                                    true,
+                                    valid);
+                        }
+                    } catch (...) {
+                        ok = false;
+                    }
+                    if (!valid || !valid->load(std::memory_order_acquire)) {
+                        learned_prefetch_cancelled_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (ok) {
+                        learned_prefetch_completed_ok_.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        learned_prefetch_completed_failed_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    learned_prefetch_in_flight_.store(false, std::memory_order_release);
+                    return ok;
+                });
+        task_started = true;
+        {
+            std::lock_guard<std::mutex> lock(async_prefetch_mutex_);
+            async_prefetches_.push_back({ layer_idx, submitted_experts, { layer_idx }, std::move(future) });
+        }
+        learned_prefetch_submitted_calls_.fetch_add(1, std::memory_order_relaxed);
+        learned_prefetch_submitted_experts_.fetch_add(
+                uint64_t(submitted_experts), std::memory_order_relaxed);
+        return true;
+    } catch (...) {
+        learned_prefetch_rejected_.fetch_add(1, std::memory_order_relaxed);
+        if (!task_started) {
+            learned_prefetch_in_flight_.store(false, std::memory_order_release);
+        }
+        return false;
+    }
+}
+
+int DStorageSlotManager::count_learned_nonresident(
+        int layer_idx,
+        const int32_t * expert_ids,
+        int count) {
+    std::unique_lock<std::mutex> slot_lock(slots_mutex_, std::try_to_lock);
+    if (!slot_lock.owns_lock() || layer_idx < 0 || layer_idx >= n_layers_ ||
+            !learned_prefetch_request_valid(expert_ids, count, n_experts_, true)) {
+        return -1;
+    }
+
+    int nonresident = 0;
+    std::vector<int32_t> seen;
+    seen.reserve(size_t(count));
+    for (int i = 0; i < count; ++i) {
+        const int32_t eid = expert_ids[i];
+        if (std::find(seen.begin(), seen.end(), eid) != seen.end()) {
+            continue;
+        }
+        seen.push_back(eid);
+        bool resident = false;
+        for (const ExpertSlot & slot : slots_) {
+            if (slot.occupied && slot.layer_idx == layer_idx && slot.expert_idx == eid) {
+                resident = true;
+                break;
+            }
+        }
+        nonresident += resident ? 0 : 1;
+    }
+    return nonresident;
+}
+
+int DStorageSlotManager::learned_prefetch_available_slots(int layer_idx) {
+#ifdef _WIN32
+    GGML_UNUSED(layer_idx);
+    return 0;
+#else
+    if (learned_prefetch_in_flight_.load(std::memory_order_acquire)) {
+        return 0;
+    }
+
+    std::unique_lock<std::mutex> slot_lock(slots_mutex_, std::try_to_lock);
+    if (!slot_lock.owns_lock() ||
+            learned_prefetch_in_flight_.load(std::memory_order_acquire) ||
+            layer_idx < 0 || layer_idx >= n_layers_ || !pools_allocated_ || n_slots_ <= 0 ||
+            slots_.size() != size_t(n_slots_) ||
+            layer_tensors_.find(layer_idx) == layer_tensors_.end()) {
+        return 0;
+    }
+
+    const int speculative_slots = explicit_speculative_slot_count();
+    if (speculative_slots <= 0) {
+        return 0;
+    }
+
+    int available = 0;
+    for (int slot_idx = 0; slot_idx < int(slots_.size()); ++slot_idx) {
+        const bool speculative_and_compatible =
+                slot_in_speculative_partition(slot_idx, speculative_slots) &&
+                slot_compatible_with_layer(slot_idx, layer_idx);
+        available += learned_prefetch_slot_available(
+                slots_[size_t(slot_idx)], speculative_and_compatible, layer_idx) ? 1 : 0;
+    }
+    return learned_prefetch_in_flight_.load(std::memory_order_acquire) ? 0 : available;
+#endif
+}
+
 bool DStorageSlotManager::prefetch_experts_async_force(
         int layer_idx,
         const int32_t * expert_ids,
@@ -3505,6 +3969,7 @@ bool DStorageSlotManager::prefetch_experts_async_force(
         return false;
     }
 }
+
 
 bool DStorageSlotManager::enqueue_global_prefetch(
         int layer_idx,
@@ -3756,19 +4221,30 @@ bool DStorageSlotManager::ensure_experts_loaded(
         int n_selected,
         std::unordered_map<std::string, uint64_t> & out_pool_ptrs,
         std::vector<int32_t> & out_id_map,
-        dstorage_moe_phase phase) {
+        dstorage_moe_phase phase,
+        bool free_only,
+        std::shared_ptr<std::atomic<bool>> valid) {
 
     const int64_t t_total0 = llama_dstorage_now_us();
     uint64_t trace_stream_file_bytes = 0;
     uint64_t trace_transfer_us = 0;
     if (n_selected <= 0) {
-        return true; // No experts to load, success
+        return !free_only; // Preserve the ordinary API's empty request behavior.
     }
     if (expert_ids == nullptr) {
         LLAMA_DSTORAGE_DEBUG_LOG("DStorage DEBUG slots:ensure_loaded invalid input (null ids) layer=%d n_selected=%d\n",
                 layer_idx, n_selected);
         return false;
     }
+    if (free_only && (phase != dstorage_moe_phase::prefetch || !valid ||
+                !valid->load(std::memory_order_acquire))) {
+        return false;
+    }
+#ifdef _WIN32
+    if (free_only) {
+        return false;
+    }
+#endif
 
     int64_t t_step = llama_dstorage_now_us();
     if (phase == dstorage_moe_phase::decode) {
@@ -3777,8 +4253,48 @@ bool DStorageSlotManager::ensure_experts_loaded(
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "wait_layer_prefetch", t_step, llama_dstorage_now_us());
 
     t_step = llama_dstorage_now_us();
-    std::unique_lock<std::mutex> slot_lock(slots_mutex_);
+    std::unique_lock<std::mutex> slot_lock(slots_mutex_, std::defer_lock);
+    if (free_only) {
+        if (!slot_lock.try_lock()) {
+            return false;
+        }
+    } else {
+        slot_lock.lock();
+    }
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "acquire_slot_lock", t_step, llama_dstorage_now_us());
+
+    std::vector<int> free_only_reserved_slots;
+    bool free_only_io_may_be_in_flight = false;
+    struct FreeOnlyReservationCleanup {
+        std::vector<ExpertSlot> & slots;
+        std::vector<int> & reserved_slots;
+        DSLoaderHandle loader;
+        bool & io_may_be_in_flight;
+        ~FreeOnlyReservationCleanup() {
+            if (io_may_be_in_flight) {
+#if LLAMA_DSTORAGE_HAS_BACKEND
+                if (loader == nullptr || ds_loader_cuda_wait_event(loader) != 0) {
+                    // Keep uncertain destinations pinned against reuse. A
+                    // later demand load must never race a possibly live DMA.
+                    for (int slot_idx : reserved_slots) {
+                        if (slot_idx >= 0 && slot_idx < int(slots.size()) &&
+                                !slots[slot_idx].occupied && slots[slot_idx].transfer_pending) {
+                            slots[slot_idx].transfer_quarantined = true;
+                        }
+                    }
+                    return;
+                }
+#endif
+                io_may_be_in_flight = false;
+            }
+            for (int slot_idx : reserved_slots) {
+                if (slot_idx >= 0 && slot_idx < int(slots.size()) &&
+                        !slots[slot_idx].occupied && slots[slot_idx].transfer_pending) {
+                    slots[slot_idx].transfer_pending = false;
+                }
+            }
+        }
+    } free_only_cleanup{ slots_, free_only_reserved_slots, ds_loader_, free_only_io_may_be_in_flight };
 
     if (phase != dstorage_moe_phase::prefetch) {
         const bool starts_request =
@@ -3879,8 +4395,70 @@ bool DStorageSlotManager::ensure_experts_loaded(
         return false;
     }
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "ensure_pools_call", t_pools, llama_dstorage_now_us());
+
+    // The learned path validates every miss against free or consumed learned
+    // compatible speculative slots before touching cache state. The slot lock
+    // remains held from this check through transfer completion and publication.
+    if (free_only) {
+        if (layer_idx < 0 || layer_idx >= n_layers_ || !pools_allocated_ || n_slots_ <= 0 ||
+                slots_.size() != size_t(n_slots_) || !valid ||
+                !learned_prefetch_request_valid(
+                        expert_ids,
+                        n_selected,
+                        n_experts_,
+                        valid->load(std::memory_order_acquire))) {
+            return false;
+        }
+        const int speculative_slots = explicit_speculative_slot_count();
+        if (speculative_slots <= 0 || layer_tensors_.find(layer_idx) == layer_tensors_.end()) {
+            return false;
+        }
+
+        std::vector<int32_t> unique_ids;
+        unique_ids.reserve(size_t(n_selected));
+        int required_slots = 0;
+        for (int i = 0; i < n_selected; ++i) {
+            const int32_t eid = expert_ids[i];
+            if (std::find(unique_ids.begin(), unique_ids.end(), eid) != unique_ids.end()) {
+                continue;
+            }
+            unique_ids.push_back(eid);
+            bool resident = false;
+            for (const ExpertSlot & slot : slots_) {
+                if (slot.occupied && slot.layer_idx == layer_idx && slot.expert_idx == eid) {
+                    resident = true;
+                    break;
+                }
+            }
+            required_slots += resident ? 0 : 1;
+        }
+
+        if (required_slots == 0) {
+            learned_prefetch_rejected_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+
+        std::vector<uint8_t> speculative_and_compatible(slots_.size(), 0);
+        for (int slot_idx = 0; slot_idx < int(slots_.size()); ++slot_idx) {
+            speculative_and_compatible[size_t(slot_idx)] =
+                    slot_in_speculative_partition(slot_idx, speculative_slots) &&
+                    slot_compatible_with_layer(slot_idx, layer_idx);
+        }
+        if (!learned_prefetch_has_capacity(
+                    required_slots, slots_, speculative_and_compatible, layer_idx)) {
+            learned_prefetch_rejected_full_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if (!valid->load(std::memory_order_acquire)) {
+            return false;
+        }
+    }
+
     t_pools = llama_dstorage_now_us();
-    if (!preload_static_pinned_layers()) {
+    if (!free_only) {
+        select_vram_static_experts();
+    }
+    if (!free_only && !preload_static_pinned_layers()) {
         return false;
     }
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "preload_static_pinned", t_pools, llama_dstorage_now_us());
@@ -3889,6 +4467,9 @@ bool DStorageSlotManager::ensure_experts_loaded(
         release_prefill_only_pinned_cache();
     }
     collect_pinned_admissions(false);
+    if (free_only && !valid->load(std::memory_order_acquire)) {
+        return false;
+    }
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "release_and_collect", t_pools, llama_dstorage_now_us());
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "ensure_pools_allocated", t_total0, llama_dstorage_now_us());
     const bool mtp_decode_like_accounting =
@@ -3926,6 +4507,10 @@ bool DStorageSlotManager::ensure_experts_loaded(
         }
     }
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "build_unique_expert_list", t0, llama_dstorage_now_us());
+    if (phase != dstorage_moe_phase::prefetch) {
+        record_expert_use(layer_idx, unique_experts);
+    }
+    eviction_for_prompt_batch_ = n_expert_used_ > 0 && n_selected > n_expert_used_ * 4;
 
     if ((int)unique_experts.size() > n_slots_) {
         LLAMA_DSTORAGE_DEBUG_LOG("DStorage DEBUG slots:ensure_loaded capacity_fail layer=%d unique=%zu n_slots=%d\n",
@@ -3973,8 +4558,15 @@ bool DStorageSlotManager::ensure_experts_loaded(
                         diagnostic_stats_.useful_prefetch_prefill_hits++;
                     }
                 }
+                if (phase != dstorage_moe_phase::prefetch && slots_[s].learned_prefetch) {
+                    learned_prefetch_useful_hits_.fetch_add(1, std::memory_order_relaxed);
+                    slots_[s].learned_prefetch_used = true;
+                }
                 slots_[s].last_used_tick = ++use_tick_;
                 arc_record_hit(slots_[s], accounting_phase);
+                if (phase != dstorage_moe_phase::prefetch) {
+                    maybe_mark_vram_static(s);
+                }
                 if (accounting_phase == dstorage_moe_phase::decode) {
                     slots_[s].decode_hits += 1000;
                 } else if (accounting_phase == dstorage_moe_phase::prefetch) {
@@ -4066,6 +4658,7 @@ bool DStorageSlotManager::ensure_experts_loaded(
         int32_t eid = -1;
         int target_slot = -1;
         bool from_pinned = false;
+        bool recycled_learned_prefetch = false;
     };
 
     std::vector<LoadPlan> load_plan;
@@ -4075,6 +4668,16 @@ bool DStorageSlotManager::ensure_experts_loaded(
     std::vector<int32_t> pinned_to_load;
     pinned_to_load.reserve(to_load.size());
     const int speculative_slots = speculative_slot_count();
+    // Constant-time batch membership instead of rescanning expert_to_slot and load_plan for
+    // every candidate slot: bit 1 = holds an expert this batch needs (fixed for this call),
+    // bit 2 = already reserved for a miss (set when the load plan is appended).
+    std::vector<uint8_t> slot_membership(n_slots_, 0);
+    for (const auto & item : expert_to_slot) {
+        slot_membership[item.second] |= 1;
+    }
+    auto slot_reserved_for_load = [&](int slot_idx) {
+        return (slot_membership[slot_idx] & 2) != 0;
+    };
     auto slot_allowed_for_phase = [&](int slot_idx) {
         const bool speculative_slot = slot_in_speculative_partition(
                 slot_idx, speculative_slots);
@@ -4098,18 +4701,39 @@ bool DStorageSlotManager::ensure_experts_loaded(
                  slots_[slot_idx].layer_idx == layer_idx)) {
             return true;
         }
-        for (const auto & [k, v] : expert_to_slot) {
-            GGML_UNUSED(k);
-            if (v == slot_idx) { return true; }
-        }
-        for (const LoadPlan & plan : load_plan) {
-            if (plan.target_slot == slot_idx) { return true; }
+        if (slot_membership[slot_idx] != 0) {
+            return true;
         }
         return slot_is_protected(slots_[slot_idx]);
     };
 
+    // Without hybrid ARC a slot's eviction score depends only on its own state, which this
+    // loop changes only for slots it reserves (excluded through membership bit 2). Score each
+    // slot once per callback instead of twice per comparison for every miss; same order and
+    // tie-break as is_better_request_eviction_candidate. Rebuilt after admission collection.
+    std::vector<int64_t> eviction_scores;
     auto choose_eviction_slot = [&]() {
         int target_slot = -1;
+        if (!hybrid_arc_enabled()) {
+            if (eviction_scores.empty()) {
+                eviction_scores.resize(n_slots_);
+                for (int s = 0; s < n_slots_; s++) {
+                    eviction_scores[s] = request_eviction_score(slots_[s], layer_idx);
+                }
+            }
+            for (int s = 0; s < n_slots_; s++) {
+                if (slot_unavailable_for_load(s)) {
+                    continue;
+                }
+                if (target_slot < 0 ||
+                        eviction_scores[s] < eviction_scores[target_slot] ||
+                        (eviction_scores[s] == eviction_scores[target_slot] &&
+                         slots_[s].last_used_tick < slots_[target_slot].last_used_tick)) {
+                    target_slot = s;
+                }
+            }
+            return target_slot;
+        }
         for (int s = 0; s < n_slots_; s++) {
             if (slot_unavailable_for_load(s)) {
                 continue;
@@ -4128,7 +4752,16 @@ bool DStorageSlotManager::ensure_experts_loaded(
     // --- Reserve one slot for every cache-miss expert before streaming ---
     t0 = llama_dstorage_now_us();
     const bool contiguous_load_slots = llama_dstorage_contiguous_load_slots();
+    if (free_only) {
+        free_only_reserved_slots.reserve(to_load.size());
+        if (!valid->load(std::memory_order_acquire)) {
+            return false;
+        }
+    }
     for (int32_t eid : to_load) {
+        if (free_only && !valid->load(std::memory_order_acquire)) {
+            return false;
+        }
         const uint64_t expert_key = make_expert_key(layer_idx, eid);
 
         int target_slot = -1;
@@ -4139,6 +4772,7 @@ bool DStorageSlotManager::ensure_experts_loaded(
             if (previous.eid + 1 == eid &&
                     adjacent_slot >= 0 &&
                     adjacent_slot < n_slots_ &&
+                    (!free_only || !slots_[adjacent_slot].occupied) &&
                     !slot_unavailable_for_load(adjacent_slot)) {
                 target_slot = adjacent_slot;
             }
@@ -4149,35 +4783,54 @@ bool DStorageSlotManager::ensure_experts_loaded(
             if (target_slot >= 0) {
                 break;
             }
-            bool reserved = false;
-            for (const LoadPlan & plan : load_plan) {
-                if (plan.target_slot == s) { reserved = true; break; }
-            }
-            if (!reserved &&
-                    slot_allowed_for_phase(s) &&
-                    !slots_[s].occupied &&
-                    !slots_[s].admission_pending) {
+            const bool reserved = slot_reserved_for_load(s);
+            const bool available = free_only
+                    ? !slots_[s].occupied && learned_prefetch_slot_available(
+                            slots_[s], slot_allowed_for_phase(s), layer_idx)
+                    : slot_allowed_for_phase(s) &&
+                      !slots_[s].occupied &&
+                      !slots_[s].admission_pending &&
+                      !slots_[s].transfer_quarantined;
+            if (!reserved && available) {
                 target_slot = s;
                 break;
             }
         }
 
+        // Learned staging first consumes empty slots. Only once those are
+        // exhausted may it recycle the least recently used consumed learned
+        // entry, and never one needed by this request or protected by the
+        // speculative layer guard.
+        if (target_slot < 0 && free_only) {
+            uint64_t oldest_tick = std::numeric_limits<uint64_t>::max();
+            for (int s = 0; s < n_slots_; ++s) {
+                if (!learned_prefetch_slot_available(
+                            slots_[s], slot_allowed_for_phase(s), layer_idx) ||
+                        slot_unavailable_for_load(s)) {
+                    continue;
+                }
+                if (target_slot < 0 || slots_[s].last_used_tick < oldest_tick) {
+                    target_slot = s;
+                    oldest_tick = slots_[s].last_used_tick;
+                }
+            }
+        }
+
         // If no free slot, evict the least recently used slot not needed by the current batch.
-        if (target_slot < 0) {
+        if (target_slot < 0 && !free_only) {
             target_slot = choose_eviction_slot();
         }
 
-        if (target_slot < 0) {
+        if (target_slot < 0 && !free_only) {
             collect_pinned_admissions(true);
+            eviction_scores.clear();
             for (int s = 0; s < n_slots_; s++) {
-                bool reserved = false;
-                for (const LoadPlan & plan : load_plan) {
-                    if (plan.target_slot == s) { reserved = true; break; }
-                }
+                const bool reserved = slot_reserved_for_load(s);
                 if (!reserved &&
                         slot_allowed_for_phase(s) &&
                         !slots_[s].occupied &&
-                        !slots_[s].admission_pending) {
+                        !slots_[s].admission_pending &&
+                        !slots_[s].transfer_quarantined) {
                     target_slot = s;
                     break;
                 }
@@ -4189,18 +4842,17 @@ bool DStorageSlotManager::ensure_experts_loaded(
                 // Try recovering stale transfer_pending slots from previous failed calls
                 int stale_cleared = 0;
                 for (int s = 0; s < n_slots_; s++) {
-                    if (slots_[s].transfer_pending && !slots_[s].occupied) {
+                    if (slots_[s].transfer_pending && !slots_[s].occupied &&
+                            !slots_[s].transfer_quarantined) {
                         slots_[s].transfer_pending = false;
                         stale_cleared++;
                     }
                 }
                 if (stale_cleared > 0) {
                     for (int s = 0; s < n_slots_; s++) {
-                        bool reserved = false;
-                        for (const LoadPlan & p : load_plan) {
-                            if (p.target_slot == s) { reserved = true; break; }
-                        }
-                        if (!reserved && slot_allowed_for_phase(s) && !slots_[s].occupied && !slots_[s].admission_pending) {
+                        const bool reserved = slot_reserved_for_load(s);
+                        if (!reserved && slot_allowed_for_phase(s) && !slots_[s].occupied &&
+                                !slots_[s].admission_pending && !slots_[s].transfer_quarantined) {
                             target_slot = s;
                             break;
                         }
@@ -4211,12 +4863,41 @@ bool DStorageSlotManager::ensure_experts_loaded(
                     }
                 }
             }
-            if (target_slot < 0) {
+            if (target_slot < 0 && !free_only) {
+                // Last resort: demote the least recently used VRAM-static expert this batch
+                // does not need, so a placement that is too large cannot fail a request.
+                for (int s = 0; s < n_slots_; s++) {
+                    const ExpertSlot & cand = slots_[s];
+                    if (!cand.static_resident || slot_membership[s] != 0 || !slot_allowed_for_phase(s) ||
+                            cand.execution_pins > 0 || cand.transfer_pending ||
+                            cand.transfer_quarantined || cand.admission_pending) {
+                        continue;
+                    }
+                    if (target_slot < 0 || cand.last_used_tick < slots_[target_slot].last_used_tick) {
+                        target_slot = s;
+                    }
+                }
+                if (target_slot >= 0) {
+                    slots_[target_slot].static_resident = false;
+                    vram_static_counts_[slots_[target_slot].pool_group]--;
+                    vram_static_demotions_++;
+                    eviction_scores.clear();
+                }
+            }
+            if (target_slot < 0 && !free_only) {
                 LLAMA_LOG_ERROR("%s: no available slot for expert %d\n", __func__, eid);
                 return false;
             }
         }
 
+        if (target_slot < 0) {
+            return false;
+        }
+
+        const bool recycled_learned_prefetch = free_only &&
+                slots_[target_slot].occupied &&
+                slots_[target_slot].learned_prefetch &&
+                slots_[target_slot].learned_prefetch_used;
         if (slots_[target_slot].occupied) {
             if (decode_hot_protected(slots_[target_slot])) {
                 decode_hot_stats_.protected_evictions++;
@@ -4240,7 +4921,7 @@ bool DStorageSlotManager::ensure_experts_loaded(
                     target_slot, slots_[target_slot].layer_idx, slots_[target_slot].expert_idx,
                     slots_[target_slot].decode_hits, slots_[target_slot].prefill_hits,
                     slots_[target_slot].last_used_tick);
-            if (phase != dstorage_moe_phase::prefetch) {
+            if (phase != dstorage_moe_phase::prefetch && !free_only) {
                 cache_evicted_expert_to_ram(target_slot);
             }
         }
@@ -4248,13 +4929,20 @@ bool DStorageSlotManager::ensure_experts_loaded(
         slots_[target_slot].layer_idx  = -1;
         slots_[target_slot].expert_idx = -1;
         slots_[target_slot].occupied   = false;
+        slots_[target_slot].static_resident = false;
         slots_[target_slot].transfer_pending = true;
+        slots_[target_slot].transfer_quarantined = false;
+        slots_[target_slot].learned_prefetch = false;
+        slots_[target_slot].learned_prefetch_used = false;
         slots_[target_slot].execution_pins = 0;
         slots_[target_slot].prefill_hits = 0;
         slots_[target_slot].decode_hits = 0;
         slots_[target_slot].prefetch_hits = 0;
         slots_[target_slot].arc_segment = dstorage_arc_segment::none;
         slots_[target_slot].contiguous_neighbors = 0;
+        if (free_only) {
+            free_only_reserved_slots.push_back(target_slot);
+        }
 
         const bool pinned_hit = pinned_cache_enabled() && pinned_cache_.find(expert_key) != pinned_cache_.end();
         if (pinned_hit) {
@@ -4263,7 +4951,8 @@ bool DStorageSlotManager::ensure_experts_loaded(
         } else {
             cold_to_load.push_back(eid);
         }
-        load_plan.push_back({ eid, target_slot, pinned_hit });
+        load_plan.push_back({ eid, target_slot, pinned_hit, recycled_learned_prefetch });
+        slot_membership[target_slot] |= 2;
     }
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "reserve_or_evict_slots", t0, llama_dstorage_now_us());
     LLAMA_DSTORAGE_DEBUG_LOG(
@@ -4322,6 +5011,20 @@ bool DStorageSlotManager::ensure_experts_loaded(
 #endif
 
 #if LLAMA_DSTORAGE_HAS_BACKEND
+    // Pinned copies queued asynchronously must finish before this callback returns (the layer
+    // computes on them) and before anything may free or reuse their pinned sources, including
+    // on every early-return path.
+    bool pinned_h2d_in_flight = false;
+    struct PinnedH2DFence {
+        DSLoaderHandle loader;
+        bool & in_flight;
+        ~PinnedH2DFence() {
+            if (in_flight) {
+                ds_loader_host_to_cuda_sync(loader);
+            }
+        }
+    } pinned_h2d_fence{ ds_loader_, pinned_h2d_in_flight };
+
     t0 = llama_dstorage_now_us();
     std::vector<DSLoaderHostToCudaRequest> pinned_requests;
     uint64_t pinned_h2d_bytes = 0;
@@ -4356,20 +5059,45 @@ bool DStorageSlotManager::ensure_experts_loaded(
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "build_pinned_h2d_requests", t0, llama_dstorage_now_us());
 
     if (!pinned_requests.empty()) {
+        if (free_only && !valid->load(std::memory_order_acquire)) {
+            return false;
+        }
         t0 = llama_dstorage_now_us();
-        const int result = ds_loader_host_to_cuda_batch(
-                ds_loader_,
-                pinned_requests.data(),
-                int(pinned_requests.size()));
+        if (free_only) {
+            free_only_io_may_be_in_flight = true;
+        }
+        const bool overlap_pinned = !free_only &&
+                phase != dstorage_moe_phase::prefetch &&
+                llama_dstorage_overlap_pinned_h2d();
+        const int result = overlap_pinned
+                ? ds_loader_host_to_cuda_batch_async(
+                        ds_loader_,
+                        pinned_requests.data(),
+                        int(pinned_requests.size()))
+                : ds_loader_host_to_cuda_batch(
+                        ds_loader_,
+                        pinned_requests.data(),
+                        int(pinned_requests.size()));
+        // Even a failed submission may have queued part of the batch.
+        pinned_h2d_in_flight = overlap_pinned;
         const uint64_t pinned_h2d_us = uint64_t(std::max<int64_t>(0, llama_dstorage_now_us() - t0));
         llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "pinned_host_to_cuda_batch", t0, t0 + int64_t(pinned_h2d_us));
-        if (result != 0) {
+        int wait_result = 0;
+        if (free_only) {
+            // Learned cache entries must not become visible until all host-to-
+            // device copies have completed under slots_mutex_. Also drain a
+            // failed submission because it may have partially queued work.
+            wait_result = ds_loader_cuda_wait_event(ds_loader_);
+            if (wait_result == 0) {
+                free_only_io_may_be_in_flight = false;
+            }
+        }
+        if (result != 0 || (free_only && wait_result != 0)) {
             LLAMA_LOG_ERROR("DirectStorage: failed pinned host->GPU load L%d (%zu requests), hr=0x%08" PRIx32 "\n",
                     layer_idx, pinned_requests.size(), uint32_t(ds_loader_get_hresult()));
             return false;
         }
-
-        if (phase != dstorage_moe_phase::prefetch) {
+        if (!free_only && result == 0 && phase != dstorage_moe_phase::prefetch) {
             ds_loader_cuda_wait_event(ds_loader_);
         }
         phase_stats.stream_pinned_bytes += pinned_h2d_bytes;
@@ -4795,7 +5523,13 @@ bool DStorageSlotManager::ensure_experts_loaded(
                     staging_cursor = group_staging_offset + group_size;
                 }
 
+                if (result == 0 && free_only && !valid->load(std::memory_order_acquire)) {
+                    return false;
+                }
                 if (result == 0) {
+                    if (free_only) {
+                        free_only_io_may_be_in_flight = true;
+                    }
                     result = ds_loader_stream_to_cuda_batch(
                             ds_loader_,
                             bundled_requests.data(),
@@ -4803,12 +5537,32 @@ bool DStorageSlotManager::ensure_experts_loaded(
                 }
                 const int64_t submit_t1_inner = llama_dstorage_now_us();
                 const int64_t wait_t0_inner = llama_dstorage_now_us();
-                wait_result = result == 0 ? ds_loader_cuda_wait_event(ds_loader_) : -1;
+                wait_result = (result == 0 || free_only) ? ds_loader_cuda_wait_event(ds_loader_) : -1;
+                if (free_only && wait_result == 0) {
+                    free_only_io_may_be_in_flight = false;
+                }
                 if (wait_result == 0) {
-                    for (const BundleCopy & copy : bundled_copies) {
-                        if (ds_loader_cuda_dtod(copy.dst, copy.src, copy.size) != 0) {
-                            wait_result = -1;
-                            break;
+                    if (free_only && !valid->load(std::memory_order_acquire)) {
+                        wait_result = -1;
+                    } else {
+                        bool copy_submitted = false;
+                        for (const BundleCopy & copy : bundled_copies) {
+                            copy_submitted = true;
+                            if (free_only) {
+                                free_only_io_may_be_in_flight = true;
+                            }
+                            if (ds_loader_cuda_dtod(copy.dst, copy.src, copy.size) != 0) {
+                                wait_result = -1;
+                                break;
+                            }
+                        }
+                        if (free_only && copy_submitted) {
+                            const int copy_wait_result = ds_loader_cuda_wait_event(ds_loader_);
+                            if (copy_wait_result != 0) {
+                                wait_result = -1;
+                            } else {
+                                free_only_io_may_be_in_flight = false;
+                            }
                         }
                     }
                 }
@@ -4817,13 +5571,22 @@ bool DStorageSlotManager::ensure_experts_loaded(
                 stream_wait_us += uint64_t(std::max<int64_t>(0, wait_t1_inner - wait_t0_inner));
                 llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "cuda_copy_wait", wait_t0_inner, wait_t1_inner);
             } else {
+                if (free_only && !valid->load(std::memory_order_acquire)) {
+                    return false;
+                }
+                if (free_only) {
+                    free_only_io_may_be_in_flight = true;
+                }
                 result = ds_loader_stream_to_cuda_batch(
                         ds_loader_,
                         batch_requests.data() + chunk_begin,
                         int(chunk_end - chunk_begin));
                 const int64_t submit_t1_inner = llama_dstorage_now_us();
                 const int64_t wait_t0_inner = llama_dstorage_now_us();
-                wait_result = result == 0 ? ds_loader_cuda_wait_event(ds_loader_) : -1;
+                wait_result = (result == 0 || free_only) ? ds_loader_cuda_wait_event(ds_loader_) : -1;
+                if (free_only && wait_result == 0) {
+                    free_only_io_may_be_in_flight = false;
+                }
                 const int64_t wait_t1_inner = llama_dstorage_now_us();
                 stream_submit_us += uint64_t(std::max<int64_t>(0, submit_t1_inner - submit_t0));
                 stream_wait_us += uint64_t(std::max<int64_t>(0, wait_t1_inner - wait_t0_inner));
@@ -4846,6 +5609,10 @@ bool DStorageSlotManager::ensure_experts_loaded(
                     layer_idx, result, uint32_t(ds_loader_get_hresult()));
             LLAMA_LOG_ERROR("DirectStorage: failed to batch stream L%d (%zu experts, %zu requests), hr=0x%08" PRIx32 "\n",
                     layer_idx, load_plan.size(), batch_requests.size(), uint32_t(ds_loader_get_hresult()));
+            return false;
+        }
+
+        if (free_only && !valid->load(std::memory_order_acquire)) {
             return false;
         }
 
@@ -4950,6 +5717,19 @@ bool DStorageSlotManager::ensure_experts_loaded(
 #endif
 
 #if LLAMA_DSTORAGE_HAS_BACKEND
+    if (pinned_h2d_in_flight) {
+        const int64_t t_sync = llama_dstorage_now_us();
+        pinned_h2d_in_flight = false;
+        if (ds_loader_host_to_cuda_sync(ds_loader_) != 0) {
+            LLAMA_LOG_ERROR("DirectStorage: failed to complete pinned host->GPU load L%d, hr=0x%08" PRIx32 "\n",
+                    layer_idx, uint32_t(ds_loader_get_hresult()));
+            return false;
+        }
+        const int64_t t_done = llama_dstorage_now_us();
+        llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "pinned_host_to_cuda_wait", t_sync, t_done);
+        phase_stats.stream_pinned_us += uint64_t(std::max<int64_t>(0, t_done - t_sync));
+    }
+
     // When evict->RAM is enabled, warm experts are promoted to the pinned cache
     // on VRAM eviction (cheap D2H copy). The SSD-re-read admission below would
     // only duplicate that work and steal SSD bandwidth, so skip it.
@@ -5207,6 +5987,9 @@ bool DStorageSlotManager::ensure_experts_loaded(
     }
 #endif
 
+    if (free_only && !valid->load(std::memory_order_acquire)) {
+        return false;
+    }
     t0 = llama_dstorage_now_us();
     for (const LoadPlan & plan : load_plan) {
         // Mark slot occupied (shared across all types)
@@ -5214,6 +5997,9 @@ bool DStorageSlotManager::ensure_experts_loaded(
         slots_[plan.target_slot].expert_idx = plan.eid;
         slots_[plan.target_slot].occupied   = true;
         slots_[plan.target_slot].transfer_pending = false;
+        slots_[plan.target_slot].transfer_quarantined = false;
+        slots_[plan.target_slot].learned_prefetch = free_only;
+        slots_[plan.target_slot].learned_prefetch_used = false;
         slots_[plan.target_slot].last_used_tick = ++use_tick_;
         if (accounting_phase == dstorage_moe_phase::decode) {
             slots_[plan.target_slot].decode_hits = 1000;
@@ -5223,7 +6009,17 @@ bool DStorageSlotManager::ensure_experts_loaded(
             slots_[plan.target_slot].prefill_hits = 1000;
         }
         arc_record_admission(slots_[plan.target_slot], accounting_phase);
+        if (!free_only && phase != dstorage_moe_phase::prefetch) {
+            maybe_mark_vram_static(plan.target_slot);
+        }
         expert_to_slot[plan.eid] = plan.target_slot;
+        if (plan.recycled_learned_prefetch) {
+            learned_prefetch_recycled_slots_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (free_only) {
+        learned_prefetch_loaded_experts_.fetch_add(
+                uint64_t(load_plan.size()), std::memory_order_relaxed);
     }
     llama_dstorage_trace_us("slots.ensure_loaded", layer_idx, "mark_slots_occupied", t0, llama_dstorage_now_us());
 
@@ -5233,22 +6029,26 @@ bool DStorageSlotManager::ensure_experts_loaded(
     } else {
         t0 = llama_dstorage_now_us();
         const int active_count = (int) unique_experts.size();
+        const int prefill_workspace_limit = can_hold_full_layer_prefill()
+                ? std::max(max_prefill_workspace_experts(), n_experts_) : max_prefill_workspace_experts();
         if (phase == dstorage_moe_phase::prefill &&
-                active_count > max_prefill_workspace_experts()) {
+                active_count > prefill_workspace_limit) {
             LLAMA_LOG_ERROR(
                     "%s: prefill workspace requires %d unique experts, exceeding bounded capacity %d\n",
                     __func__,
                     active_count,
-                    max_prefill_workspace_experts());
+                    prefill_workspace_limit);
             return false;
         }
+        const int request_top_k = request_top_k_.load(std::memory_order_relaxed) > 0
+                ? request_top_k_.load(std::memory_order_relaxed) : n_expert_used_;
         if (phase == dstorage_moe_phase::decode &&
-                calculate_decode_workspace_capacity(active_count, n_expert_used_) <= 0) {
+                calculate_decode_workspace_capacity(active_count, request_top_k) <= 0) {
             LLAMA_LOG_ERROR(
                     "%s: invalid decode request for %d unique experts (top-k=%d)\n",
                     __func__,
                     active_count,
-                    n_expert_used_);
+                    request_top_k);
             return false;
         }
         active_slot_count_ = 0;
@@ -5457,6 +6257,7 @@ bool DStorageSlotManager::ensure_experts_loaded(
     return true;
 }
 
+
 void DStorageSlotManager::release_layer_experts(int layer_idx) {
     std::lock_guard<std::mutex> slot_lock(slots_mutex_);
     const auto it = execution_slots_by_layer_.find(layer_idx);
@@ -5638,6 +6439,7 @@ void DStorageSlotManager::destroy() {
         uint64_t prefetch_only = 0;
         uint64_t prefetch_resident_unused = 0;
         uint64_t prefetch_resident_used = 0;
+        uint64_t learned_prefetch_resident_unused = 0;
         uint64_t prefill_only = 0;
         uint64_t decode_hot_resident_protected = 0;
         uint64_t arc_recent = 0;
@@ -5645,6 +6447,9 @@ void DStorageSlotManager::destroy() {
         for (const ExpertSlot & slot : slots_) {
             if (!slot.occupied) {
                 continue;
+            }
+            if (slot.learned_prefetch && !slot.learned_prefetch_used) {
+                learned_prefetch_resident_unused++;
             }
             occupied++;
             if (slot.decode_hits > 0) {
@@ -5684,7 +6489,7 @@ void DStorageSlotManager::destroy() {
                 " transfer_ewma_us=%.1f layer_compute_ewma_us=%.1f\n",
                 n_slots_, occupied, decode_touched, prefill_only, prefetch_touched, prefetch_only,
                 speculative_slots,
-                hybrid_arc_policy_ ? "hybrid_arc" : "legacy",
+                hybrid_arc_policy_ ? "hybrid_arc" : legacy_eviction_policy_ ? "legacy" : "next_use",
                 arc_recent, arc_frequent,
                 pinned_cache_.size(), static_pinned_experts_.size(),
                 pinned_used_bytes_ / 1024.0 / 1024.0,
@@ -6013,6 +6818,25 @@ void DStorageSlotManager::destroy() {
                         : diagnostic_stats_.prefetch_lowest_victim_cost);
         std::fprintf(
                 stderr,
+                "DSTORAGE_MOE_LEARNED_PREFETCH submitted_calls=%" PRIu64
+                " submitted_experts=%" PRIu64 " loaded_experts=%" PRIu64
+                " completed_ok=%" PRIu64 " completed_failed=%" PRIu64
+                " rejected=%" PRIu64 " rejected_full=%" PRIu64
+                " cancelled=%" PRIu64 " useful_hits=%" PRIu64
+                " recycled_slots=%" PRIu64 " resident_unused=%" PRIu64 "\n",
+                learned_prefetch_submitted_calls_.load(std::memory_order_relaxed),
+                learned_prefetch_submitted_experts_.load(std::memory_order_relaxed),
+                learned_prefetch_loaded_experts_.load(std::memory_order_relaxed),
+                learned_prefetch_completed_ok_.load(std::memory_order_relaxed),
+                learned_prefetch_completed_failed_.load(std::memory_order_relaxed),
+                learned_prefetch_rejected_.load(std::memory_order_relaxed),
+                learned_prefetch_rejected_full_.load(std::memory_order_relaxed),
+                learned_prefetch_cancelled_.load(std::memory_order_relaxed),
+                learned_prefetch_useful_hits_.load(std::memory_order_relaxed),
+                learned_prefetch_recycled_slots_.load(std::memory_order_relaxed),
+                learned_prefetch_resident_unused);
+        std::fprintf(
+                stderr,
                 "DSTORAGE_MOE_PINNED budget_mib=%.2f used_mib=%.2f entries=%zu"
                 " queued=%" PRIu64 " completed=%" PRIu64 " dropped=%" PRIu64
                 " admit_mib=%.2f admit_us=%" PRIu64
@@ -6084,6 +6908,17 @@ void DStorageSlotManager::destroy() {
                 decode_hot_stats_.protected_misses,
                 decode_hot_stats_.protected_evictions,
                 decode_hot_stats_.rebuilds);
+        {
+            int vram_static_resident = 0;
+            for (int count : vram_static_counts_) {
+                vram_static_resident += count;
+            }
+            std::fprintf(
+                    stderr,
+                    "DSTORAGE_MOE_VRAM_STATIC selected=%zu resident=%d reserve=%d demotions=%" PRIu64 "\n",
+                    vram_static_experts_.size(), vram_static_resident,
+                    llama_dstorage_vram_static_reserve(), vram_static_demotions_);
+        }
         std::fprintf(
                 stderr,
                 "DSTORAGE_MOE_EVICT prefill_evicted_prefill_only=%" PRIu64
@@ -6288,6 +7123,26 @@ DStorageSlotManager::TelemetrySnapshot DStorageSlotManager::telemetry_snapshot()
             prefill_stats_.stream_pinned_us + decode_stats_.stream_pinned_us;
     snapshot.stream_total_us =
             prefill_stats_.stream_total_us + decode_stats_.stream_total_us;
+    snapshot.learned_prefetch_submitted_calls =
+            learned_prefetch_submitted_calls_.load(std::memory_order_relaxed);
+    snapshot.learned_prefetch_submitted_experts =
+            learned_prefetch_submitted_experts_.load(std::memory_order_relaxed);
+    snapshot.learned_prefetch_loaded_experts =
+            learned_prefetch_loaded_experts_.load(std::memory_order_relaxed);
+    snapshot.learned_prefetch_completed_ok =
+            learned_prefetch_completed_ok_.load(std::memory_order_relaxed);
+    snapshot.learned_prefetch_completed_failed =
+            learned_prefetch_completed_failed_.load(std::memory_order_relaxed);
+    snapshot.learned_prefetch_rejected =
+            learned_prefetch_rejected_.load(std::memory_order_relaxed);
+    snapshot.learned_prefetch_rejected_full =
+            learned_prefetch_rejected_full_.load(std::memory_order_relaxed);
+    snapshot.learned_prefetch_cancelled =
+            learned_prefetch_cancelled_.load(std::memory_order_relaxed);
+    snapshot.learned_prefetch_useful_hits =
+            learned_prefetch_useful_hits_.load(std::memory_order_relaxed);
+    snapshot.learned_prefetch_recycled_slots =
+            learned_prefetch_recycled_slots_.load(std::memory_order_relaxed);
     return snapshot;
 }
 

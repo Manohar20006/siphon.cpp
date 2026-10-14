@@ -16,6 +16,14 @@ public:
             int n_expert_used,
             std::string & error);
 
+    static std::shared_ptr<const llama_prerouter> load_shared(
+            const std::string & path,
+            int n_layers,
+            int n_embd,
+            int n_experts,
+            int n_expert_used,
+            std::string & error);
+
     bool has_owner(int layer) const;
 
     std::vector<int32_t> predict(

@@ -92,7 +92,49 @@ int main() {
     ok = expect_equal(
             "prefill_token_chunk_large_topk",
             uint64_t(DStorageSlotManager::calculate_prefill_token_chunk(128, 64)),
+            0) && ok;
+    ok = expect_equal(
+            "prefill_token_chunk_rejects_insufficient_topk",
+            uint64_t(DStorageSlotManager::calculate_prefill_token_chunk(27, 26)),
+            0) && ok;
+    ok = expect_equal(
+            "prefill_token_chunk_exact_topk_capacity",
+            uint64_t(DStorageSlotManager::calculate_prefill_token_chunk(27, 27)),
             1) && ok;
+    ok = expect_equal(
+            "prefill_minimum_pool_group_capacity",
+            uint64_t(DStorageSlotManager::calculate_prefill_pool_group_capacity({ 400, 240 }, 0)),
+            240) && ok;
+    ok = expect_equal(
+            "prefill_minimum_pool_group_capacity_after_speculative_reserve",
+            uint64_t(DStorageSlotManager::calculate_prefill_pool_group_capacity({ 400, 240 }, 64)),
+            216) && ok;
+    ok = expect_equal(
+            "prefill_pool_group_reserve_rejects_topk_starvation",
+            uint64_t(DStorageSlotManager::calculate_prefill_token_chunk(
+                    27,
+                    DStorageSlotManager::calculate_prefill_pool_group_capacity({ 100, 27 }, 64))),
+            0) && ok;
+    ok = expect_equal(
+            "prefill_preload_possible_speculative_reserve",
+            uint64_t(DStorageSlotManager::calculate_prefill_speculative_reserve(
+                    640, 27, false, true, false, false, 0)),
+            160) && ok;
+    ok = expect_equal(
+            "speculative_reserve_always_explicit_slots",
+            uint64_t(DStorageSlotManager::calculate_prefill_speculative_reserve(
+                    640, 27, false, false, true, true, 48)),
+            48) && ok;
+    ok = expect_equal(
+            "speculative_reserve_always_without_explicit_slots",
+            uint64_t(DStorageSlotManager::calculate_prefill_speculative_reserve(
+                    640, 27, false, true, true, false, 0)),
+            0) && ok;
+    ok = expect_equal(
+            "explicit_speculative_slots_without_policy_are_ignored",
+            uint64_t(DStorageSlotManager::calculate_prefill_speculative_reserve(
+                    640, 27, false, false, false, true, 48)),
+            0) && ok;
     ok = expect_equal(
             "max_prefill_workspace_experts",
             uint64_t(DStorageSlotManager::max_prefill_workspace_experts()),
@@ -101,6 +143,18 @@ int main() {
             "speculative_slots_default_off",
             uint64_t(DStorageSlotManager::calculate_speculative_slot_count(1039, 8)),
             0) && ok;
+    ok = expect_equal(
+            "speculative_reserve_disabled_by_default",
+            DStorageSlotManager::should_reserve_speculative(false, false) ? 1 : 0,
+            0) && ok;
+    ok = expect_equal(
+            "speculative_reserve_enabled",
+            DStorageSlotManager::should_reserve_speculative(true, false) ? 1 : 0,
+            1) && ok;
+    ok = expect_equal(
+            "speculative_reserve_always_overrides_temporary_disable",
+            DStorageSlotManager::should_reserve_speculative(false, true) ? 1 : 0,
+            1) && ok;
     set_test_env("LLAMA_DSTORAGE_SPECULATIVE_SLOTS", "16");
     ok = expect_equal(
             "speculative_slots_env",
@@ -175,6 +229,22 @@ int main() {
             polluted, 0, 0, 20, 40);
     ok = expect_equal("prefetch_pollution_penalty", polluted_score < near_score ? 1 : 0, 1) && ok;
 
+    // Next-use eviction: with equal use rates the layer that runs next is needed soonest and the layer that just ran
+    // is needed a full pass later; rarer experts are expected later still, never-seen ones last.
+    {
+        const double decay = 0.75;
+        const double every_pass = 1.0 / (1.0 - decay);
+        const double upcoming = DStorageSlotManager::calculate_expected_passes_to_next_use(every_pass, decay, 11, 10, 41);
+        const double just_ran = DStorageSlotManager::calculate_expected_passes_to_next_use(every_pass, decay, 9, 10, 41);
+        const double current = DStorageSlotManager::calculate_expected_passes_to_next_use(every_pass, decay, 10, 10, 41);
+        const double half_rate = DStorageSlotManager::calculate_expected_passes_to_next_use(0.5 * every_pass, decay, 11, 10, 41);
+        const double never = DStorageSlotManager::calculate_expected_passes_to_next_use(0.0, decay, 11, 10, 41);
+        ok = expect_equal("next_use_upcoming_before_just_ran", upcoming < just_ran ? 1 : 0, 1) && ok;
+        ok = expect_equal("next_use_current_layer_one_pass", current == 1.0 ? 1 : 0, 1) && ok;
+        ok = expect_equal("next_use_rate_dominates_layer", just_ran < half_rate ? 1 : 0, 1) && ok;
+        ok = expect_equal("next_use_never_seen_last", half_rate < never ? 1 : 0, 1) && ok;
+    }
+
     ExpertSlot arc_recent;
     arc_recent.layer_idx = 10;
     arc_recent.arc_segment = dstorage_arc_segment::recent;
@@ -230,6 +300,198 @@ int main() {
             "admission_protects",
             DStorageSlotManager::slot_is_protected(protected_slot) ? 1 : 0,
             1) && ok;
+    protected_slot.admission_pending = false;
+    protected_slot.transfer_quarantined = true;
+    ok = expect_equal(
+            "quarantined_transfer_protects",
+            DStorageSlotManager::slot_is_protected(protected_slot) ? 1 : 0,
+            1) && ok;
+
+    const int32_t learned_ids[] = { 2, 4 };
+    const int32_t invalid_learned_ids[] = { 2, 16 };
+    ok = expect_equal(
+            "learned_request_valid",
+            DStorageSlotManager::learned_prefetch_request_valid(learned_ids, 2, 16, true) ? 1 : 0,
+            1) && ok;
+    ok = expect_equal(
+            "learned_request_reject_invalid_id",
+            DStorageSlotManager::learned_prefetch_request_valid(invalid_learned_ids, 2, 16, true) ? 1 : 0,
+            0) && ok;
+    ok = expect_equal(
+            "learned_request_reject_cancelled",
+            DStorageSlotManager::learned_prefetch_request_valid(learned_ids, 2, 16, false) ? 1 : 0,
+            0) && ok;
+    ok = expect_equal(
+            "learned_request_max_four",
+            uint64_t(DStorageSlotManager::max_learned_prefetch_experts()),
+            4) && ok;
+
+    std::vector<ExpertSlot> learned_slots(3);
+    std::vector<uint8_t> speculative_compatible = { 1, 1, 0 };
+    ok = expect_equal(
+            "learned_free_speculative_capacity",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    2, learned_slots, speculative_compatible) ? 1 : 0,
+            1) && ok;
+    ok = expect_equal(
+            "learned_free_capacity_count",
+            DStorageSlotManager::learned_prefetch_available_slots(
+                    learned_slots, speculative_compatible),
+            2) && ok;
+    ok = expect_equal(
+            "learned_reject_demand_partition",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    3, learned_slots, speculative_compatible) ? 1 : 0,
+            0) && ok;
+    learned_slots[0].execution_pins = 1;
+    ok = expect_equal(
+            "learned_capacity_skips_execution_pin",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    2, learned_slots, speculative_compatible) ? 1 : 0,
+            0) && ok;
+    learned_slots[0].execution_pins = 0;
+    learned_slots[1].transfer_pending = true;
+    ok = expect_equal(
+            "learned_capacity_skips_transfer_pending",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    2, learned_slots, speculative_compatible) ? 1 : 0,
+            0) && ok;
+    learned_slots[1].transfer_pending = false;
+    learned_slots[1].admission_pending = true;
+    ok = expect_equal(
+            "learned_capacity_skips_admission_pending",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    2, learned_slots, speculative_compatible) ? 1 : 0,
+            0) && ok;
+    learned_slots[1].admission_pending = false;
+    learned_slots[1].transfer_quarantined = true;
+    ok = expect_equal(
+            "learned_capacity_skips_quarantined_transfer",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    2, learned_slots, speculative_compatible) ? 1 : 0,
+            0) && ok;
+    learned_slots[1].transfer_quarantined = false;
+    learned_slots[0].occupied = true;
+    learned_slots[1].occupied = true;
+    ok = expect_equal(
+            "learned_reject_full_cache",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, learned_slots, speculative_compatible) ? 1 : 0,
+            0) && ok;
+
+    ExpertSlot consumed_learned;
+    consumed_learned.layer_idx = 4;
+    consumed_learned.occupied = true;
+    consumed_learned.learned_prefetch = true;
+    consumed_learned.learned_prefetch_used = true;
+    consumed_learned.last_used_tick = 10;
+    std::vector<ExpertSlot> recyclable_slots = { consumed_learned };
+    std::vector<uint8_t> recyclable_compatible = { 1 };
+    ok = expect_equal(
+            "learned_recycle_consumed_unpinned",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, recyclable_compatible, 12) ? 1 : 0,
+            1) && ok;
+    ok = expect_equal(
+            "learned_recycled_capacity_count",
+            DStorageSlotManager::learned_prefetch_available_slots(
+                    recyclable_slots, recyclable_compatible, 12),
+            1) && ok;
+
+    recyclable_slots[0].learned_prefetch_used = false;
+    ok = expect_equal(
+            "learned_recycle_reject_unused",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, recyclable_compatible, 12) ? 1 : 0,
+            0) && ok;
+    recyclable_slots[0] = consumed_learned;
+    recyclable_slots[0].learned_prefetch = false;
+    ok = expect_equal(
+            "learned_recycle_reject_ordinary_entry",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, recyclable_compatible, 12) ? 1 : 0,
+            0) && ok;
+    recyclable_slots[0] = consumed_learned;
+    recyclable_slots[0].execution_pins = 1;
+    ok = expect_equal(
+            "learned_recycle_reject_execution_pin",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, recyclable_compatible, 12) ? 1 : 0,
+            0) && ok;
+    recyclable_slots[0] = consumed_learned;
+    recyclable_slots[0].transfer_pending = true;
+    ok = expect_equal(
+            "learned_recycle_reject_transfer_pending",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, recyclable_compatible, 12) ? 1 : 0,
+            0) && ok;
+    recyclable_slots[0] = consumed_learned;
+    recyclable_slots[0].transfer_quarantined = true;
+    ok = expect_equal(
+            "learned_recycle_reject_quarantined",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, recyclable_compatible, 12) ? 1 : 0,
+            0) && ok;
+    recyclable_slots[0] = consumed_learned;
+    recyclable_slots[0].admission_pending = true;
+    ok = expect_equal(
+            "learned_recycle_reject_admission_pending",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, recyclable_compatible, 12) ? 1 : 0,
+            0) && ok;
+    recyclable_slots[0] = consumed_learned;
+    ok = expect_equal(
+            "learned_recycle_reject_incompatible",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, std::vector<uint8_t>{ 0 }, 12) ? 1 : 0,
+            0) && ok;
+    ok = expect_equal(
+            "learned_recycle_reject_demand_partition",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1,
+                    recyclable_slots,
+                    std::vector<uint8_t>{ uint8_t(DStorageSlotManager::slot_in_speculative_partition(0, 2, 1)) },
+                    12) ? 1 : 0,
+            0) && ok;
+    recyclable_slots[0].layer_idx = 12;
+    ok = expect_equal(
+            "learned_recycle_reject_target_layer_guard",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, recyclable_compatible, 12) ? 1 : 0,
+            0) && ok;
+    recyclable_slots[0].layer_idx = 11;
+    ok = expect_equal(
+            "learned_recycle_reject_previous_layer_guard",
+            DStorageSlotManager::learned_prefetch_has_capacity(
+                    1, recyclable_slots, recyclable_compatible, 12) ? 1 : 0,
+            0) && ok;
+
+    DStorageSlotManager uninitialized_manager;
+    const auto cancelled_token = std::make_shared<std::atomic<bool>>(false);
+    const auto live_token = std::make_shared<std::atomic<bool>>(true);
+    ok = expect_equal(
+            "learned_api_rejects_null_token_without_gpu",
+            uninitialized_manager.prefetch_learned_experts_async(0, learned_ids, 2, nullptr) ? 1 : 0,
+            0) && ok;
+    ok = expect_equal(
+            "learned_api_rejects_cancelled_token_without_gpu",
+            uninitialized_manager.prefetch_learned_experts_async(0, learned_ids, 2, cancelled_token) ? 1 : 0,
+            0) && ok;
+    ok = expect_equal(
+            "learned_api_rejects_uninitialized_manager_without_gpu",
+            uninitialized_manager.prefetch_learned_experts_async(0, learned_ids, 2, live_token) ? 1 : 0,
+            0) && ok;
+    ok = expect_equal(
+            "learned_shadow_count_uninitialized",
+            uninitialized_manager.count_learned_nonresident(0, learned_ids, 2) == -1 ? 1 : 0,
+            1) && ok;
+    ok = expect_equal(
+            "learned_available_slots_uninitialized",
+            uninitialized_manager.learned_prefetch_available_slots(0),
+            0) && ok;
+    const auto learned_snapshot = uninitialized_manager.telemetry_snapshot();
+    ok = expect_equal("learned_rejected_snapshot", learned_snapshot.learned_prefetch_rejected, 3) && ok;
+    ok = expect_equal("learned_cancelled_snapshot", learned_snapshot.learned_prefetch_cancelled, 1) && ok;
 
     ok = expect_equal(
             "reject_low_confidence_prefetch",
